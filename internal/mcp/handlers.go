@@ -1,0 +1,330 @@
+package mcp
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+
+	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/traversal"
+	"github.com/nurozen/context-marmot/internal/verify"
+
+	"github.com/mark3labs/mcp-go/mcp"
+)
+
+// ---------------------------------------------------------------------------
+// context_query
+// ---------------------------------------------------------------------------
+
+// HandleContextQuery is the handler for the context_query MCP tool.
+// It embeds the query, searches the embedding index for entry nodes,
+// traverses the graph from those nodes, and returns compacted XML.
+func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query := req.GetString("query", "")
+	if query == "" {
+		return mcp.NewToolResultError("query parameter is required"), nil
+	}
+
+	depth := req.GetInt("depth", 2)
+	if depth < 0 || depth > 10 {
+		depth = 2
+	}
+	budget := req.GetInt("budget", 4096)
+	if budget < 0 || budget > 100000 {
+		budget = 4096
+	}
+	mode := req.GetString("mode", "adjacency")
+
+	// Step 1: Embed the query.
+	queryVec, err := e.Embedder.Embed(query)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("embed query: %v", err)), nil
+	}
+
+	// Step 2: Search embedding index for top-k entry nodes.
+	topK := 5
+	results, err := e.EmbeddingStore.Search(queryVec, topK, e.Embedder.Model())
+	if err != nil {
+		// If model mismatch or empty store, return empty result gracefully.
+		emptyXML := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
+		return mcp.NewToolResultText(emptyXML), nil
+	}
+
+	entryIDs := make([]string, 0, len(results))
+	for _, r := range results {
+		entryIDs = append(entryIDs, r.NodeID)
+	}
+
+	if len(entryIDs) == 0 {
+		emptyXML := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
+		return mcp.NewToolResultText(emptyXML), nil
+	}
+
+	// Step 3: Traverse graph from entry nodes.
+	cfg := traversal.TraversalConfig{
+		EntryIDs:    entryIDs,
+		MaxDepth:    depth,
+		TokenBudget: budget,
+		Mode:        mode,
+	}
+	subgraph := traversal.Traverse(e.Graph, cfg)
+
+	// Step 4: Compact into XML.
+	compacted := traversal.Compact(e.Graph, subgraph, budget)
+
+	return mcp.NewToolResultText(compacted.XML), nil
+}
+
+// ---------------------------------------------------------------------------
+// context_write
+// ---------------------------------------------------------------------------
+
+// WriteEdgeInput is the JSON schema for an edge in context_write input.
+type WriteEdgeInput struct {
+	Target   string `json:"target"`
+	Relation string `json:"relation"`
+}
+
+// WriteSourceInput is the JSON schema for a source reference in context_write input.
+type WriteSourceInput struct {
+	Path  string `json:"path,omitempty"`
+	Lines []int  `json:"lines,omitempty"`
+	Hash  string `json:"hash,omitempty"`
+}
+
+// WriteResult is the JSON response from context_write.
+type WriteResult struct {
+	NodeID string `json:"node_id"`
+	Hash   string `json:"hash"`
+	Status string `json:"status"`
+}
+
+// HandleContextWrite is the handler for the context_write MCP tool.
+// It constructs a Node, validates structural acyclicity, persists via the
+// node store, and updates the embedding index.
+func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+
+	id := req.GetString("id", "")
+	if id == "" {
+		return mcp.NewToolResultError("id parameter is required"), nil
+	}
+	if err := node.ValidateNodeID(id); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil
+	}
+	nodeType := req.GetString("type", "concept")
+	namespace := req.GetString("namespace", "default")
+	summary := req.GetString("summary", "")
+	ctx := req.GetString("context", "")
+
+	// Parse edges.
+	var edges []node.Edge
+	if rawEdges, ok := args["edges"]; ok {
+		edgeBytes, err := json.Marshal(rawEdges)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid edges: %v", err)), nil
+		}
+		var inputEdges []WriteEdgeInput
+		if err := json.Unmarshal(edgeBytes, &inputEdges); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid edges: %v", err)), nil
+		}
+		for _, ie := range inputEdges {
+			if ie.Target == "" {
+				return mcp.NewToolResultError("edge target must not be empty"), nil
+			}
+			if ie.Relation == "" {
+				return mcp.NewToolResultError("edge relation must not be empty"), nil
+			}
+			edges = append(edges, node.Edge{
+				Target:   ie.Target,
+				Relation: node.EdgeRelation(ie.Relation),
+				Class:    node.ClassifyRelation(ie.Relation),
+			})
+		}
+	}
+
+	// Parse source.
+	var source node.Source
+	if rawSource, ok := args["source"]; ok {
+		srcBytes, err := json.Marshal(rawSource)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid source: %v", err)), nil
+		}
+		var inputSource WriteSourceInput
+		if err := json.Unmarshal(srcBytes, &inputSource); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid source: %v", err)), nil
+		}
+		source.Path = inputSource.Path
+		source.Hash = inputSource.Hash
+		if len(inputSource.Lines) >= 2 {
+			source.Lines = [2]int{inputSource.Lines[0], inputSource.Lines[1]}
+		}
+	}
+
+	// Construct node.
+	n := &node.Node{
+		ID:        id,
+		Type:      nodeType,
+		Namespace: namespace,
+		Status:    "active",
+		Source:    source,
+		Edges:     edges,
+		Summary:   summary,
+		Context:   ctx,
+	}
+
+	// Validate structural acyclicity using read-only cycle check.
+	// This avoids mutating the graph during validation, preventing race
+	// conditions with concurrent requests.
+	for _, edge := range edges {
+		if edge.Class == node.Structural {
+			if e.Graph.WouldCreateCycle(id, edge.Target) {
+				return mcp.NewToolResultError(fmt.Sprintf(
+					"structural cycle detected: edge %s -> %s would create a cycle",
+					id, edge.Target)), nil
+			}
+		}
+	}
+
+	// Upsert node into graph.
+	if err := e.Graph.UpsertNode(n); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("graph upsert: %v", err)), nil
+	}
+
+	// Persist to disk via node store.
+	if err := e.NodeStore.SaveNode(n); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("save node: %v", err)), nil
+	}
+
+	// Update embedding index.
+	if summary != "" {
+		vec, err := e.Embedder.Embed(summary)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("embed summary: %v", err)), nil
+		}
+		summaryHash := sha256Hex(summary)
+		if err := e.EmbeddingStore.Upsert(id, vec, summaryHash, e.Embedder.Model()); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("upsert embedding: %v", err)), nil
+		}
+	}
+
+	// Compute node content hash for the response.
+	nodeHash := verify.ComputeNodeHash(n)
+
+	result := WriteResult{
+		NodeID: id,
+		Hash:   nodeHash,
+		Status: "created",
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+// ---------------------------------------------------------------------------
+// context_verify
+// ---------------------------------------------------------------------------
+
+// VerifyIssue is a single issue in the verify response.
+type VerifyIssue struct {
+	NodeID    string `json:"node_id"`
+	Type      string `json:"type"`
+	Message   string `json:"message"`
+	Severity  string `json:"severity"`
+}
+
+// VerifyResult is the JSON response from context_verify.
+type VerifyResult struct {
+	Issues []VerifyIssue `json:"issues"`
+	Total  int           `json:"total"`
+}
+
+// HandleContextVerify is the handler for the context_verify MCP tool.
+// It runs integrity and/or staleness checks on requested nodes.
+func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	check := req.GetString("check", "all")
+
+	// Parse node_ids.
+	var nodeIDs []string
+	args := req.GetArguments()
+	if rawIDs, ok := args["node_ids"]; ok {
+		idsBytes, err := json.Marshal(rawIDs)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid node_ids: %v", err)), nil
+		}
+		if err := json.Unmarshal(idsBytes, &nodeIDs); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid node_ids: %v", err)), nil
+		}
+	}
+
+	// Collect the nodes to verify.
+	var nodes []*node.Node
+	if len(nodeIDs) == 0 {
+		// Verify all nodes in the graph.
+		nodes = e.Graph.AllNodes()
+	} else {
+		for _, id := range nodeIDs {
+			if n, ok := e.Graph.GetNode(id); ok {
+				nodes = append(nodes, n)
+			}
+		}
+	}
+
+	var issues []VerifyIssue
+
+	// Run integrity check (dangling edges, structural cycles).
+	if check == "integrity" || check == "all" {
+		integrityIssues := verify.VerifyIntegrity(nodes)
+		for _, ii := range integrityIssues {
+			issues = append(issues, VerifyIssue{
+				NodeID:   ii.NodeID,
+				Type:     string(ii.IssueType),
+				Message:  ii.Message,
+				Severity: string(ii.Severity),
+			})
+		}
+	}
+
+	// Run staleness check.
+	if check == "staleness" || check == "all" {
+		for _, n := range nodes {
+			if n.Source.Path == "" {
+				continue
+			}
+			status, err := verify.VerifyStaleness(n)
+			if err != nil {
+				issues = append(issues, VerifyIssue{
+					NodeID:   n.ID,
+					Type:     "staleness_error",
+					Message:  err.Error(),
+					Severity: "warning",
+				})
+				continue
+			}
+			if status.IsStale {
+				issues = append(issues, VerifyIssue{
+					NodeID:   n.ID,
+					Type:     "stale",
+					Message:  fmt.Sprintf("source hash mismatch: stored=%s current=%s", status.StoredHash, status.CurrentHash),
+					Severity: "warning",
+				})
+			}
+		}
+	}
+
+	result := VerifyResult{
+		Issues: issues,
+		Total:  len(issues),
+	}
+	if result.Issues == nil {
+		result.Issues = []VerifyIssue{}
+	}
+
+	return mcp.NewToolResultJSON(result)
+}
+
+// sha256Hex returns the hex-encoded SHA-256 hash of s.
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
