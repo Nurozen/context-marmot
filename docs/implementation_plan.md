@@ -4,10 +4,11 @@
 
 - **Core Engine**: Go
   - SQLite driver: `ncruces/go-sqlite3` (WASM, zero CGo)
-  - sqlite-vec: `asg017/sqlite-vec-go-bindings/ncruces`
+  - KNN search: Go-side L2 distance with max-heap (sqlite-vec ABI incompatible — see notes)
   - MCP SDK: `mark3labs/mcp-go` v0.46.0 (well-established, stdio transport)
+  - Embedding providers: OpenAI API (net/http, no SDK) + Mock (trigram hashing)
   - Anthropic SDK: `anthropics/anthropic-sdk-go` (for post-MVP LLM features)
-- **Embedding Index**: SQLite + sqlite-vec
+- **Embedding Index**: SQLite (Go-side KNN search)
 - **LLM Provider**: Anthropic (Haiku-class for CRUD classification + summary generation)
 - **Visualization (initial)**: Obsidian (open `.marmot/` as vault — zero integration needed)
 - **Visualization (future)**: TypeScript + Vite web UI (Phase 19), consumes REST/WebSocket API
@@ -47,13 +48,17 @@ Benchmark: agent with ContextMarmot vs agent without, measured on:
 
 ## MVP Status: COMPLETE (2026-03-31)
 
-All M1-M7 phases implemented and tested. 147 tests passing (139 unit + 8 integration).
+All M1-M7 phases implemented and tested. 156 tests passing (148 unit + 8 integration) across 8 packages.
 Production hardened with path traversal protection, input validation, and race-safe operations.
 
 **Implementation notes:**
 - sqlite-vec Go bindings have a WASM ABI mismatch with ncruces v0.17.1 — embedding search uses Go-side KNN (L2 distance with max-heap) instead. Upgradable when bindings are fixed.
 - MCP SDK: used `mark3labs/mcp-go` (official Go SDK import paths were unstable at time of implementation).
-- MockEmbedder used for MVP (trigram hashing, 1536-dim vectors). Real embedding provider (OpenAI/Anthropic) is a post-MVP integration.
+- Pluggable embedding providers: OpenAI (`text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`) and Mock (trigram hashing). Config-driven selection via `_config.md` frontmatter with env var API keys and graceful fallback to mock.
+- `internal/config` package provides vault config parsing (`_config.md`) and embedder factory (`NewEmbedderFromVault`).
+- Batch embedding via `EmbedBatch()` for efficient indexing (OpenAI chunks at 100 inputs).
+- Variable embedding dimensions supported per-namespace (1536 for small/ada, 3072 for large).
+- `marmot index --force` rebuilds all embeddings (required after provider/model change).
 
 ---
 
@@ -70,125 +75,129 @@ Production hardened with path traversal protection, input validation, and race-s
 The file I/O layer. Reads/writes/parses Obsidian-compatible markdown node files.
 MVP omits temporal fields — all nodes are `status: active`.
 
-- [ ] Define structs: `Node`, `Edge`, `Source`, `Provenance`
-  - [ ] `Edge` includes `Class` field (structural / behavioral)
-- [ ] Implement markdown parser
-  - [ ] Parse YAML frontmatter into `Node` struct (including `edges` array)
-  - [ ] Parse markdown body to extract summary text (content before first `##` heading)
-  - [ ] Parse `## Context` section for full context content
-  - [ ] Extract `[[wikilinks]]` from body (for validation against frontmatter edges)
-- [ ] Implement markdown writer (struct -> Obsidian-compatible markdown file)
-  - [ ] Render YAML frontmatter from struct fields
-  - [ ] Render summary as plain markdown paragraph
-  - [ ] Generate `## Relationships` section with `[[wikilinks]]` from frontmatter edges
-  - [ ] Render `## Context` section with fenced code blocks
-- [ ] Implement atomic file writes (temp file + rename)
-- [ ] Implement file operations
-  - [ ] `LoadNode(path) -> Node`
-  - [ ] `SaveNode(node, path) -> error` (atomic)
-  - [ ] `DeleteNode(path) -> error`
-  - [ ] `ListNodes(namespace_path) -> []NodeMeta` (lightweight, frontmatter only)
-- [ ] Implement ID derivation from file path (`project-alpha/auth/login.md` -> `auth/login`)
-- [ ] Write unit tests for parse/write roundtrip
-- [ ] Write unit tests for malformed/edge-case files
-- [ ] Verify output files render correctly in Obsidian (manual smoke test)
+- [x] Define structs: `Node`, `Edge`, `Source`, `Provenance`
+  - [x] `Edge` includes `Class` field (structural / behavioral)
+- [x] Implement markdown parser
+  - [x] Parse YAML frontmatter into `Node` struct (including `edges` array)
+  - [x] Parse markdown body to extract summary text (content before first `##` heading)
+  - [x] Parse `## Context` section for full context content
+  - [x] Extract `[[wikilinks]]` from body (for validation against frontmatter edges)
+- [x] Implement markdown writer (struct -> Obsidian-compatible markdown file)
+  - [x] Render YAML frontmatter from struct fields
+  - [x] Render summary as plain markdown paragraph
+  - [x] Generate `## Relationships` section with `[[wikilinks]]` from frontmatter edges
+  - [x] Render `## Context` section with fenced code blocks
+- [x] Implement atomic file writes (temp file + rename)
+- [x] Implement file operations
+  - [x] `LoadNode(path) -> Node`
+  - [x] `SaveNode(node, path) -> error` (atomic)
+  - [x] `DeleteNode(path) -> error`
+  - [x] `ListNodes(namespace_path) -> []NodeMeta` (lightweight, frontmatter only)
+- [x] Implement ID derivation from file path (`project-alpha/auth/login.md` -> `auth/login`)
+- [x] Write unit tests for parse/write roundtrip
+- [x] Write unit tests for malformed/edge-case files
+- [x] Verify output files render correctly in Obsidian (manual smoke test)
 
 ## Phase M3: Graph Manager
 
 In-memory graph engine. Loads from node store, maintains adjacency lists.
 Enforces structural acyclicity only — behavioral cycles allowed.
 
-- [ ] Define `Graph` struct (adjacency list, reverse adjacency, node index)
-- [ ] Implement `LoadGraph(namespace_path) -> Graph` (bulk load all nodes)
-- [ ] Implement `AddNode(node) -> error` (insert into graph)
-- [ ] Implement `RemoveNode(id) -> error` (remove + cascade edge cleanup)
-- [ ] Implement `AddEdge(source, target, relation) -> error`
-  - [ ] Classify edge as structural or behavioral based on relation type
-  - [ ] Run acyclicity check only for structural edges
-- [ ] Implement `RemoveEdge(source, target) -> error`
-- [ ] Implement `GetNode(id) -> Node`
-- [ ] Implement `GetEdges(id, direction) -> []Edge` (outbound / inbound)
-- [ ] Implement `GetNeighbors(id, depth) -> []Node`
-- [ ] Write unit tests for graph operations
-- [ ] Write unit tests for structural cycles (rejected) vs behavioral cycles (allowed)
-- [ ] Write benchmarks for load time + traversal on synthetic graphs
+- [x] Define `Graph` struct (adjacency list, reverse adjacency, node index)
+- [x] Implement `LoadGraph(namespace_path) -> Graph` (bulk load all nodes)
+- [x] Implement `AddNode(node) -> error` (insert into graph)
+- [x] Implement `RemoveNode(id) -> error` (remove + cascade edge cleanup)
+- [x] Implement `AddEdge(source, target, relation) -> error`
+  - [x] Classify edge as structural or behavioral based on relation type
+  - [x] Run acyclicity check only for structural edges
+- [x] Implement `RemoveEdge(source, target) -> error`
+- [x] Implement `GetNode(id) -> Node`
+- [x] Implement `GetEdges(id, direction) -> []Edge` (outbound / inbound)
+- [x] Implement `GetNeighbors(id, depth) -> []Node`
+- [x] Write unit tests for graph operations
+- [x] Write unit tests for structural cycles (rejected) vs behavioral cycles (allowed)
+- [x] Write benchmarks for load time + traversal on synthetic graphs
 
 ## Phase M4: Verifier
 
 Structural acyclicity enforcement + hash-based integrity checking.
 
-- [ ] Implement topological sort for structural cycle detection
-- [ ] Implement `CheckStructuralAcyclicity(graph, proposed_edge) -> (bool, []string)` (returns cycle path if found; skips behavioral edges)
-- [ ] Implement `ComputeNodeHash(node) -> string` (SHA-256 of content)
-- [ ] Implement `ComputeSourceHash(source_path, lines) -> string`
-- [ ] Implement `VerifyStaleness(node) -> StaleStatus` (compare stored vs current source hash)
-- [ ] Implement `VerifyIntegrity(graph) -> []IntegrityIssue` (dangling edges, hash mismatches, structural cycles)
-- [ ] Integrate structural acyclicity check into `Graph.AddEdge()` (reject structural cycles only)
-- [ ] Write unit tests for cycle detection (various graph topologies, mixed edge classes)
-- [ ] Write unit tests for staleness detection
+- [x] Implement topological sort for structural cycle detection
+- [x] Implement `CheckStructuralAcyclicity(graph, proposed_edge) -> (bool, []string)` (returns cycle path if found; skips behavioral edges)
+- [x] Implement `ComputeNodeHash(node) -> string` (SHA-256 of content)
+- [x] Implement `ComputeSourceHash(source_path, lines) -> string`
+- [x] Implement `VerifyStaleness(node) -> StaleStatus` (compare stored vs current source hash)
+- [x] Implement `VerifyIntegrity(graph) -> []IntegrityIssue` (dangling edges, hash mismatches, structural cycles)
+- [x] Integrate structural acyclicity check into `Graph.AddEdge()` (reject structural cycles only)
+- [x] Write unit tests for cycle detection (various graph topologies, mixed edge classes)
+- [x] Write unit tests for staleness detection
 
 ## Phase M5: Embedding Index
 
 SQLite + sqlite-vec for semantic search. Decay-agnostic.
 
-- [ ] Set up native bindings for sqlite-vec
-- [ ] Define `EmbeddingStore` interface
-- [ ] Implement SQLite schema initialization (create tables on first run, including `model` column)
-- [ ] Implement `Upsert(node_id, embedding, summary_hash, model) -> error`
-- [ ] Implement `Search(query_embedding, top_k) -> []ScoredNodeID` (rejects cross-model queries)
-- [ ] Implement `Delete(node_id) -> error`
-- [ ] Implement `StaleCheck(node_id, current_hash) -> bool`
-- [ ] Define `Embedder` interface (abstract over embedding provider)
-- [ ] Implement OpenAI `text-embedding-3-small` embedder (or Anthropic equivalent)
-- [ ] Implement embedding caching (skip re-embed if summary unchanged)
-- [ ] Write integration tests with in-memory SQLite
-- [ ] Write benchmarks for search at various collection sizes
+- [x] Set up SQLite store (sqlite-vec bindings incompatible — Go-side KNN used instead)
+- [x] Define `EmbeddingStore` interface
+- [x] Implement SQLite schema initialization (create tables on first run, including `model` column)
+- [x] Implement `Upsert(node_id, embedding, summary_hash, model) -> error`
+- [x] Implement `Search(query_embedding, top_k) -> []ScoredNodeID` (rejects cross-model queries)
+- [x] Implement `Delete(node_id) -> error`
+- [x] Implement `StaleCheck(node_id, current_hash) -> bool`
+- [x] Define `Embedder` interface (abstract over embedding provider)
+- [x] Implement OpenAI embedder (`text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`)
+- [x] Implement Mock embedder (trigram hashing, 1536-dim, zero dependencies)
+- [x] Implement `EmbedBatch()` for efficient bulk indexing (OpenAI chunks at 100)
+- [x] Implement embedding caching (skip re-embed if summary unchanged)
+- [x] Write integration tests with in-memory SQLite
+- [x] Write benchmarks for search at various collection sizes
 
 ## Phase M6: Graph Traversal + Compaction
 
 BFS/DFS expansion + token-budget-aware compaction into XML output.
 
-- [ ] Define `TraversalConfig` (depth, budget, mode)
-- [ ] Implement `Traverse(entry_nodes, config) -> Subgraph`
-- [ ] Implement token budget tracking (chars/4 heuristic, documented approximation)
-- [ ] Implement frontier expansion with priority queue
-- [ ] Implement depth limiting
-- [ ] Define `CompactedResult` struct
-- [ ] Implement adjacency compaction (shallow mode)
-  - [ ] Full `<node>` for entry/high-relevance nodes (includes context)
-  - [ ] `<node_compact>` for adjacent nodes (summary + source ref only)
-  - [ ] `<truncated>` section listing over-budget node IDs
-- [ ] Implement XML serialization with proper entity escaping
-- [ ] Implement relevance scoring for node ranking within result
-- [ ] Write unit tests for traversal with various budgets and depths
-- [ ] Write unit tests for compaction output format
-- [ ] Verify XML output is well-formed and parseable
+- [x] Define `TraversalConfig` (depth, budget, mode)
+- [x] Implement `Traverse(entry_nodes, config) -> Subgraph`
+- [x] Implement token budget tracking (chars/4 heuristic, documented approximation)
+- [x] Implement frontier expansion with priority queue
+- [x] Implement depth limiting
+- [x] Define `CompactedResult` struct
+- [x] Implement adjacency compaction (shallow mode)
+  - [x] Full `<node>` for entry/high-relevance nodes (includes context)
+  - [x] `<node_compact>` for adjacent nodes (summary + source ref only)
+  - [x] `<truncated>` section listing over-budget node IDs
+- [x] Implement XML serialization with proper entity escaping
+- [x] Implement relevance scoring for node ranking within result
+- [x] Write unit tests for traversal with various budgets and depths
+- [x] Write unit tests for compaction output format
+- [x] Verify XML output is well-formed and parseable
 
 ## Phase M7: MCP Server + CLI
 
 Minimal MCP server and CLI to enable agent testing.
 
-- [ ] Set up MCP server framework
-- [ ] Implement `context_query` tool handler
-  - [ ] Parse parameters (query, depth, budget, namespace, mode)
-  - [ ] Route to semantic search -> traversal -> compaction pipeline
-  - [ ] Return XML compacted result
-- [ ] Implement `context_write` tool handler (simple upsert, no CRUD classification in MVP)
-  - [ ] Parse parameters (id, type, namespace, summary, context, edges, source)
-  - [ ] Validate structural acyclicity
-  - [ ] Write Obsidian-compatible node via node store
-  - [ ] Update embedding index
-  - [ ] Return confirmation with hash
-- [ ] Implement `context_verify` tool handler
-  - [ ] Parse parameters (node_ids, namespace, check)
-  - [ ] Route to verifier (staleness / integrity / all)
-  - [ ] Return verification report
-- [ ] Implement tool discovery (`tools/list`)
-- [ ] Set up CLI framework
-- [ ] Implement `marmot init` — initialize `.marmot/` vault structure
-- [ ] Implement `marmot query <query>` — run a context query and print XML result
-- [ ] Implement `marmot serve` — start MCP server
-- [ ] Write integration tests for full query/write/verify flows
+- [x] Set up MCP server framework
+- [x] Implement `context_query` tool handler
+  - [x] Parse parameters (query, depth, budget, namespace, mode)
+  - [x] Route to semantic search -> traversal -> compaction pipeline
+  - [x] Return XML compacted result
+- [x] Implement `context_write` tool handler (simple upsert, no CRUD classification in MVP)
+  - [x] Parse parameters (id, type, namespace, summary, context, edges, source)
+  - [x] Validate structural acyclicity
+  - [x] Write Obsidian-compatible node via node store
+  - [x] Update embedding index
+  - [x] Return confirmation with hash
+- [x] Implement `context_verify` tool handler
+  - [x] Parse parameters (node_ids, namespace, check)
+  - [x] Route to verifier (staleness / integrity / all)
+  - [x] Return verification report
+- [x] Implement tool discovery (`tools/list`)
+- [x] Set up CLI framework
+- [x] Implement `marmot init` — initialize `.marmot/` vault structure
+- [x] Implement `marmot index` — index node files into embedding store (`--force` to rebuild)
+- [x] Implement `marmot query <query>` — run a context query and print XML result
+- [x] Implement `marmot verify` — run integrity/staleness checks
+- [x] Implement `marmot serve` — start MCP server
+- [x] Write integration tests for full query/write/verify flows
 - [ ] **Benchmark: test with Claude Code as MCP client, measure vs vanilla file reading**
 
 ---
@@ -251,8 +260,8 @@ Project isolation + cross-namespace references.
 - [ ] Implement `ValidateCrossNamespaceEdge(edge, bridges) -> error` (check relation in whitelist)
 - [ ] Auto-discover cross-namespace edges by scanning node files
 - [ ] Implement `ListNamespaces(marmot_root) -> []Namespace`
-- [ ] Define `Config` struct (global config)
-- [ ] Implement global config parsing (`_config.md` YAML frontmatter)
+- [x] Define `Config` struct (global config) — `internal/config/config.go`
+- [x] Implement global config parsing (`_config.md` YAML frontmatter) — `internal/config/config.go`
 - [ ] Write unit tests for namespace resolution and bridge validation
 
 ## Phase 12: Heat Map
@@ -290,11 +299,11 @@ Co-access frequency tracking. Decay affects traversal priority only.
 
 ## Phase 14: Embedding Model Management
 
-- [ ] Store `model` field per embedding in SQLite
-- [ ] Reject cross-model similarity queries
-- [ ] Implement `marmot reembed --namespace <ns>` command (regenerate all embeddings)
-- [ ] Handle namespace config `embedding_model` changes gracefully (warn + require reembed)
-- [ ] Write tests for model mismatch detection and migration
+- [x] Store `model` field per embedding in SQLite
+- [x] Reject cross-model similarity queries
+- [x] Implement `marmot index --force` (regenerate all embeddings — serves as reembed)
+- [x] Handle config `embedding_model` changes gracefully (warn + require `--force` reindex)
+- [x] Write tests for model mismatch detection and migration
 
 ## Phase 15: Full CLI
 
