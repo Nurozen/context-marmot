@@ -92,13 +92,48 @@ func deserializeFloat32(data []byte) ([]float32, error) {
 	return result, nil
 }
 
+// StoredDimension returns the dimension of existing embeddings in the store.
+// Returns 0 if the store is empty.
+func (s *Store) StoredDimension() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.storedDimensionLocked()
+}
+
+// storedDimensionLocked returns the dimension of existing embeddings (caller must hold mu).
+func (s *Store) storedDimensionLocked() (int, error) {
+	stmt, _, err := s.db.Prepare(`SELECT embedding FROM embeddings LIMIT 1`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare stored dimension: %w", err)
+	}
+	defer stmt.Close()
+
+	if !stmt.Step() {
+		return 0, nil // empty store
+	}
+	blob := stmt.ColumnRawBlob(0)
+	if len(blob)%4 != 0 {
+		return 0, fmt.Errorf("stored embedding has invalid size %d", len(blob))
+	}
+	return len(blob) / 4, nil
+}
+
 // Upsert inserts or updates the embedding for a node.
 func (s *Store) Upsert(nodeID string, embedding []float32, summaryHash string, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(embedding) != Dimension {
-		return fmt.Errorf("embedding dimension mismatch: got %d, want %d", len(embedding), Dimension)
+	if len(embedding) == 0 {
+		return fmt.Errorf("embedding must not be empty")
+	}
+
+	// Validate dimension consistency: all embeddings in the store must share the same dimension.
+	storedDim, err := s.storedDimensionLocked()
+	if err != nil {
+		return fmt.Errorf("check stored dimension: %w", err)
+	}
+	if storedDim > 0 && len(embedding) != storedDim {
+		return fmt.Errorf("embedding dimension mismatch: got %d, want %d (matching existing embeddings)", len(embedding), storedDim)
 	}
 
 	blob, err := serializeFloat32(embedding)
@@ -138,8 +173,13 @@ func (s *Store) Search(queryEmbedding []float32, topK int, model string) ([]Scor
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(queryEmbedding) != Dimension {
-		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, want %d", len(queryEmbedding), Dimension)
+	// Validate query dimension matches stored embeddings.
+	storedDim, err := s.storedDimensionLocked()
+	if err != nil {
+		return nil, fmt.Errorf("check stored dimension: %w", err)
+	}
+	if storedDim > 0 && len(queryEmbedding) != storedDim {
+		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, want %d", len(queryEmbedding), storedDim)
 	}
 
 	// Check that there are embeddings and they use the same model.

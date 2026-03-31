@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
@@ -14,8 +15,18 @@ import (
 	"github.com/nurozen/context-marmot/internal/verify"
 )
 
+// loadEmbedder reads vault config and creates the appropriate embedder.
+func loadEmbedder(dir string) (embedding.Embedder, error) {
+	cfg, err := config.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	return config.NewEmbedderFromVault(cfg)
+}
+
 // runIndexPipeline indexes all node files into the embedding store.
-func runIndexPipeline(dir string) error {
+// If force is true, clears existing embeddings and re-indexes everything.
+func runIndexPipeline(dir string, force bool) error {
 	store := node.NewStore(dir)
 	metas, err := store.ListNodes()
 	if err != nil {
@@ -28,15 +39,28 @@ func runIndexPipeline(dir string) error {
 	}
 
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+	if force {
+		// Remove existing embeddings DB to start fresh (model may have changed).
+		_ = os.Remove(dbPath)
+	}
+
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
 	}
 	defer embStore.Close()
 
-	embedder := embedding.NewMockEmbedder("mock-v1")
+	embedder, err := loadEmbedder(dir)
+	if err != nil {
+		return err
+	}
 
-	indexed := 0
+	// Collect summaries for batch embedding.
+	type nodeText struct {
+		meta node.NodeMeta
+		text string
+	}
+	var batch []nodeText
 	for _, m := range metas {
 		path := store.NodePath(m.ID)
 		n, err := store.LoadNode(path)
@@ -44,21 +68,43 @@ func runIndexPipeline(dir string) error {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", m.ID, err)
 			continue
 		}
-
-		// Embed the node's summary.
 		text := n.Summary
 		if text == "" {
 			text = n.ID
 		}
-		vec, err := embedder.Embed(text)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: embed %s: %v\n", n.ID, err)
-			continue
+
+		// Skip if not force and hash hasn't changed.
+		if !force {
+			summaryHash := fmt.Sprintf("%x", text)
+			stale, err := embStore.StaleCheck(n.ID, summaryHash)
+			if err == nil && !stale {
+				continue
+			}
 		}
 
-		summaryHash := fmt.Sprintf("%x", text)
-		if err := embStore.Upsert(n.ID, vec, summaryHash, embedder.Model()); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: upsert %s: %v\n", n.ID, err)
+		batch = append(batch, nodeText{meta: node.NodeMeta{ID: n.ID}, text: text})
+	}
+
+	if len(batch) == 0 {
+		fmt.Println("All nodes up to date. Nothing to index.")
+		return nil
+	}
+
+	// Batch embed.
+	texts := make([]string, len(batch))
+	for i, b := range batch {
+		texts[i] = b.text
+	}
+	vectors, err := embedder.EmbedBatch(texts)
+	if err != nil {
+		return fmt.Errorf("batch embed: %w", err)
+	}
+
+	indexed := 0
+	for i, b := range batch {
+		summaryHash := fmt.Sprintf("%x", b.text)
+		if err := embStore.Upsert(b.meta.ID, vectors[i], summaryHash, embedder.Model()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: upsert %s: %v\n", b.meta.ID, err)
 			continue
 		}
 		indexed++
@@ -92,8 +138,11 @@ func runQueryPipeline(dir, query string, depth, budget int) error {
 	}
 	defer embStore.Close()
 
-	// 3. Create mock embedder and embed the query.
-	embedder := embedding.NewMockEmbedder("mock-v1")
+	// 3. Create embedder from config and embed the query.
+	embedder, err := loadEmbedder(dir)
+	if err != nil {
+		return err
+	}
 	queryVec, err := embedder.Embed(query)
 	if err != nil {
 		return fmt.Errorf("embed query: %w", err)
@@ -138,7 +187,10 @@ func runQueryPipeline(dir, query string, depth, budget int) error {
 
 // runServePipeline starts the MCP server on stdio.
 func runServePipeline(dir string) error {
-	embedder := embedding.NewMockEmbedder("mock-v1")
+	embedder, err := loadEmbedder(dir)
+	if err != nil {
+		return err
+	}
 	engine, err := mcpserver.NewEngine(dir, embedder)
 	if err != nil {
 		return fmt.Errorf("create engine: %w", err)

@@ -300,8 +300,8 @@ func TestMockEmbedderDimension(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(vec) != Dimension {
-		t.Errorf("expected dimension %d, got %d", Dimension, len(vec))
+	if len(vec) != emb.Dimension() {
+		t.Errorf("expected dimension %d, got %d", emb.Dimension(), len(vec))
 	}
 }
 
@@ -352,18 +352,31 @@ func TestSearchTopKLimit(t *testing.T) {
 
 func TestDimensionMismatch(t *testing.T) {
 	store := newTestStore(t)
+	emb := NewMockEmbedder("test-model")
 
-	// Wrong dimension on upsert.
+	// Insert a valid embedding first to establish the store's dimension.
+	vec, _ := emb.Embed("establish dimension")
+	if err := store.Upsert("good", vec, "hash", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wrong dimension on upsert (mismatched with stored dimension).
 	short := make([]float32, 100)
-	err := store.Upsert("bad", short, "hash", "model")
+	err := store.Upsert("bad", short, "hash", "test-model")
 	if err == nil {
 		t.Error("expected error for wrong dimension on upsert")
 	}
 
 	// Wrong dimension on search.
-	_, err = store.Search(short, 5, "model")
+	_, err = store.Search(short, 5, "test-model")
 	if err == nil {
 		t.Error("expected error for wrong dimension on search")
+	}
+
+	// Empty embedding should also fail.
+	err = store.Upsert("empty", nil, "hash", "test-model")
+	if err == nil {
+		t.Error("expected error for empty embedding on upsert")
 	}
 }
 

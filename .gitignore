@@ -35,3 +35,5 @@ Thumbs.db
 # Coverage
 coverage.out
 coverage.html
+testdata/
+test_rig/

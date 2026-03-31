@@ -95,11 +95,14 @@ func runInit(dir string) error {
 	configContent := `---
 version: "1"
 namespace: default
-embedding_model: mock
+embedding_provider: mock
+embedding_model: ""
 ---
 # ContextMarmot Vault
 
 This is the root configuration for a ContextMarmot vault.
+# To use OpenAI embeddings, set embedding_provider to "openai"
+# and set OPENAI_API_KEY in your environment.
 `
 	if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(configContent), 0o644); err != nil {
 		return fmt.Errorf("write _config.md: %w", err)
@@ -121,23 +124,24 @@ This is the root configuration for a ContextMarmot vault.
 func cmdIndex(args []string) int {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	force := fs.Bool("force", false, "clear and rebuild all embeddings (use after changing embedding provider)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
 
-	if err := runIndex(*dir); err != nil {
+	if err := runIndex(*dir, *force); err != nil {
 		fmt.Fprintf(os.Stderr, "index: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func runIndex(dir string) error {
+func runIndex(dir string, force bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
 	}
 
-	return runIndexPipeline(dir)
+	return runIndexPipeline(dir, force)
 }
 
 // ---------------------------------------------------------------------------
