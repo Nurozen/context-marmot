@@ -1,0 +1,37 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ContextMarmot runtime data
+.marmot-data/
+
+# Obsidian workspace (user-specific, not vault content)
+.marmot/.obsidian/workspace.json
+.marmot/.obsidian/workspace-mobile.json
+
+# Coverage
+coverage.out
+coverage.html
