@@ -1,6 +1,13 @@
-# ContextMarmot
+<p align="center">
+  <img src="assets/hero.png" alt="ContextMarmot — a marmot overlooking a glowing underground knowledge graph" width="100%">
+</p>
 
-A graph-based memory engine for agentic systems. Agents query and write to a persistent knowledge graph via [MCP](https://modelcontextprotocol.io/), getting structured context instead of reading raw files.
+<h1 align="center">
+  <img src="assets/logo.png" alt="ContextMarmot logo" width="48" height="48" valign="middle">
+  ContextMarmot
+</h1>
+
+<p align="center">A graph-based memory engine for agentic systems.</p> Agents query and write to a persistent knowledge graph via [MCP](https://modelcontextprotocol.io/), getting structured context instead of reading raw files.
 
 ```
 Agent  -->  MCP Server  -->  Embed + Search + Traverse + Compact  -->  XML context
@@ -305,4 +312,4 @@ See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan
 
 ## License
 
-TBD
+Apache 2.0 --- see [LICENSE](LICENSE).
