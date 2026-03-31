@@ -3,6 +3,7 @@
 // Commands:
 //
 //	marmot init    [--dir .marmot]              Create a new vault
+//	marmot index   [--dir .marmot]              Index all nodes into embedding store
 //	marmot query   --query "..." [flags]        Query the knowledge graph
 //	marmot serve   [--dir .marmot]              Start MCP server on stdio
 //	marmot verify  [--dir .marmot]              Run integrity checks
@@ -34,6 +35,8 @@ func run(args []string) int {
 	switch command {
 	case "init":
 		return cmdInit(cmdArgs)
+	case "index":
+		return cmdIndex(cmdArgs)
 	case "query":
 		return cmdQuery(cmdArgs)
 	case "serve":
@@ -49,7 +52,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, query, serve, verify")
+	fmt.Fprintln(os.Stderr, "commands: init, index, query, serve, verify")
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +112,32 @@ This is the root configuration for a ContextMarmot vault.
 
 	fmt.Printf("Initialised ContextMarmot vault at %s\n", dir)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// index
+// ---------------------------------------------------------------------------
+
+func cmdIndex(args []string) int {
+	fs := flag.NewFlagSet("index", flag.ContinueOnError)
+	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+
+	if err := runIndex(*dir); err != nil {
+		fmt.Fprintf(os.Stderr, "index: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runIndex(dir string) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
+	}
+
+	return runIndexPipeline(dir)
 }
 
 // ---------------------------------------------------------------------------

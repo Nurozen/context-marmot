@@ -14,6 +14,60 @@ import (
 	"github.com/nurozen/context-marmot/internal/verify"
 )
 
+// runIndexPipeline indexes all node files into the embedding store.
+func runIndexPipeline(dir string) error {
+	store := node.NewStore(dir)
+	metas, err := store.ListNodes()
+	if err != nil {
+		return fmt.Errorf("list nodes: %w", err)
+	}
+
+	if len(metas) == 0 {
+		fmt.Println("No nodes found. Nothing to index.")
+		return nil
+	}
+
+	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+	embStore, err := embedding.NewStore(dbPath)
+	if err != nil {
+		return fmt.Errorf("open embedding store: %w", err)
+	}
+	defer embStore.Close()
+
+	embedder := embedding.NewMockEmbedder("mock-v1")
+
+	indexed := 0
+	for _, m := range metas {
+		path := store.NodePath(m.ID)
+		n, err := store.LoadNode(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", m.ID, err)
+			continue
+		}
+
+		// Embed the node's summary.
+		text := n.Summary
+		if text == "" {
+			text = n.ID
+		}
+		vec, err := embedder.Embed(text)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: embed %s: %v\n", n.ID, err)
+			continue
+		}
+
+		summaryHash := fmt.Sprintf("%x", text)
+		if err := embStore.Upsert(n.ID, vec, summaryHash, embedder.Model()); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: upsert %s: %v\n", n.ID, err)
+			continue
+		}
+		indexed++
+	}
+
+	fmt.Printf("Indexed %d/%d nodes into embedding store.\n", indexed, len(metas))
+	return nil
+}
+
 // runQueryPipeline executes the full query pipeline:
 // load nodes -> build graph -> embed query -> search -> traverse -> compact -> print XML.
 func runQueryPipeline(dir, query string, depth, budget int) error {
