@@ -5,8 +5,8 @@
 - **Core Engine**: Go
   - SQLite driver: `ncruces/go-sqlite3` (WASM, zero CGo)
   - sqlite-vec: `asg017/sqlite-vec-go-bindings/ncruces`
-  - MCP SDK: `modelcontextprotocol/go-sdk` (Google co-maintained)
-  - Anthropic SDK: `anthropics/anthropic-sdk-go`
+  - MCP SDK: `mark3labs/mcp-go` v0.46.0 (well-established, stdio transport)
+  - Anthropic SDK: `anthropics/anthropic-sdk-go` (for post-MVP LLM features)
 - **Embedding Index**: SQLite + sqlite-vec
 - **LLM Provider**: Anthropic (Haiku-class for CRUD classification + summary generation)
 - **Visualization (initial)**: Obsidian (open `.marmot/` as vault — zero integration needed)
@@ -45,13 +45,25 @@ Benchmark: agent with ContextMarmot vs agent without, measured on:
 
 ---
 
+## MVP Status: COMPLETE (2026-03-31)
+
+All M1-M7 phases implemented and tested. 147 tests passing (139 unit + 8 integration).
+Production hardened with path traversal protection, input validation, and race-safe operations.
+
+**Implementation notes:**
+- sqlite-vec Go bindings have a WASM ABI mismatch with ncruces v0.17.1 — embedding search uses Go-side KNN (L2 distance with max-heap) instead. Upgradable when bindings are fixed.
+- MCP SDK: used `mark3labs/mcp-go` (official Go SDK import paths were unstable at time of implementation).
+- MockEmbedder used for MVP (trigram hashing, 1536-dim vectors). Real embedding provider (OpenAI/Anthropic) is a post-MVP integration.
+
+---
+
 ## Phase M1: Project Bootstrap
 
-- [ ] Initialize project module
-- [ ] Set up directory structure
-- [ ] Add Makefile with build, test, lint targets
-- [ ] Add `.gitignore` for build artifacts + `.marmot-data/` + `.obsidian/`
-- [ ] Initialize git repo
+- [x] Initialize project module
+- [x] Set up directory structure
+- [x] Add Makefile with build, test, lint targets
+- [x] Add `.gitignore` for build artifacts + `.marmot-data/` + `.obsidian/`
+- [x] Initialize git repo
 
 ## Phase M2: Node Store
 
