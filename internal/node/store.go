@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ValidateNodeID checks that a node ID is safe for use as a file path
@@ -183,6 +184,42 @@ func (s *Store) DeleteNode(id string) error {
 		return fmt.Errorf("delete node %q: %w", id, err)
 	}
 	return nil
+}
+
+// SoftDeleteNode marks a node as superseded, setting its status, valid_until timestamp,
+// and optionally the ID of the node that supersedes it.
+// supersededBy may be empty if the node is being retired without a replacement.
+func (s *Store) SoftDeleteNode(id, supersededBy string) error {
+	path, err := s.SafeNodePath(id)
+	if err != nil {
+		return fmt.Errorf("invalid node ID %q: %w", id, err)
+	}
+	n, err := s.LoadNode(path)
+	if err != nil {
+		return fmt.Errorf("load node %q: %w", id, err)
+	}
+	n.Status = StatusSuperseded
+	n.ValidUntil = time.Now().UTC().Format(time.RFC3339)
+	if supersededBy != "" {
+		n.SupersededBy = supersededBy
+	}
+	return s.SaveNode(n)
+}
+
+// ListActiveNodes returns metadata for all nodes with status "active" (or no status set).
+// Superseded and archived nodes are excluded.
+func (s *Store) ListActiveNodes() ([]NodeMeta, error) {
+	all, err := s.ListNodes()
+	if err != nil {
+		return nil, err
+	}
+	active := all[:0]
+	for _, m := range all {
+		if m.Status == "" || m.Status == StatusActive {
+			active = append(active, m)
+		}
+	}
+	return active, nil
 }
 
 // ListNodes scans the base directory recursively for .md files, parsing only

@@ -111,11 +111,20 @@ func Compact(g *graph.Graph, subgraph *Subgraph, budget int) *CompactedResult {
 // renderFullNode produces a <node> element with summary, edges, and context.
 func renderFullNode(g *graph.Graph, n *node.Node, depth int) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  <node id=%q type=%q depth=\"%d\">\n",
-		n.ID, n.Type, depth))
+	status := n.Status
+	if status == "" {
+		status = "active"
+	}
+	b.WriteString(fmt.Sprintf("  <node id=%q type=%q depth=\"%d\" status=%q>\n",
+		n.ID, n.Type, depth, status))
 
 	b.WriteString(fmt.Sprintf("    <summary>%s</summary>\n",
 		html.EscapeString(n.Summary)))
+
+	if n.SupersededBy != "" {
+		b.WriteString(fmt.Sprintf("    <superseded_by>%s</superseded_by>\n",
+			html.EscapeString(n.SupersededBy)))
+	}
 
 	// Edges from graph (outbound).
 	edges := g.GetEdges(n.ID, graph.Outbound)
@@ -142,11 +151,20 @@ func renderFullNode(g *graph.Graph, n *node.Node, depth int) string {
 // reference only — no context block.
 func renderCompactNode(n *node.Node, depth int) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  <node_compact id=%q type=%q depth=\"%d\">\n",
-		n.ID, n.Type, depth))
+	status := n.Status
+	if status == "" {
+		status = "active"
+	}
+	b.WriteString(fmt.Sprintf("  <node_compact id=%q type=%q depth=\"%d\" status=%q>\n",
+		n.ID, n.Type, depth, status))
 
 	b.WriteString(fmt.Sprintf("    <summary>%s</summary>\n",
 		html.EscapeString(n.Summary)))
+
+	if n.SupersededBy != "" {
+		b.WriteString(fmt.Sprintf("    <superseded_by>%s</superseded_by>\n",
+			html.EscapeString(n.SupersededBy)))
+	}
 
 	if n.Source.Path != "" {
 		if n.Source.Lines[0] != 0 || n.Source.Lines[1] != 0 {

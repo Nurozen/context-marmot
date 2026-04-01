@@ -24,18 +24,20 @@ const (
 // read access, but writes must be externally serialised (or use the embedded
 // mutex).
 type Graph struct {
-	mu       sync.RWMutex
-	nodes    map[string]*node.Node
-	outEdges map[string][]node.Edge // source ID -> outbound edges
-	inEdges  map[string][]node.Edge // target ID -> inbound edges (with Target set to source)
+	mu          sync.RWMutex
+	nodes       map[string]*node.Node // ALL nodes (active + superseded)
+	activeNodes map[string]*node.Node // active nodes only (Status == "active" or "")
+	outEdges    map[string][]node.Edge // source ID -> outbound edges
+	inEdges     map[string][]node.Edge // target ID -> inbound edges (with Target set to source)
 }
 
 // NewGraph returns an empty, initialised Graph.
 func NewGraph() *Graph {
 	return &Graph{
-		nodes:    make(map[string]*node.Node),
-		outEdges: make(map[string][]node.Edge),
-		inEdges:  make(map[string][]node.Edge),
+		nodes:       make(map[string]*node.Node),
+		activeNodes: make(map[string]*node.Node),
+		outEdges:    make(map[string][]node.Edge),
+		inEdges:     make(map[string][]node.Edge),
 	}
 }
 
@@ -55,6 +57,9 @@ func (g *Graph) AddNode(n *node.Node) error {
 	}
 
 	g.nodes[n.ID] = n
+	if n.IsActive() {
+		g.activeNodes[n.ID] = n
+	}
 
 	for _, e := range n.Edges {
 		// Ensure edge class is populated.
@@ -86,12 +91,22 @@ func (g *Graph) UpsertNode(n *node.Node) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// If the node exists, remove it first (without holding the lock again).
+	g.upsertNodeLocked(n)
+	return nil
+}
+
+// upsertNodeLocked inserts or replaces a node without acquiring the mutex.
+// Caller must hold g.mu in write mode.
+func (g *Graph) upsertNodeLocked(n *node.Node) {
+	// If the node exists, remove it first (clears edges and activeNodes entry).
 	if _, exists := g.nodes[n.ID]; exists {
 		g.removeNodeLocked(n.ID)
 	}
 
 	g.nodes[n.ID] = n
+	if n.IsActive() {
+		g.activeNodes[n.ID] = n
+	}
 	for _, e := range n.Edges {
 		if e.Class == "" {
 			e.Class = node.ClassifyRelation(string(e.Relation))
@@ -104,7 +119,6 @@ func (g *Graph) UpsertNode(n *node.Node) error {
 		}
 		g.inEdges[e.Target] = append(g.inEdges[e.Target], rev)
 	}
-	return nil
 }
 
 // RemoveNode removes a node and cascades cleanup of all edges to and from it.
@@ -145,6 +159,7 @@ func (g *Graph) removeNodeLocked(id string) {
 	delete(g.inEdges, id)
 
 	delete(g.nodes, id)
+	delete(g.activeNodes, id)
 }
 
 // AddEdge adds a single edge from sourceID. Structural edges are checked for
@@ -280,6 +295,38 @@ func (g *Graph) AllNodes() []*node.Node {
 		nodes = append(nodes, n)
 	}
 	return nodes
+}
+
+// AllActiveNodes returns a snapshot of all active (non-superseded) nodes.
+func (g *Graph) AllActiveNodes() []*node.Node {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	result := make([]*node.Node, 0, len(g.activeNodes))
+	for _, n := range g.activeNodes {
+		result = append(result, n)
+	}
+	return result
+}
+
+// SupersedeNode marks oldID as superseded by newNode.ID, then upserts newNode into the graph.
+// It updates the in-memory status of oldID and adds the new node.
+// Callers are responsible for persisting both nodes to disk via the node store.
+func (g *Graph) SupersedeNode(oldID string, newNode *node.Node) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	old, ok := g.nodes[oldID]
+	if !ok {
+		return fmt.Errorf("node %q not found", oldID)
+	}
+	// Mark old node superseded in-memory.
+	old.Status = node.StatusSuperseded
+	old.SupersededBy = newNode.ID
+	delete(g.activeNodes, oldID)
+
+	// Upsert new node without acquiring the lock (we already hold it).
+	g.upsertNodeLocked(newNode)
+	return nil
 }
 
 // NodeCount returns the number of nodes in the graph.

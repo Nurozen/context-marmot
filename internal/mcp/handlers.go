@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/verify"
@@ -36,6 +38,7 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 		budget = 4096
 	}
 	mode := req.GetString("mode", "adjacency")
+	includeSuperseded := req.GetBool("include_superseded", false)
 
 	// Step 1: Embed the query.
 	queryVec, err := e.Embedder.Embed(query)
@@ -45,7 +48,12 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 
 	// Step 2: Search embedding index for top-k entry nodes.
 	topK := 5
-	results, err := e.EmbeddingStore.Search(queryVec, topK, e.Embedder.Model())
+	var results []embedding.ScoredResult
+	if includeSuperseded {
+		results, err = e.EmbeddingStore.Search(queryVec, topK, e.Embedder.Model())
+	} else {
+		results, err = e.EmbeddingStore.SearchActive(queryVec, topK, e.Embedder.Model())
+	}
 	if err != nil {
 		// If model mismatch or empty store, return empty result gracefully.
 		emptyXML := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
@@ -64,10 +72,11 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 
 	// Step 3: Traverse graph from entry nodes.
 	cfg := traversal.TraversalConfig{
-		EntryIDs:    entryIDs,
-		MaxDepth:    depth,
-		TokenBudget: budget,
-		Mode:        mode,
+		EntryIDs:          entryIDs,
+		MaxDepth:          depth,
+		TokenBudget:       budget,
+		Mode:              mode,
+		IncludeSuperseded: includeSuperseded,
 	}
 	subgraph := traversal.Traverse(e.Graph, cfg)
 
@@ -168,11 +177,17 @@ func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) 
 		ID:        id,
 		Type:      nodeType,
 		Namespace: namespace,
-		Status:    "active",
+		Status:    node.StatusActive,
 		Source:    source,
 		Edges:     edges,
 		Summary:   summary,
 		Context:   ctx,
+	}
+
+	// Set ValidFrom on first write (new node only).
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, exists := e.Graph.GetNode(id); !exists {
+		n.ValidFrom = now
 	}
 
 	// Validate structural acyclicity using read-only cycle check.
@@ -328,6 +343,56 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 		result.Issues = []VerifyIssue{}
 	}
 
+	return mcp.NewToolResultJSON(result)
+}
+
+// ---------------------------------------------------------------------------
+// context_delete
+// ---------------------------------------------------------------------------
+
+// DeleteResult is the JSON response from context_delete.
+type DeleteResult struct {
+	NodeID       string `json:"node_id"`
+	Status       string `json:"status"`
+	SupersededBy string `json:"superseded_by,omitempty"`
+}
+
+// HandleContextDelete marks a node as superseded/soft-deleted.
+func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id := req.GetString("id", "")
+	if id == "" {
+		return mcp.NewToolResultError("id parameter is required"), nil
+	}
+	supersededBy := req.GetString("superseded_by", "")
+
+	// Verify node exists.
+	if _, ok := e.Graph.GetNode(id); !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
+	}
+
+	// Soft-delete on disk.
+	if err := e.NodeStore.SoftDeleteNode(id, supersededBy); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("soft delete: %v", err)), nil
+	}
+
+	// Reload node from disk and upsert into graph to update in-memory status.
+	path := e.NodeStore.NodePath(id)
+	updated, err := e.NodeStore.LoadNode(path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("reload node: %v", err)), nil
+	}
+	if err := e.Graph.UpsertNode(updated); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("graph upsert: %v", err)), nil
+	}
+
+	// Update embedding status.
+	_ = e.EmbeddingStore.UpdateStatus(id, node.StatusSuperseded)
+
+	result := DeleteResult{
+		NodeID:       id,
+		Status:       node.StatusSuperseded,
+		SupersededBy: supersededBy,
+	}
 	return mcp.NewToolResultJSON(result)
 }
 

@@ -11,10 +11,11 @@ import (
 
 // TraversalConfig controls the traversal behaviour.
 type TraversalConfig struct {
-	EntryIDs    []string // Starting node IDs for BFS expansion.
-	MaxDepth    int      // Maximum BFS depth from any entry node.
-	TokenBudget int      // Approximate token ceiling (chars/4 heuristic).
-	Mode        string   // Compaction mode; default "adjacency".
+	EntryIDs          []string // Starting node IDs for BFS expansion.
+	MaxDepth          int      // Maximum BFS depth from any entry node.
+	TokenBudget       int      // Approximate token ceiling (chars/4 heuristic).
+	Mode              string   // Compaction mode; default "adjacency".
+	IncludeSuperseded bool     // if false (default), superseded/archived nodes are skipped
 }
 
 // Subgraph is the result of a traversal: the collected nodes together with
@@ -67,6 +68,11 @@ func Traverse(g *graph.Graph, config TraversalConfig) *Subgraph {
 
 		n, ok := g.GetNode(id)
 		if !ok {
+			continue
+		}
+
+		// Skip superseded/archived nodes unless explicitly requested.
+		if !config.IncludeSuperseded && !n.IsActive() {
 			continue
 		}
 

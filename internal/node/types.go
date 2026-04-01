@@ -2,6 +2,13 @@
 // Obsidian-compatible markdown node files used by ContextMarmot.
 package node
 
+// NodeStatus values for Node.Status field.
+const (
+	StatusActive     = "active"
+	StatusSuperseded = "superseded"
+	StatusArchived   = "archived"
+)
+
 // EdgeClass distinguishes structural edges (DAG-enforced) from behavioral
 // edges (cycles allowed).
 type EdgeClass string
@@ -68,14 +75,22 @@ type Node struct {
 	ID        string `yaml:"id"`
 	Type      string `yaml:"type"`
 	Namespace string `yaml:"namespace"`
-	Status    string `yaml:"status"`
-	Source    Source `yaml:"source,omitempty"`
+	Status      string `yaml:"status"`
+	ValidFrom   string `yaml:"valid_from,omitempty"`    // RFC3339 timestamp, set on creation
+	ValidUntil  string `yaml:"valid_until,omitempty"`   // RFC3339 timestamp, set on soft-delete/supersede
+	SupersededBy string `yaml:"superseded_by,omitempty"` // node ID of the node that replaces this one
+	Source      Source `yaml:"source,omitempty"`
 	Edges     []Edge `yaml:"edges,omitempty"`
 
 	// Body sections (not in YAML frontmatter).
 	Summary string `yaml:"-"`
 	Context string `yaml:"-"`
 	RawBody string `yaml:"-"`
+}
+
+// IsActive returns true if the node has an active status (or no status set).
+func (n *Node) IsActive() bool {
+	return n.Status == "" || n.Status == StatusActive
 }
 
 // NodeMeta is a lightweight projection of Node used for directory listings

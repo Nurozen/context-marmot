@@ -264,20 +264,20 @@ Minimal MCP server and CLI to enable agent testing.
 
 After MVP validates the core hypothesis, layer in full features.
 
-## Phase 8: Temporal Fields + Soft-Delete
+## Phase 8: Temporal Fields + Soft-Delete — COMPLETE (2026-04-01)
 
-- [ ] Add temporal fields to Node struct: `Status`, `ValidFrom`, `ValidUntil`, `SupersededBy`
-- [ ] Update markdown parser/writer for temporal frontmatter
-- [ ] Implement `SoftDeleteNode(path, superseded_by) -> error`
-- [ ] Implement `ListActiveNodes(namespace_path) -> []NodeMeta` (excludes superseded)
-- [ ] Update Graph Manager: `SupersedeNode(old_id, new_node) -> error`
-- [ ] Update Graph Manager: separate active-node index and full-node index
-- [ ] Update Embedding Index: `UpdateStatus(node_id, status)`, `include_superseded` param on search
-- [ ] Update Compaction Engine: superseded node rendering with status attribute
-- [ ] Update MCP `context_query`: `include_superseded` parameter
-- [ ] Update Verifier: superseded-chain integrity checks
-- [ ] Write unit tests for soft-delete lifecycle
-- [ ] Write unit tests for temporal queries
+- [x] Add temporal fields to Node struct: `Status`, `ValidFrom`, `ValidUntil`, `SupersededBy`
+- [x] Update markdown parser/writer for temporal frontmatter
+- [x] Implement `SoftDeleteNode(path, superseded_by) -> error`
+- [x] Implement `ListActiveNodes(namespace_path) -> []NodeMeta` (excludes superseded)
+- [x] Update Graph Manager: `SupersedeNode(old_id, new_node) -> error`
+- [x] Update Graph Manager: separate active-node index and full-node index
+- [x] Update Embedding Index: `UpdateStatus(node_id, status)`, `include_superseded` param on search
+- [x] Update Compaction Engine: superseded node rendering with status attribute
+- [x] Update MCP `context_query`: `include_superseded` parameter
+- [x] Update Verifier: superseded-chain integrity checks
+- [x] Write unit tests for soft-delete lifecycle
+- [x] Write unit tests for temporal queries
 
 ## Phase 9: CRUD Classifier (LLM-Based)
 

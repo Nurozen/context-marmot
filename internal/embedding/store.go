@@ -59,12 +59,16 @@ func (s *Store) initSchema() error {
 			embedding BLOB NOT NULL,
 			summary_hash TEXT NOT NULL,
 			model TEXT NOT NULL,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			status TEXT NOT NULL DEFAULT 'active'
 		);
 	`)
 	if err != nil {
 		return fmt.Errorf("create embeddings table: %w", err)
 	}
+	// Migration for existing databases that may not have the status column.
+	_ = s.db.Exec(`ALTER TABLE embeddings ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`)
+	// Ignore error — column may already exist.
 	return nil
 }
 
@@ -264,6 +268,99 @@ func (s *Store) checkModel(model string) (bool, error) {
 
 	mismatches := mismatchStmt.ColumnInt(0)
 	return mismatches == 0, nil
+}
+
+// UpdateStatus updates the status of a node's embedding record.
+// This is used when a node is soft-deleted or superseded.
+func (s *Store) UpdateStatus(nodeID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stmt, _, err := s.db.Prepare(`UPDATE embeddings SET status = ? WHERE node_id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare update status: %w", err)
+	}
+	defer stmt.Close()
+
+	stmt.BindText(1, status)
+	stmt.BindText(2, nodeID)
+	if err := stmt.Exec(); err != nil {
+		return fmt.Errorf("exec update status: %w", err)
+	}
+	return nil
+}
+
+// SearchActive searches only active (non-superseded) embeddings.
+// This is the default search used by context_query.
+func (s *Store) SearchActive(queryEmbedding []float32, topK int, model string) ([]ScoredResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate query dimension matches stored embeddings.
+	storedDim, err := s.storedDimensionLocked()
+	if err != nil {
+		return nil, fmt.Errorf("check stored dimension: %w", err)
+	}
+	if storedDim > 0 && len(queryEmbedding) != storedDim {
+		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, want %d", len(queryEmbedding), storedDim)
+	}
+
+	// Check that there are embeddings and they use the same model.
+	modelOK, err := s.checkModel(model)
+	if err != nil {
+		return nil, err
+	}
+	if !modelOK {
+		return nil, fmt.Errorf("model mismatch: query model %q does not match stored embeddings", model)
+	}
+
+	// Scan all embeddings, filtering to active status only.
+	stmt, _, err := s.db.Prepare(`SELECT node_id, embedding, status FROM embeddings WHERE model = ?`)
+	if err != nil {
+		return nil, fmt.Errorf("prepare search scan: %w", err)
+	}
+	defer stmt.Close()
+
+	stmt.BindText(1, model)
+
+	var candidates scoredHeap
+	for stmt.Step() {
+		nodeID := stmt.ColumnText(0)
+		blob := stmt.ColumnRawBlob(1)
+		status := stmt.ColumnText(2)
+
+		// Skip non-active nodes.
+		if status != "" && status != "active" {
+			continue
+		}
+
+		stored, err := deserializeFloat32(blob)
+		if err != nil {
+			continue // skip malformed embeddings
+		}
+
+		dist := l2Distance(queryEmbedding, stored)
+		// Convert L2 distance to a similarity score: 1 / (1 + distance).
+		similarity := 1.0 / (1.0 + dist)
+
+		candidates = append(candidates, ScoredResult{
+			NodeID: nodeID,
+			Score:  similarity,
+		})
+	}
+	if err := stmt.Err(); err != nil {
+		return nil, fmt.Errorf("search scan: %w", err)
+	}
+
+	// Sort by score descending (highest similarity first).
+	heap.Init(&candidates)
+
+	results := make([]ScoredResult, 0, min(topK, len(candidates)))
+	for len(results) < topK && len(candidates) > 0 {
+		results = append(results, heap.Pop(&candidates).(ScoredResult))
+	}
+
+	return results, nil
 }
 
 // Delete removes a node's embedding from the store.

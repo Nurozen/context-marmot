@@ -29,7 +29,7 @@ func NewServer(engine *Engine) *Server {
 	return s
 }
 
-// registerTools registers the three ContextMarmot MCP tools.
+// registerTools registers the ContextMarmot MCP tools.
 func (s *Server) registerTools() {
 	// context_query tool
 	queryTool := mcp.NewTool("context_query",
@@ -57,6 +57,9 @@ TIPS:
 		mcp.WithString("mode",
 			mcp.Description("Compaction mode. 'adjacency' (default) expands neighbors breadth-first; 'deep' follows call chains depth-first"),
 			mcp.Enum("adjacency", "deep"),
+		),
+		mcp.WithBoolean("include_superseded",
+			mcp.Description("If true, include superseded and archived nodes in results. Default false — only active nodes are returned."),
 		),
 	)
 
@@ -164,9 +167,26 @@ CHECKS:
 		),
 	)
 
+	// context_delete tool
+	deleteTool := mcp.NewTool("context_delete",
+		mcp.WithDescription(`Soft-delete (supersede) a node in the knowledge graph.
+
+WHEN TO USE: When a node's content is no longer accurate because the source code changed or a new node replaces it. Superseded nodes are excluded from future queries by default but retained for historical reference.
+
+This does NOT permanently delete the node file. The node is marked with status="superseded" and a valid_until timestamp. Use context_write to create the replacement node first, then call context_delete with its ID in superseded_by.`),
+		mcp.WithString("id",
+			mcp.Required(),
+			mcp.Description("ID of the node to supersede"),
+		),
+		mcp.WithString("superseded_by",
+			mcp.Description("ID of the node that replaces this one. Omit if retiring without a replacement."),
+		),
+	)
+
 	s.mcpServer.AddTool(queryTool, s.engine.HandleContextQuery)
 	s.mcpServer.AddTool(writeTool, s.engine.HandleContextWrite)
 	s.mcpServer.AddTool(verifyTool, s.engine.HandleContextVerify)
+	s.mcpServer.AddTool(deleteTool, s.engine.HandleContextDelete)
 }
 
 // ListenStdio starts the MCP server on stdin/stdout. It blocks until the

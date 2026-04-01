@@ -12,12 +12,15 @@ import (
 // frontmatter rendering. We use a separate struct so that body-only fields
 // (Summary, Context, RawBody) are never emitted in frontmatter.
 type frontmatterFields struct {
-	ID        string `yaml:"id"`
-	Type      string `yaml:"type"`
-	Namespace string `yaml:"namespace"`
-	Status    string `yaml:"status"`
-	Source    *Source `yaml:"source,omitempty"`
-	Edges     []fmEdge `yaml:"edges,omitempty"`
+	ID           string   `yaml:"id"`
+	Type         string   `yaml:"type"`
+	Namespace    string   `yaml:"namespace"`
+	Status       string   `yaml:"status"`
+	ValidFrom    string   `yaml:"valid_from,omitempty"`
+	ValidUntil   string   `yaml:"valid_until,omitempty"`
+	SupersededBy string   `yaml:"superseded_by,omitempty"`
+	Source       *Source  `yaml:"source,omitempty"`
+	Edges        []fmEdge `yaml:"edges,omitempty"`
 }
 
 // fmEdge is the YAML representation of an edge (Class is omitted).
@@ -37,10 +40,13 @@ func RenderNode(node *Node) ([]byte, error) {
 
 	// --- Frontmatter ---
 	fm := frontmatterFields{
-		ID:        node.ID,
-		Type:      node.Type,
-		Namespace: node.Namespace,
-		Status:    node.Status,
+		ID:           node.ID,
+		Type:         node.Type,
+		Namespace:    node.Namespace,
+		Status:       node.Status,
+		ValidFrom:    node.ValidFrom,
+		ValidUntil:   node.ValidUntil,
+		SupersededBy: node.SupersededBy,
 	}
 	if node.Source.Path != "" || node.Source.Hash != "" || node.Source.Lines != [2]int{} {
 		fm.Source = &node.Source

@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nurozen/context-marmot/internal/node"
 )
@@ -209,6 +210,41 @@ func VerifyIntegrity(nodes []*node.Node) []IntegrityIssue {
 			Message:   fmt.Sprintf("structural cycle detected involving nodes: %s", strings.Join(cycleNodes, " -> ")),
 			Severity:  Error,
 		})
+	}
+
+	// Check superseded-chain integrity.
+	for _, n := range nodes {
+		// SupersededBy must reference an existing node.
+		if n.SupersededBy != "" && !idSet[n.SupersededBy] {
+			issues = append(issues, IntegrityIssue{
+				NodeID:    n.ID,
+				IssueType: DanglingEdge,
+				Message:   fmt.Sprintf("superseded_by references unknown node %q", n.SupersededBy),
+				Severity:  Warning,
+			})
+		}
+		// ValidUntil must be after ValidFrom if both are set.
+		if n.ValidFrom != "" && n.ValidUntil != "" {
+			from, errF := time.Parse(time.RFC3339, n.ValidFrom)
+			until, errU := time.Parse(time.RFC3339, n.ValidUntil)
+			if errF == nil && errU == nil && !until.After(from) {
+				issues = append(issues, IntegrityIssue{
+					NodeID:    n.ID,
+					IssueType: HashMismatch, // reuse closest existing type
+					Message:   fmt.Sprintf("valid_until %q is not after valid_from %q", n.ValidUntil, n.ValidFrom),
+					Severity:  Warning,
+				})
+			}
+		}
+		// Superseded node should have SupersededBy or ValidUntil set.
+		if n.Status == node.StatusSuperseded && n.SupersededBy == "" && n.ValidUntil == "" {
+			issues = append(issues, IntegrityIssue{
+				NodeID:    n.ID,
+				IssueType: HashMismatch,
+				Message:   "node has status=superseded but no superseded_by or valid_until set",
+				Severity:  Warning,
+			})
+		}
 	}
 
 	return issues
