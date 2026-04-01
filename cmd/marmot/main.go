@@ -18,6 +18,26 @@ import (
 
 const defaultDir = ".marmot"
 
+// discoverVault walks up from the current directory looking for a .marmot/
+// directory. Returns the path if found, or defaultDir if not.
+func discoverVault() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return defaultDir
+	}
+	for {
+		candidate := filepath.Join(dir, ".marmot")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return defaultDir
+		}
+		dir = parent
+	}
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -61,9 +81,12 @@ func usage() {
 
 func cmdInit(args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *dir == "" {
+		*dir = defaultDir // init always creates in cwd, no walk-up
 	}
 
 	if err := runInit(*dir); err != nil {
@@ -123,10 +146,13 @@ This is the root configuration for a ContextMarmot vault.
 
 func cmdIndex(args []string) int {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
-	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	force := fs.Bool("force", false, "clear and rebuild all embeddings (use after changing embedding provider)")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
 	}
 
 	if err := runIndex(*dir, *force); err != nil {
@@ -150,12 +176,15 @@ func runIndex(dir string, force bool) error {
 
 func cmdQuery(args []string) int {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
-	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	query := fs.String("query", "", "search query (required)")
 	depth := fs.Int("depth", 2, "traversal depth")
 	budget := fs.Int("budget", 4096, "token budget for compaction")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
 	}
 
 	if *query == "" {
@@ -186,9 +215,12 @@ func runQuery(dir, query string, depth, budget int) error {
 
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
 	}
 
 	if err := runServe(*dir); err != nil {
@@ -212,9 +244,12 @@ func runServe(dir string) error {
 
 func cmdVerify(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
-	dir := fs.String("dir", defaultDir, "marmot vault directory")
+	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	if err := fs.Parse(args); err != nil {
 		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
 	}
 
 	if err := runVerify(*dir); err != nil {
