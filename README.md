@@ -289,7 +289,18 @@ go test -race -tags integration -count=1 ./internal/
 
 ## Current Status
 
-**MVP complete.** The core hypothesis --- agents perform better with ContextMarmot than with vanilla file reading --- is testable with the current build.
+**MVP complete.** Evaluated on [SWE-QA](https://huggingface.co/datasets/swe-qa/SWE-QA-Benchmark) — 20 code comprehension questions across django, flask, pytest, and requests, judged by Claude on correctness, completeness, and specificity (1–5):
+
+| Metric | Vanilla (file tools) | Hybrid (ContextMarmot) | Improvement |
+|--------|---------------------|----------------------|-------------|
+| Answer quality (1–5) | 4.62 | 4.62 | **identical** |
+| Tokens per question | 151,327 | 95,876 | **−37%** |
+| Cost per question | $0.1065 | $0.0834 | **−22%** |
+| Avg turns | 7.5 | 6.9 | −8% |
+
+Same quality. Lower cost. The graph acts as a navigation map — agents query it first, then read only the files and line ranges it identifies, skipping broad exploration. On hard multi-file questions the savings are largest (up to 50% fewer turns).
+
+Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benchmark.md](docs/benchmark.md) for full per-question breakdown and methodology.
 
 ### MVP scope (implemented)
 
@@ -312,7 +323,7 @@ go test -race -tags integration -count=1 ./internal/
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including temporal fields, LLM-based CRUD classification, heat maps, summary engine, static analysis indexing, and the TypeScript web UI.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including temporal fields, LLM-based CRUD classification, heat maps, summary engine, static analysis indexing, and the TypeScript web UI. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

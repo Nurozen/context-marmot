@@ -199,12 +199,20 @@ func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) 
 	}
 
 	// Update embedding index.
-	if summary != "" {
-		vec, err := e.Embedder.Embed(summary)
+	embedText := summary
+	if ctx != "" {
+		ctxSnip := ctx
+		if len(ctxSnip) > 6000 {
+			ctxSnip = ctxSnip[:6000]
+		}
+		embedText = summary + "\n\n" + ctxSnip
+	}
+	if embedText != "" {
+		vec, err := e.Embedder.Embed(embedText)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("embed summary: %v", err)), nil
 		}
-		summaryHash := sha256Hex(summary)
+		summaryHash := sha256Hex(embedText)
 		if err := e.EmbeddingStore.Upsert(id, vec, summaryHash, e.Embedder.Model()); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("upsert embedding: %v", err)), nil
 		}

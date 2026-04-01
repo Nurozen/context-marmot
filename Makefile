@@ -1,10 +1,13 @@
 MODULE := github.com/nurozen/context-marmot
 BINARY := bin/marmot
 
-.PHONY: build test lint clean fmt vet tidy
+.PHONY: build build-eval test lint clean fmt vet tidy eval benchmark
 
 build:
 	go build -o $(BINARY) ./cmd/marmot
+
+build-eval:
+	go build -o bin/marmot-eval ./cmd/marmot-eval
 
 test:
 	go test -race -count=1 ./...
@@ -28,6 +31,15 @@ fmt:
 
 tidy:
 	go mod tidy
+
+benchmark:
+	go test -race -tags integration -count=1 -v -run TestSWEQABenchmark ./internal/
+
+eval: build build-eval
+	bin/marmot-eval --output testdata/eval/results
+
+eval-dry: build build-eval
+	bin/marmot-eval --questions 2 --output testdata/eval/results
 
 clean:
 	rm -rf bin/ coverage.out coverage.html

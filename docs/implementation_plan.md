@@ -64,6 +64,27 @@ Production hardened with path traversal protection, input validation, and race-s
 - `marmot init` chains configure → setup for zero-config onboarding.
 - MCP tool schemas include full JSON Schema for `edges` (item schema with `target`/`relation` enum) and `source` (property schema) to prevent agent field-name guessing.
 
+## Post-MVP Eval: SWE-QA A/B Benchmark — COMPLETE (2026-04-01)
+
+Real A/B evaluation comparing Claude Sonnet with vanilla file tools vs. the hybrid (ContextMarmot + file tools) pattern on 20 SWE-QA code comprehension questions across 4 repos.
+
+**Results:**
+- **Answer quality: identical** (4.62/5 both conditions, judged by Claude on correctness/completeness/specificity)
+- **Token reduction: −37%** (151,327 → 95,876 avg tokens per question)
+- **Cost reduction: −22%** ($0.1065 → $0.0834 avg cost per question)
+- **Turn reduction: −8%** (7.5 → 6.9 avg turns per question)
+
+MCP-only mode (graph without file reads) was evaluated and discontinued — quality was insufficient (1.87/5) for code comprehension tasks requiring precise source reading. The hybrid pattern is the validated configuration.
+
+**Key implementation notes:**
+- `cmd/marmot-eval/` — full eval harness: seeder, runner, judge, reporter, JSONL checkpointing
+- Seeder stores real file source code (up to 8 KB per node) in `context` field + accurate `source.lines` ranges
+- Index pipeline embeds `summary + context` jointly (not summary alone) for richer semantic retrieval
+- `HandleContextWrite` in MCP server also embeds `summary + context` on writes
+- All three conditions use XML-delimited prompts with explicit `<workflow>` steps
+- MCP-only condition deprecated; `--skip-mcp` flag added to `marmot-eval`
+- See [docs/benchmark.md](../docs/benchmark.md) for full methodology, per-question breakdown, and related work comparison
+
 ---
 
 ## Phase M1: Project Bootstrap
@@ -225,7 +246,17 @@ Minimal MCP server and CLI to enable agent testing.
   - [x] `node_ids` array item schema (string items)
 - [x] Write integration tests for full query/write/verify flows
 - [x] Write tests for configure (6 tests) and setup (10 tests) commands
-- [ ] **Benchmark: test with Claude Code as MCP client, measure vs vanilla file reading**
+- [x] **Benchmark: SWE-QA A/B evaluation — ContextMarmot hybrid vs vanilla file reading**
+  - 20 curated questions across 4 repos (Flask, Requests, Django, pytest) from SWE-QA-Benchmark
+  - Real `claude -p` invocations per (question, condition) pair; Claude judge scores each answer
+  - **Quality: 4.62/5 both conditions** — identical answer quality
+  - **Token reduction: −37%** (151,327 → 95,876 avg tokens/question)
+  - **Cost reduction: −22%** ($0.1065 → $0.0834 avg cost/question)
+  - Hybrid condition: graph-first navigation with XML `<workflow>` prompt + targeted file reads
+  - Node seeder stores real source code (8 KB) + line ranges; index embeds summary+context jointly
+  - MCP-only condition evaluated and deprecated (1.87/5 quality — insufficient for code comprehension)
+  - JSONL checkpointing for resumable runs; `--skip-mcp` flag added
+  - See [docs/benchmark.md](../docs/benchmark.md) for full per-question breakdown and methodology
 
 ---
 

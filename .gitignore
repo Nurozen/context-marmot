@@ -37,3 +37,5 @@ coverage.out
 coverage.html
 testdata/
 test_rig/
+.env
+marmot-eval

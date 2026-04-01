@@ -69,6 +69,15 @@ func runIndexPipeline(dir string, force bool) error {
 			continue
 		}
 		text := n.Summary
+		if n.Context != "" {
+			// Combine summary + context for richer embedding.
+			// Truncate context to avoid exceeding embedding model limits (~8000 chars total).
+			ctx := n.Context
+			if len(ctx) > 6000 {
+				ctx = ctx[:6000]
+			}
+			text = n.Summary + "\n\n" + ctx
+		}
 		if text == "" {
 			text = n.ID
 		}
