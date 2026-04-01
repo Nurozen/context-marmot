@@ -18,7 +18,7 @@ func NewEmbedderFromVault(cfg *VaultConfig) (embedding.Embedder, error) {
 	// If a real provider is configured but no API key is set, fall back to mock with a warning.
 	if provider != "" && provider != "mock" && apiKey == "" {
 		fmt.Fprintf(os.Stderr, "warning: %s provider configured but no API key found (set %s); falling back to mock embedder\n",
-			provider, envKeyName(provider))
+			provider, EnvKeyName(provider))
 		provider = "mock"
 		model = "mock-v1"
 	}
@@ -38,13 +38,3 @@ func NewEmbedderFromVault(cfg *VaultConfig) (embedding.Embedder, error) {
 	return emb, nil
 }
 
-func envKeyName(provider string) string {
-	switch provider {
-	case "openai":
-		return "OPENAI_API_KEY"
-	case "voyage":
-		return "VOYAGE_API_KEY"
-	default:
-		return "MARMOT_API_KEY"
-	}
-}

@@ -67,35 +67,39 @@ bash seed.sh
 ```bash
 cd your-project
 
-# Initialize a vault
+# Initialize vault, configure embeddings, and set up MCP configs --- all in one step
 marmot init
-
-# (Optional) Configure OpenAI embeddings --- see "Embedding Providers" below
-
-# Write a node (or create .md files manually, then index)
-marmot index
-
-# Start the MCP server
-marmot serve
 ```
 
-## Connect to Claude Code
+`marmot init` runs three stages:
+1. Creates the `.marmot/` vault directory
+2. **`configure`** --- prompts for embedding provider, model, and API key
+3. **`setup`** --- detects your tools (Claude Code, Codex, VS Code, Cursor) and writes MCP configs
+
+After init, write nodes and index:
 
 ```bash
-claude mcp add context-marmot -- /path/to/bin/marmot serve --dir /path/to/your/.marmot
+marmot index
 ```
 
-Or add to `.mcp.json` in your project root:
+Agents automatically connect to the MCP server --- no manual server start needed.
 
-```json
-{
-  "mcpServers": {
-    "context-marmot": {
-      "command": "./bin/marmot",
-      "args": ["serve", "--dir", ".marmot"]
-    }
-  }
-}
+### Manual setup (if needed)
+
+Run `marmot configure` or `marmot setup` individually at any time:
+
+```bash
+# Re-configure embedding provider/model/key
+marmot configure
+
+# Regenerate MCP configs (e.g., after installing a new tool)
+marmot setup
+
+# Target a specific tool
+marmot setup --claude
+marmot setup --codex
+marmot setup --vscode
+marmot setup --cursor
 ```
 
 Once connected, agents get three tools:
@@ -160,40 +164,36 @@ ContextMarmot supports pluggable embedding providers for semantic search. Out of
 
 ### Configuring OpenAI embeddings
 
-1. **Set the provider in your vault config.** Edit `.marmot/_config.md` frontmatter:
+The easiest way is the interactive configure command (also runs automatically during `marmot init`):
 
-   ```yaml
-   ---
-   version: "1"
-   namespace: default
-   embedding_provider: openai
-   embedding_model: text-embedding-3-small
-   ---
-   ```
+```bash
+marmot configure
+```
 
-   `embedding_model` can be left empty to use the default (`text-embedding-3-small`).
+This prompts for provider, model, and API key. The key is stored in `.marmot/.marmot-data/.env` (gitignored).
 
-2. **Set your API key.** Copy the `.env.example` file from the repo root and fill in your key:
+**Manual configuration** --- edit `.marmot/_config.md` frontmatter directly:
 
-   ```bash
-   cp .env.example .env
-   # Edit .env and add your key
-   source .env
-   ```
+```yaml
+---
+version: "1"
+namespace: default
+embedding_provider: openai
+embedding_model: text-embedding-3-small
+---
+```
 
-   Or export directly:
+Then set your API key via environment variable:
 
-   ```bash
-   export OPENAI_API_KEY=sk-...
-   ```
+```bash
+export OPENAI_API_KEY=sk-...
+```
 
-   API keys are read from environment variables, never stored in vault config files.
+After changing the embedding provider or model, rebuild embeddings:
 
-3. **Re-index with `--force`.** After changing the embedding provider or model, existing embeddings are incompatible and must be regenerated:
-
-   ```bash
-   marmot index --dir .marmot --force
-   ```
+```bash
+marmot index --force
+```
 
 ### Fallback behavior
 
@@ -203,7 +203,9 @@ If `embedding_provider` is set to `openai` (or another non-mock provider) but th
 
 | Command | Description |
 |---------|-------------|
-| `marmot init [--dir .marmot]` | Create a new vault with default config |
+| `marmot init [--dir .marmot]` | Create a new vault, run configure, then setup |
+| `marmot configure [--dir .marmot]` | Interactive prompt for embedding provider, model, and API key |
+| `marmot setup [--dir .marmot] [--claude] [--codex] [--vscode] [--cursor]` | Generate MCP configs for detected (or specified) tools |
 | `marmot index [--dir .marmot] [--force]` | Index all node files into the embedding store. `--force` clears and rebuilds all embeddings (use after changing provider/model). |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
 | `marmot verify [--dir .marmot]` | Run integrity and staleness checks |
@@ -254,9 +256,9 @@ export async function login(email: string, password: string) { ... }
 ## Architecture
 
 ```
-cmd/marmot/              CLI (init, index, query, serve, verify)
+cmd/marmot/              CLI (init, configure, setup, index, query, serve, verify)
 internal/
-  config/                Vault config parser, embedder factory
+  config/                Vault config parser, .env key storage, embedder factory
   node/                  Markdown parser/writer, atomic file I/O
   graph/                 In-memory graph, adjacency lists, cycle detection
   verify/                Hash integrity, staleness, structural acyclicity
@@ -297,7 +299,9 @@ go test -race -tags integration -count=1 ./internal/
 - Pluggable embedding providers (OpenAI and mock) with config-driven selection
 - Token-budget-aware graph traversal and XML compaction
 - MCP server with 3 tools over stdio
-- CLI with init, index, query, verify, serve
+- CLI with init, configure, setup, index, query, verify, serve
+- Interactive configuration (provider, model, API key) with vault `.env` storage
+- Auto-setup for Claude Code, Codex, VS Code, and Cursor (MCP config generation)
 - Security hardened (path traversal protection, input validation, parameterized SQL)
 
 ### Known MVP limitations

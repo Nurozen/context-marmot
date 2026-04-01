@@ -33,60 +33,133 @@ func NewServer(engine *Engine) *Server {
 func (s *Server) registerTools() {
 	// context_query tool
 	queryTool := mcp.NewTool("context_query",
-		mcp.WithDescription("Search the project knowledge graph for relevant context. Returns a structured subgraph compacted to fit the token budget."),
+		mcp.WithDescription(`Search the project knowledge graph for relevant context.
+
+WHEN TO USE: Before reading files directly, query the graph to find relevant code, decisions, and architecture context. This is faster and more targeted than file exploration.
+
+HOW IT WORKS: Your query is embedded and matched against node summaries via semantic search. The top matches become entry points for graph traversal, which follows edges to pull in related nodes. The result is compacted XML that fits your token budget.
+
+TIPS:
+- Use natural language queries describing what you need ("how does authentication work", "database connection pooling strategy")
+- Increase depth to follow more relationship hops from entry nodes
+- Increase budget if you need more detail; decrease it for a quick overview
+- Results include full context for the closest matches and compact summaries for neighbors`),
 		mcp.WithString("query",
 			mcp.Required(),
-			mcp.Description("Natural language query or node ID"),
+			mcp.Description("Natural language query describing what context you need, or a specific node ID"),
 		),
 		mcp.WithNumber("depth",
-			mcp.Description("Max traversal depth from entry nodes (default: 2)"),
+			mcp.Description("How many relationship hops to follow from entry nodes. 1 = entry nodes only, 2 = entry + direct neighbors (default: 2), 3+ = broader context"),
 		),
 		mcp.WithNumber("budget",
-			mcp.Description("Max token budget for response (default: 4096)"),
+			mcp.Description("Max token budget for the response. Use 2000-4000 for quick lookups, 8000-16000 for deep exploration (default: 4096)"),
 		),
 		mcp.WithString("mode",
-			mcp.Description("Compaction mode (default: adjacency)"),
+			mcp.Description("Compaction mode. 'adjacency' (default) expands neighbors breadth-first; 'deep' follows call chains depth-first"),
 			mcp.Enum("adjacency", "deep"),
 		),
 	)
 
 	// context_write tool
 	writeTool := mcp.NewTool("context_write",
-		mcp.WithDescription("Write or update a node in the knowledge graph. Enforces structural acyclicity."),
+		mcp.WithDescription(`Write or update a node in the project knowledge graph.
+
+WHEN TO USE: Record important context that would help you or future agents understand the codebase. Write a node when you:
+- Discover how a system works (architecture, data flow, key patterns)
+- Make or learn about a design decision and its rationale
+- Identify a function, class, or module worth remembering
+- Find a non-obvious relationship between components
+- Encounter something that took effort to understand
+
+WHEN NOT TO USE: Don't create nodes for trivial facts derivable from reading the code directly (e.g., "this file has 50 lines"). Focus on context that saves future effort.
+
+NODE DESIGN GUIDELINES:
+- One concept per node. If you're describing two distinct things, make two nodes with edges between them.
+- The 'summary' field is critical — it's what gets embedded for semantic search. Write it as a clear, searchable sentence that distinguishes this node from similar ones. Bad: "auth module". Good: "JWT-based authentication module that validates tokens via RS256 and manages session lifecycle".
+- The 'context' field holds the full detail: code snippets, documentation, decision rationale, examples. Be thorough here.
+- Use 'source' to link back to the actual file and line range so the node can be verified against the code later.
+- IDs should be hierarchical paths reflecting the project structure (e.g., 'auth/login', 'db/connection_pool', 'decisions/chose_postgres').
+
+EDGE GUIDELINES:
+- Structural edges (contains, imports, extends, implements) define hierarchy and must not form cycles.
+- Behavioral edges (calls, reads, writes, references) describe runtime relationships and may form cycles.
+- Always add edges to related nodes you know exist. The graph's value comes from connections, not isolated nodes.
+- Prefer specific relations: 'calls' over 'references' when one function invokes another; 'contains' for parent-child module relationships.`),
 		mcp.WithString("id",
 			mcp.Required(),
-			mcp.Description("Node ID (e.g., 'auth/login')"),
+			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. Examples: 'auth/login', 'db/users', 'decisions/caching_strategy'. Must not contain '..' or start with '/'"),
 		),
 		mcp.WithString("type",
 			mcp.Required(),
-			mcp.Description("Node type"),
+			mcp.Description("Node type. Use 'function' for individual functions/methods, 'module' for packages/directories, 'class' for classes/interfaces, 'concept' for architectural patterns or domain concepts, 'decision' for design decisions and their rationale, 'reference' for external docs or API references, 'composite' for aggregate nodes spanning multiple concerns"),
 			mcp.Enum("function", "module", "class", "concept", "decision", "reference", "composite"),
 		),
 		mcp.WithString("namespace",
-			mcp.Description("Target namespace (ignored in MVP, defaults to 'default')"),
+			mcp.Description("Target namespace (defaults to 'default')"),
 		),
 		mcp.WithString("summary",
-			mcp.Description("Short description of the node"),
+			mcp.Description("A clear, searchable 1-2 sentence description. This gets embedded for semantic search — make it specific and distinguishing. Include key terms someone would search for. Bad: 'handles auth'. Good: 'Validates JWT access tokens using RS256, checks expiry and audience claims, returns decoded user ID on success'"),
 		),
 		mcp.WithString("context",
-			mcp.Description("Full context content (code, documentation, etc.)"),
+			mcp.Description("Full context: code snippets, documentation, decision rationale, examples, gotchas, or anything that helps understand this node deeply. Use markdown formatting. Be thorough — this is what gets returned when the node is a top search result"),
 		),
 		mcp.WithArray("edges",
-			mcp.Description("Typed directed edges from this node"),
+			mcp.Description("Relationships to other nodes. Structural edges (contains, imports, extends, implements) must not form cycles. Behavioral edges (calls, reads, writes, references, associated) may cycle. Always connect to related nodes you know exist"),
+			mcp.Items(map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"target": map[string]any{
+						"type":        "string",
+						"description": "Target node ID. Must be a valid node ID that exists or will exist in the graph",
+					},
+					"relation": map[string]any{
+						"type":        "string",
+						"description": "Structural: 'contains' (parent has child), 'imports' (depends on), 'extends' (inherits from), 'implements' (fulfills interface). Behavioral: 'calls' (invokes at runtime), 'reads' (consumes data from), 'writes' (produces data to), 'references' (general reference), 'cross_project' (link to another namespace), 'associated' (related but no specific direction)",
+						"enum":        []string{"contains", "imports", "extends", "implements", "calls", "reads", "writes", "references", "cross_project", "associated"},
+					},
+				},
+				"required": []string{"target", "relation"},
+			}),
 		),
 		mcp.WithObject("source",
-			mcp.Description("Source file reference with path, lines, and hash"),
+			mcp.Description("Link to the source file this node describes. Enables staleness detection — if the source changes, the node can be flagged for review"),
+			mcp.Properties(map[string]any{
+				"path": map[string]any{
+					"type":        "string",
+					"description": "File path relative to the project root (e.g., 'src/auth/login.ts')",
+				},
+				"lines": map[string]any{
+					"type":        "array",
+					"description": "[start_line, end_line] range within the file. Omit for whole-file nodes",
+					"items":       map[string]any{"type": "number"},
+				},
+				"hash": map[string]any{
+					"type":        "string",
+					"description": "SHA-256 hash of the source content for staleness detection. Omit if unknown — the verifier will compute it",
+				},
+			}),
 		),
 	)
 
 	// context_verify tool
 	verifyTool := mcp.NewTool("context_verify",
-		mcp.WithDescription("Check node staleness and graph integrity."),
+		mcp.WithDescription(`Check the health of nodes in the knowledge graph.
+
+WHEN TO USE:
+- After modifying source files, run staleness checks to find nodes whose source has changed
+- Before relying on graph context for a critical task, verify integrity to catch dangling edges or broken references
+- Periodically as a maintenance check to keep the graph accurate
+
+CHECKS:
+- 'staleness': Compares stored source hashes against current files. Flags nodes whose source code has changed since the node was written.
+- 'integrity': Detects dangling edges (pointing to non-existent nodes), structural cycles, and missing source files.
+- 'all': Runs both checks (default).`),
 		mcp.WithArray("node_ids",
-			mcp.Description("Node IDs to verify. Omit for full verification."),
+			mcp.Description("Specific node IDs to check. Omit to verify the entire graph"),
+			mcp.WithStringItems(),
 		),
 		mcp.WithString("check",
-			mcp.Description("Check type (default: all)"),
+			mcp.Description("Which checks to run: 'staleness' (source hash comparison), 'integrity' (dangling edges, cycles, missing files), or 'all' (both)"),
 			mcp.Enum("staleness", "integrity", "all"),
 		),
 	)

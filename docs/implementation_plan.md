@@ -48,17 +48,21 @@ Benchmark: agent with ContextMarmot vs agent without, measured on:
 
 ## MVP Status: COMPLETE (2026-03-31)
 
-All M1-M7 phases implemented and tested. 156 tests passing (148 unit + 8 integration) across 8 packages.
+All M1-M7 phases implemented and tested. 180 tests passing across 8 packages.
 Production hardened with path traversal protection, input validation, and race-safe operations.
 
 **Implementation notes:**
 - sqlite-vec Go bindings have a WASM ABI mismatch with ncruces v0.17.1 — embedding search uses Go-side KNN (L2 distance with max-heap) instead. Upgradable when bindings are fixed.
 - MCP SDK: used `mark3labs/mcp-go` (official Go SDK import paths were unstable at time of implementation).
 - Pluggable embedding providers: OpenAI (`text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`) and Mock (trigram hashing). Config-driven selection via `_config.md` frontmatter with env var API keys and graceful fallback to mock.
-- `internal/config` package provides vault config parsing (`_config.md`) and embedder factory (`NewEmbedderFromVault`).
+- `internal/config` package provides vault config parsing (`_config.md`), atomic save, `.env` key storage, and embedder factory (`NewEmbedderFromVault`).
 - Batch embedding via `EmbedBatch()` for efficient indexing (OpenAI chunks at 100 inputs).
 - Variable embedding dimensions supported per-namespace (1536 for small/ada, 3072 for large).
 - `marmot index --force` rebuilds all embeddings (required after provider/model change).
+- `marmot configure` provides interactive setup for embedding provider, model, and API key. Keys stored in `.marmot/.marmot-data/.env` with env var fallback.
+- `marmot setup` auto-detects IDE/agent tools and generates MCP configs: `.mcp.json` (Claude Code, Cursor), `.codex/config.toml` (Codex), `.vscode/mcp.json` (VS Code).
+- `marmot init` chains configure → setup for zero-config onboarding.
+- MCP tool schemas include full JSON Schema for `edges` (item schema with `target`/`relation` enum) and `source` (property schema) to prevent agent field-name guessing.
 
 ---
 
@@ -190,14 +194,37 @@ Minimal MCP server and CLI to enable agent testing.
   - [x] Parse parameters (node_ids, namespace, check)
   - [x] Route to verifier (staleness / integrity / all)
   - [x] Return verification report
+- [x] Implement rich tool descriptions to guide agent behavior
+  - [x] `context_query`: explains semantic search pipeline, depth/budget tuning, natural language tips
+  - [x] `context_write`: when to create nodes, summary writing guidance (good/bad examples), node type meanings, edge selection (structural vs behavioral), ID structure conventions
+  - [x] `context_verify`: when to run each check type, what each detects
 - [x] Implement tool discovery (`tools/list`)
+- [x] Implement vault auto-discovery (walk up directory tree to find `.marmot/`, like git finds `.git/`)
 - [x] Set up CLI framework
 - [x] Implement `marmot init` — initialize `.marmot/` vault structure
 - [x] Implement `marmot index` — index node files into embedding store (`--force` to rebuild)
 - [x] Implement `marmot query <query>` — run a context query and print XML result
 - [x] Implement `marmot verify` — run integrity/staleness checks
 - [x] Implement `marmot serve` — start MCP server
+- [x] Implement `marmot configure` — interactive prompt for embedding provider, model, and API key
+  - [x] Provider selection (openai / mock) with numbered menu
+  - [x] Model preset selection (text-embedding-3-small / text-embedding-3-large)
+  - [x] API key input with masked echo (golang.org/x/term) and vault `.env` storage
+  - [x] Config save with `LoadRaw()`/`Save()` preserving markdown body
+  - [x] Auto-chained from `marmot init`
+- [x] Implement `marmot setup` — generate MCP configs for IDE/agent tools
+  - [x] Auto-detect installed tools (Claude Code, Codex, VS Code, Cursor)
+  - [x] Generate `.mcp.json` (Claude Code / Cursor format)
+  - [x] Generate `.codex/config.toml` (Codex TOML format, append-safe)
+  - [x] Generate `.vscode/mcp.json` (VS Code format with `servers` key)
+  - [x] Per-tool flags (`--claude`, `--codex`, `--vscode`, `--cursor`)
+  - [x] Auto-chained from `marmot init` after configure
+- [x] Add proper JSON Schema for `context_write` edges and source parameters
+  - [x] `edges` array item schema with `target` and `relation` (enum of 10 valid values)
+  - [x] `source` object schema with `path`, `lines`, `hash` properties
+  - [x] `node_ids` array item schema (string items)
 - [x] Write integration tests for full query/write/verify flows
+- [x] Write tests for configure (6 tests) and setup (10 tests) commands
 - [ ] **Benchmark: test with Claude Code as MCP client, measure vs vanilla file reading**
 
 ---

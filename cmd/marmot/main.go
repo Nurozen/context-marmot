@@ -55,6 +55,10 @@ func run(args []string) int {
 	switch command {
 	case "init":
 		return cmdInit(cmdArgs)
+	case "configure":
+		return cmdConfigure(cmdArgs)
+	case "setup":
+		return cmdSetup(cmdArgs)
 	case "index":
 		return cmdIndex(cmdArgs)
 	case "query":
@@ -72,7 +76,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, index, query, serve, verify")
+	fmt.Fprintln(os.Stderr, "commands: init, configure, setup, index, query, serve, verify")
 }
 
 // ---------------------------------------------------------------------------
@@ -91,6 +95,20 @@ func cmdInit(args []string) int {
 
 	if err := runInit(*dir); err != nil {
 		fmt.Fprintf(os.Stderr, "init: %v\n", err)
+		return 1
+	}
+
+	// Auto-run configure so the user is fully set up in one step.
+	fmt.Println()
+	if err := runConfigure(*dir, os.Stdin); err != nil {
+		fmt.Fprintf(os.Stderr, "configure: %v\n", err)
+		return 1
+	}
+
+	// Auto-run setup to generate MCP configs for detected tools.
+	fmt.Println()
+	if err := runSetup(*dir, nil); err != nil {
+		fmt.Fprintf(os.Stderr, "setup: %v\n", err)
 		return 1
 	}
 	return 0
