@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// Ensure OpenAIProvider implements Summarizer.
+var _ Summarizer = (*OpenAIProvider)(nil)
+
 const (
 	openaiLLMDefaultModel = "gpt-5.1-codex-mini"
 	openaiChatEndpoint    = "https://api.openai.com/v1/chat/completions"
@@ -120,4 +123,60 @@ func (p *OpenAIProvider) Classify(ctx context.Context, req ClassifyRequest) (Cla
 	}
 
 	return parseClassifyJSON(apiResp.Choices[0].Message.Content), nil
+}
+
+// Summarize generates a namespace summary using the OpenAI Chat Completions API.
+func (p *OpenAIProvider) Summarize(ctx context.Context, req SummarizeRequest) (string, error) {
+	userMsg := buildSummarizeUserMessage(req)
+
+	apiReq := openaiChatRequest{
+		Model:     p.model,
+		MaxTokens: 1024,
+		Messages: []openaiChatMessage{
+			{Role: "system", Content: summarizeSystemPrompt},
+			{Role: "user", Content: userMsg},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(apiReq)
+	if err != nil {
+		return "", fmt.Errorf("openai: marshal summarize request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiChatEndpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("openai: create summarize request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("openai: summarize network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("openai: read summarize response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var apiResp openaiChatResponse
+		if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
+			return "", fmt.Errorf("openai: summarize API error (%d): %s", resp.StatusCode, apiResp.Error.Message)
+		}
+		return "", fmt.Errorf("openai: summarize unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var apiResp openaiChatResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("openai: unmarshal summarize response: %w", err)
+	}
+
+	if len(apiResp.Choices) == 0 {
+		return "", fmt.Errorf("openai: empty choices in summarize response")
+	}
+
+	return apiResp.Choices[0].Message.Content, nil
 }

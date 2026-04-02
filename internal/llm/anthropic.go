@@ -145,6 +145,111 @@ func (p *AnthropicProvider) Classify(ctx context.Context, req ClassifyRequest) (
 	return parseClassifyJSON(apiResp.Content[0].Text), nil
 }
 
+// Ensure AnthropicProvider implements Summarizer.
+var _ Summarizer = (*AnthropicProvider)(nil)
+
+// Summarize generates a namespace summary using the Anthropic Messages API.
+func (p *AnthropicProvider) Summarize(ctx context.Context, req SummarizeRequest) (string, error) {
+	userMsg := buildSummarizeUserMessage(req)
+
+	apiReq := anthropicRequest{
+		Model:     p.model,
+		MaxTokens: 1024,
+		System:    summarizeSystemPrompt,
+		Messages: []anthropicMessage{
+			{Role: "user", Content: userMsg},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(apiReq)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: marshal summarize request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicEndpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("anthropic: create summarize request: %w", err)
+	}
+	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("anthropic-version", anthropicVersion)
+	httpReq.Header.Set("content-type", "application/json")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: summarize network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: read summarize response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var apiResp anthropicResponse
+		if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
+			return "", fmt.Errorf("anthropic: summarize API error (%d): %s", resp.StatusCode, apiResp.Error.Message)
+		}
+		return "", fmt.Errorf("anthropic: summarize unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var apiResp anthropicResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("anthropic: unmarshal summarize response: %w", err)
+	}
+
+	if len(apiResp.Content) == 0 {
+		return "", fmt.Errorf("anthropic: empty content in summarize response")
+	}
+
+	return apiResp.Content[0].Text, nil
+}
+
+const summarizeSystemPrompt = `You are a knowledge graph summarizer. Given a list of nodes in a namespace, synthesize a concise summary.
+
+Rules:
+- Use [[wikilinks]] to reference key nodes (e.g. [[auth/login]])
+- Organize the summary by major themes or subsystems
+- Focus on relationships between nodes and their purpose, not implementation details
+- Keep the output under 2000 characters
+- Use clear, technical prose`
+
+const summarizeMaxNodes = 50
+const summarizeSummaryLimit = 200
+const summarizeMaxEdges = 5
+
+// buildSummarizeUserMessage constructs the user prompt for summary generation.
+func buildSummarizeUserMessage(req SummarizeRequest) string {
+	var sb strings.Builder
+
+	fmt.Fprintf(&sb, "Namespace: %s\n\n", req.Namespace)
+	sb.WriteString("Nodes:\n")
+
+	nodes := req.Nodes
+	if len(nodes) > summarizeMaxNodes {
+		nodes = nodes[:summarizeMaxNodes]
+	}
+
+	for _, n := range nodes {
+		summary := n.Summary
+		if len(summary) > summarizeSummaryLimit {
+			summary = summary[:summarizeSummaryLimit]
+		}
+		edges := n.Edges
+		if len(edges) > summarizeMaxEdges {
+			edges = edges[:summarizeMaxEdges]
+		}
+		fmt.Fprintf(&sb, "- ID: %s | Type: %s | Summary: %s", n.ID, n.Type, summary)
+		if len(edges) > 0 {
+			fmt.Fprintf(&sb, " | Edges: %s", strings.Join(edges, ", "))
+		}
+		sb.WriteByte('\n')
+	}
+
+	sb.WriteString("\nSynthesize a concise namespace summary from these nodes.")
+	return sb.String()
+}
+
 // buildUserMessage constructs the user prompt from the classify request.
 func buildUserMessage(req ClassifyRequest) string {
 	var sb strings.Builder

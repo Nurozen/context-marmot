@@ -340,23 +340,27 @@ Co-access frequency tracking. Decay affects traversal priority only.
 - [x] Write unit tests for weight accumulation, decay math, and floor enforcement — 15 tests in `heatmap_test.go`
 - [x] Wire heat map into serve pipeline (load on startup, save on shutdown)
 
-## Phase 13: Summary Engine + Update Engine
+## Phase 13: Summary Engine + Update Engine — COMPLETE (2026-04-01)
 
-- [ ] **Summary Engine**
-  - [ ] Implement `GenerateSummary(namespace) -> SummaryNode` using LLM Provider
-  - [ ] Write `_summary.md` with `type: summary` frontmatter and wikilinks
-  - [ ] Implement async regeneration scheduler (configurable interval)
-  - [ ] Implement change-triggered regeneration (significant node count delta)
-  - [ ] Ensure summary generation never blocks read/write operations
-  - [ ] Graceful degradation: summaries go stale when LLM unavailable, not broken
-- [ ] **Update Engine**
-  - [ ] Implement `DetectChanges(namespace) -> []ChangedNode` (hash comparison)
-  - [ ] Implement `PropagateStale(changed_ids, graph) -> []AffectedNode` (walk reverse edges)
-  - [ ] Implement `Reindex(node_ids) -> error` (re-read source, update node, update embedding)
-  - [ ] Implement file watcher mode (fsnotify or equivalent for continuous operation)
-  - [ ] Implement batch update mode (on-demand scan)
-  - [ ] Trigger summary regeneration on significant changes
-  - [ ] Write unit tests for change detection and propagation
+- [x] **Summary Engine** — `internal/summary/`
+  - [x] Implement `GenerateSummary(namespace) -> SummaryNode` using LLM Provider
+  - [x] Write `_summary.md` with `type: summary` frontmatter and wikilinks
+  - [x] Implement async regeneration scheduler (configurable interval)
+  - [x] Implement change-triggered regeneration (significant node count delta)
+  - [x] Ensure summary generation never blocks read/write operations
+  - [x] Graceful degradation: summaries go stale when LLM unavailable, not broken
+- [x] **Update Engine** — `internal/update/`
+  - [x] Implement `DetectChanges(namespace) -> []ChangedNode` (hash comparison)
+  - [x] Implement `PropagateStale(changed_ids, graph) -> []AffectedNode` (walk reverse edges)
+  - [x] Implement `Reindex(node_ids) -> error` (re-read source, update node, update embedding)
+  - [x] Implement file watcher mode (fsnotify for continuous operation)
+  - [x] Implement batch update mode (on-demand scan via `RunBatchUpdate`)
+  - [x] Trigger summary regeneration on significant changes (via OnChange callback)
+  - [x] Write unit tests for change detection and propagation — 15 tests in `update_test.go`
+- [x] **Integration**
+  - [x] Add `Summarizer` interface to LLM package (OpenAI, Anthropic, Mock implementations)
+  - [x] Wire Summary Engine + Scheduler + Update Engine into MCP engine and serve pipeline
+  - [x] Notify summary scheduler from `context_write` and `context_delete` handlers
 
 ## Phase 14: Embedding Model Management
 

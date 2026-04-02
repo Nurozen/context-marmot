@@ -311,6 +311,13 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		writeStatus = "updated"
 	}
 
+	// Notify summary scheduler of change (best-effort).
+	if e.SummaryScheduler != nil {
+		if metas, err := e.NodeStore.ListNodes(); err == nil {
+			e.SummaryScheduler.NotifyChange(len(metas))
+		}
+	}
+
 	result := WriteResult{
 		NodeID: id,
 		Hash:   nodeHash,
@@ -473,6 +480,13 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 
 	// Update embedding status.
 	_ = e.EmbeddingStore.UpdateStatus(id, node.StatusSuperseded)
+
+	// Notify summary scheduler of change (best-effort).
+	if e.SummaryScheduler != nil {
+		if metas, err := e.NodeStore.ListNodes(); err == nil {
+			e.SummaryScheduler.NotifyChange(len(metas))
+		}
+	}
 
 	result := DeleteResult{
 		NodeID:       id,

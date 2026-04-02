@@ -14,7 +14,9 @@ import (
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/traversal"
+	"github.com/nurozen/context-marmot/internal/update"
 	"github.com/nurozen/context-marmot/internal/verify"
 )
 
@@ -236,10 +238,13 @@ func runServePipeline(dir string) error {
 	}
 
 	// Wire classifier from vault config (reuses vaultCfg loaded above for heat map).
+	var llmProvider llm.Provider // captured for summary engine
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			engine.WithLLMClassifier(llm.NewOpenAIProvider(key))
+			p := llm.NewOpenAIProvider(key)
+			llmProvider = p
+			engine.WithLLMClassifier(p)
 			fmt.Fprintln(os.Stderr, "classifier: using openai/"+vaultCfg.ClassifierModel)
 		} else {
 			engine.WithLLMClassifier(nil)
@@ -247,7 +252,9 @@ func runServePipeline(dir string) error {
 		}
 	case "anthropic":
 		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			engine.WithLLMClassifier(llm.NewAnthropicProvider(key))
+			p := llm.NewAnthropicProvider(key)
+			llmProvider = p
+			engine.WithLLMClassifier(p)
 			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+vaultCfg.ClassifierModel)
 		} else {
 			engine.WithLLMClassifier(nil)
@@ -258,9 +265,58 @@ func runServePipeline(dir string) error {
 		fmt.Fprintln(os.Stderr, "classifier: using embedding-distance fallback")
 	}
 
+	// Wire summary engine.
+	var sumScheduler *summary.Scheduler
+	if summarizer, ok := llmProvider.(llm.Summarizer); ok {
+		sumEngine := summary.NewEngine(summarizer)
+		engine.WithSummaryEngine(sumEngine)
+
+		sConfig := summary.DefaultSchedulerConfig()
+		nodeLoader := func() ([]*node.Node, error) {
+			metas, err := engine.NodeStore.ListActiveNodes()
+			if err != nil {
+				return nil, err
+			}
+			var nodes []*node.Node
+			for _, m := range metas {
+				path := engine.NodeStore.NodePath(m.ID)
+				n, nerr := engine.NodeStore.LoadNode(path)
+				if nerr != nil {
+					continue
+				}
+				nodes = append(nodes, n)
+			}
+			return nodes, nil
+		}
+		sumScheduler = summary.NewScheduler(sumEngine, sConfig, dir, nsName, nodeLoader)
+		engine.WithSummaryScheduler(sumScheduler)
+		fmt.Fprintln(os.Stderr, "summary: engine wired, scheduler starting")
+	} else {
+		fmt.Fprintln(os.Stderr, "summary: no summarizer available, summaries will not be generated")
+	}
+
+	// Wire update engine.
+	updateEng := update.NewEngine(engine.NodeStore, engine.Graph, engine.EmbeddingStore, engine.Embedder)
+	if sumScheduler != nil {
+		updateEng.WithOnChange(func(count int) {
+			if metas, err := engine.NodeStore.ListNodes(); err == nil {
+				sumScheduler.NotifyChange(len(metas))
+			}
+		})
+	}
+	engine.WithUpdateEngine(updateEng)
+	fmt.Fprintln(os.Stderr, "update: engine wired")
+
+	// Start summary scheduler in background.
+	ctx := context.Background()
+	if sumScheduler != nil {
+		sumScheduler.Start(ctx)
+		defer sumScheduler.Stop()
+	}
+
 	srv := mcpserver.NewServer(engine)
 	fmt.Fprintln(os.Stderr, "ContextMarmot MCP server ready on stdio")
-	return srv.ListenStdio(context.Background(), os.Stdin, os.Stdout)
+	return srv.ListenStdio(ctx, os.Stdin, os.Stdout)
 }
 
 // runVerifyPipeline loads all nodes and runs integrity verification.

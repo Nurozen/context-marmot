@@ -6,6 +6,26 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
+// SummarizeRequest is the input for namespace summary generation.
+type SummarizeRequest struct {
+	Namespace string
+	Nodes     []NodeSummaryInput
+}
+
+// NodeSummaryInput describes a single node for summary generation.
+type NodeSummaryInput struct {
+	ID      string
+	Type    string
+	Summary string
+	Edges   []string // target node IDs
+}
+
+// Summarizer generates namespace-level summaries from node data.
+// Separate from Provider so implementations are optional.
+type Summarizer interface {
+	Summarize(ctx context.Context, req SummarizeRequest) (string, error)
+}
+
 // Action is the CRUD classification result.
 type Action string
 

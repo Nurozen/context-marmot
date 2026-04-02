@@ -16,6 +16,8 @@ import (
 	"github.com/nurozen/context-marmot/internal/llm"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/summary"
+	"github.com/nurozen/context-marmot/internal/update"
 )
 
 // Engine wires together all ContextMarmot internal components. It is the
@@ -25,9 +27,12 @@ type Engine struct {
 	Graph          *graph.Graph
 	EmbeddingStore *embedding.Store
 	Embedder       embedding.Embedder
-	Classifier     *classifier.Classifier // optional; nil = no CRUD classification
-	NSManager      *namespace.Manager    // optional; nil = single-namespace mode
-	HeatMap        *heatmap.HeatMap      // optional; nil = no heat-based priority
+	Classifier       *classifier.Classifier // optional; nil = no CRUD classification
+	NSManager        *namespace.Manager     // optional; nil = single-namespace mode
+	HeatMap          *heatmap.HeatMap       // optional; nil = no heat-based priority
+	SummaryEngine    *summary.Engine        // optional; nil = no summary generation
+	UpdateEngine     *update.Engine         // optional; nil = no update detection
+	SummaryScheduler *summary.Scheduler     // optional; nil = no async summaries
 	// MarmotDir is the root .marmot directory.
 	MarmotDir string
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
@@ -97,6 +102,21 @@ func (e *Engine) WithLLMClassifier(llmProvider llm.Provider) {
 		Embedder: e.Embedder,
 		LLM:      llmProvider, // may be nil for embedding-distance fallback
 	}
+}
+
+// WithSummaryEngine attaches a summary engine to the MCP engine.
+func (e *Engine) WithSummaryEngine(se *summary.Engine) {
+	e.SummaryEngine = se
+}
+
+// WithUpdateEngine attaches an update engine to the MCP engine.
+func (e *Engine) WithUpdateEngine(ue *update.Engine) {
+	e.UpdateEngine = ue
+}
+
+// WithSummaryScheduler attaches a summary scheduler to the MCP engine.
+func (e *Engine) WithSummaryScheduler(ss *summary.Scheduler) {
+	e.SummaryScheduler = ss
 }
 
 // Close releases resources held by the engine.

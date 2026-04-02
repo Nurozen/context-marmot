@@ -28,6 +28,8 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **CRUD classifier** --- `context_write` classifies incoming nodes as ADD / UPDATE / SUPERSEDE / NOOP using embedding similarity + optional LLM; falls back to embedding-distance thresholds when no LLM is configured
 - **Multi-namespace** --- project isolation with namespace directories, bridge manifests for cross-namespace edges, qualified ID resolution
 - **Heat map** --- co-access frequency tracking with exponential decay and floor; hot edges get traversal priority within budget constraints
+- **Summary engine** --- auto-generates `_summary.md` per namespace using LLM; async scheduler regenerates on significant node changes; graceful degradation when LLM unavailable
+- **Update engine** --- detects source file changes via hash comparison, propagates staleness through reverse edges, reindexes affected nodes; file watcher mode for continuous operation
 - **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
@@ -310,6 +312,8 @@ internal/
   llm/                   LLM provider interface, OpenAI + Anthropic + mock implementations
   classifier/            CRUD classifier: embedding search + LLM path + distance fallback
   namespace/             Namespace manager, bridge manifests, qualified ID resolution
+  summary/               Namespace summary generation, async scheduler, _summary.md I/O
+  update/                Source change detection, staleness propagation, reindex, file watcher
   mcp/                   MCP server (4 tools), engine wiring, cross-namespace edge validation
 ```
 
@@ -366,6 +370,8 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Namespace-level write mutex (Phase 10): concurrent writes to different namespaces proceed in parallel; same-namespace writes serialize to prevent CRUD races and TOCTOU bugs
 - Namespace manager + bridges (Phase 11): `_namespace.md` per-namespace config, `_bridges/*.md` relation whitelists, qualified ID resolution, cross-namespace edge validation on write, auto-discovery of cross-namespace edges
 - Heat map (Phase 12): co-access frequency tracking in `_heat/<namespace>.md`, exponential decay with floor, heat-boosted BFS traversal priority, automatic co-access logging from `context_query`
+- Summary engine (Phase 13): `_summary.md` per namespace via LLM synthesis, async regeneration scheduler with delta threshold + periodic interval, graceful degradation
+- Update engine (Phase 13): source hash change detection, reverse-edge staleness propagation, automatic reindexing, fsnotify file watcher, batch update mode
 
 ### Known MVP limitations
 
@@ -374,7 +380,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), and heat map (Phase 12) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), and summary + update engines (Phase 13) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 
