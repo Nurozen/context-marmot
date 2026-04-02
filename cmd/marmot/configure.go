@@ -24,6 +24,18 @@ var openaiModels = []modelPreset{
 	{"text-embedding-3-large", 3072},
 }
 
+type classifierPreset struct {
+	Provider string
+	Model    string
+	Label    string
+}
+
+var classifierPresets = []classifierPreset{
+	{"openai", "gpt-5.1-codex-mini", "openai   (gpt-5.1-codex-mini)"},
+	{"anthropic", "claude-haiku-4-5-20251001", "anthropic (claude-haiku-4-5-20251001)"},
+	{"none", "", "none     (embedding-distance fallback)"},
+}
+
 func cmdConfigure(args []string) int {
 	fs := flag.NewFlagSet("configure", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
@@ -83,6 +95,36 @@ func runConfigure(dir string, input *os.File) error {
 		}
 	} else {
 		cfg.EmbeddingModel = ""
+	}
+
+	// --- CRUD Classifier ---
+	// Default: openai if embedding provider is openai, else none.
+	defaultClassifier := 2 // index of "none"
+	for i, p := range classifierPresets {
+		if p.Provider == cfg.ClassifierProvider {
+			defaultClassifier = i
+			break
+		}
+	}
+	// If no existing classifier config, default to openai when openai embedding is selected.
+	if cfg.ClassifierProvider == "" && cfg.EmbeddingProvider == "openai" {
+		defaultClassifier = 0
+	}
+
+	classifierLabels := make([]string, len(classifierPresets))
+	for i, p := range classifierPresets {
+		classifierLabels[i] = p.Label
+	}
+	classifierIdx := promptChoice(scanner, "CRUD Classifier", classifierLabels, defaultClassifier)
+	selected := classifierPresets[classifierIdx]
+	cfg.ClassifierProvider = selected.Provider
+	cfg.ClassifierModel = selected.Model
+
+	// Prompt for API key only if classifier uses a different provider than embedding.
+	if selected.Provider != "none" && selected.Provider != cfg.EmbeddingProvider {
+		if err := promptAPIKey(scanner, input, dir, selected.Provider); err != nil {
+			return err
+		}
 	}
 
 	// --- Save ---

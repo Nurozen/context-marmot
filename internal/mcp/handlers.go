@@ -113,7 +113,7 @@ type WriteResult struct {
 // HandleContextWrite is the handler for the context_write MCP tool.
 // It constructs a Node, validates structural acyclicity, persists via the
 // node store, and updates the embedding index.
-func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 
 	id := req.GetString("id", "")
@@ -125,8 +125,13 @@ func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) 
 	}
 	nodeType := req.GetString("type", "concept")
 	namespace := req.GetString("namespace", "default")
+
+	mu := e.namespaceLock(namespace)
+	mu.Lock()
+	defer mu.Unlock()
+
 	summary := req.GetString("summary", "")
-	ctx := req.GetString("context", "")
+	nodeCtx := req.GetString("context", "")
 
 	// Parse edges.
 	var edges []node.Edge
@@ -181,13 +186,49 @@ func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) 
 		Source:    source,
 		Edges:     edges,
 		Summary:   summary,
-		Context:   ctx,
+		Context:   nodeCtx,
 	}
+
+	// Determine whether this is a create or update before any mutation.
+	_, nodeExists := e.Graph.GetNode(id)
+	isNew := !nodeExists
 
 	// Set ValidFrom on first write (new node only).
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, exists := e.Graph.GetNode(id); !exists {
+	if isNew {
 		n.ValidFrom = now
+	}
+
+	// Run CRUD classification if classifier is available.
+	if e.Classifier != nil {
+		classResult, classErr := e.Classifier.Classify(ctx, n, e.Graph)
+		if classErr == nil {
+			switch classResult.Action {
+			case "NOOP":
+				// Content is essentially identical to existing node — skip write.
+				existing, ok := e.Graph.GetNode(classResult.TargetNodeID)
+				if ok {
+					result := WriteResult{
+						NodeID: existing.ID,
+						Hash:   verify.ComputeNodeHash(existing),
+						Status: "noop",
+					}
+					return mcp.NewToolResultJSON(result)
+				}
+				// If target not found, fall through to ADD behavior.
+			case "SUPERSEDE":
+				// Soft-delete the target, then continue to write the new node.
+				if classResult.TargetNodeID != "" && classResult.TargetNodeID != id {
+					_ = e.NodeStore.SoftDeleteNode(classResult.TargetNodeID, id)
+					if reloaded, loadErr := e.NodeStore.LoadNode(e.NodeStore.NodePath(classResult.TargetNodeID)); loadErr == nil {
+						_ = e.Graph.UpsertNode(reloaded)
+					}
+					_ = e.EmbeddingStore.UpdateStatus(classResult.TargetNodeID, node.StatusSuperseded)
+				}
+			// ADD and UPDATE both proceed with the normal write path below.
+			}
+		}
+		// On classifier error: fall through to normal write (safe degradation).
 	}
 
 	// Validate structural acyclicity using read-only cycle check.
@@ -215,8 +256,8 @@ func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) 
 
 	// Update embedding index.
 	embedText := summary
-	if ctx != "" {
-		ctxSnip := ctx
+	if nodeCtx != "" {
+		ctxSnip := nodeCtx
 		if len(ctxSnip) > 6000 {
 			ctxSnip = ctxSnip[:6000]
 		}
@@ -236,10 +277,15 @@ func (e *Engine) HandleContextWrite(_ context.Context, req mcp.CallToolRequest) 
 	// Compute node content hash for the response.
 	nodeHash := verify.ComputeNodeHash(n)
 
+	writeStatus := "created"
+	if !isNew {
+		writeStatus = "updated"
+	}
+
 	result := WriteResult{
 		NodeID: id,
 		Hash:   nodeHash,
-		Status: "created",
+		Status: writeStatus,
 	}
 	return mcp.NewToolResultJSON(result)
 }
@@ -366,7 +412,18 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	supersededBy := req.GetString("superseded_by", "")
 
 	// Verify node exists.
-	if _, ok := e.Graph.GetNode(id); !ok {
+	existing, ok := e.Graph.GetNode(id)
+	if !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
+	}
+
+	mu := e.namespaceLock(existing.Namespace)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-fetch inside the lock so concurrent deletes see the updated status.
+	current, ok := e.Graph.GetNode(id)
+	if !ok || current.Status == node.StatusSuperseded {
 		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
 	}
 

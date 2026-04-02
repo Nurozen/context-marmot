@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 
 	"github.com/ncruces/go-sqlite3"
@@ -358,6 +359,90 @@ func (s *Store) SearchActive(queryEmbedding []float32, topK int, model string) (
 	results := make([]ScoredResult, 0, min(topK, len(candidates)))
 	for len(results) < topK && len(candidates) > 0 {
 		results = append(results, heap.Pop(&candidates).(ScoredResult))
+	}
+
+	return results, nil
+}
+
+// FindSimilar returns all active nodes whose embedding similarity score is >= threshold.
+// Unlike Search (which returns a fixed top-K), FindSimilar returns every match above
+// the threshold. This is used by the CRUD classifier to find potential UPDATE/SUPERSEDE candidates.
+// Only active nodes are considered (status == "" or "active").
+func (s *Store) FindSimilar(queryEmbedding []float32, threshold float64, model string) ([]ScoredResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Validate query dimension matches stored embeddings.
+	storedDim, err := s.storedDimensionLocked()
+	if err != nil {
+		return nil, fmt.Errorf("check stored dimension: %w", err)
+	}
+	if storedDim == 0 {
+		// Empty store — no candidates possible.
+		return nil, nil
+	}
+	if len(queryEmbedding) != storedDim {
+		return nil, fmt.Errorf("query embedding dimension mismatch: got %d, want %d", len(queryEmbedding), storedDim)
+	}
+
+	// Check that stored embeddings use the same model.
+	modelOK, err := s.checkModel(model)
+	if err != nil {
+		return nil, err
+	}
+	if !modelOK {
+		return nil, fmt.Errorf("model mismatch: query model %q does not match stored embeddings", model)
+	}
+
+	// Scan all embeddings for the given model, filtering to active status only.
+	stmt, _, err := s.db.Prepare(`SELECT node_id, embedding, status FROM embeddings WHERE model = ?`)
+	if err != nil {
+		return nil, fmt.Errorf("prepare find similar scan: %w", err)
+	}
+	defer stmt.Close()
+
+	stmt.BindText(1, model)
+
+	var results []ScoredResult
+	for stmt.Step() {
+		nodeID := stmt.ColumnText(0)
+		blob := stmt.ColumnRawBlob(1)
+		status := stmt.ColumnText(2)
+
+		// Skip non-active nodes.
+		if status != "" && status != "active" {
+			continue
+		}
+
+		stored, err := deserializeFloat32(blob)
+		if err != nil {
+			continue // skip malformed embeddings
+		}
+
+		dist := l2Distance(queryEmbedding, stored)
+		// Convert L2 distance to a similarity score: 1 / (1 + distance).
+		similarity := 1.0 / (1.0 + dist)
+
+		if similarity >= threshold {
+			results = append(results, ScoredResult{
+				NodeID: nodeID,
+				Score:  similarity,
+			})
+		}
+	}
+	if err := stmt.Err(); err != nil {
+		return nil, fmt.Errorf("find similar scan: %w", err)
+	}
+
+	// Sort by score descending (highest similarity first).
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	// Cap to avoid sending huge candidate lists.
+	const maxResults = 10
+	if len(results) > maxResults {
+		results = results[:maxResults]
 	}
 
 	return results, nil

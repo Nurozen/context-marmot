@@ -57,8 +57,6 @@ graph TB
         EI[Embedding Index<br/>SQLite + sqlite-vec]
     end
 
-    GIT[Git Layer<br/>Versioning + Temporal History]
-
     A1 & A2 & A3 --> Q & W & V
     OB -.->|reads .md files| NF
     CU --> R1 & R2 & R3
@@ -81,10 +79,6 @@ graph TB
     SUM --> NF
     SUM --> SN
     UE --> SUM
-    NF --> GIT
-    HM --> GIT
-    BR --> GIT
-    SN --> GIT
 ```
 
 ## Consumer Abstraction
@@ -194,7 +188,6 @@ sequenceDiagram
     participant VER as Verifier
     participant NS as Node Store
     participant EI as Embedding Index
-    participant GIT as Git Layer
 
     Agent->>MCP: context_write(node, edges, source)
     MCP->>MCP: acquire write lock (namespace-level)
@@ -238,7 +231,6 @@ sequenceDiagram
     end
 
     MCP->>MCP: release write lock
-    GIT->>GIT: auto-commit (batched, configurable)
 ```
 
 ## Concurrency Model
@@ -265,15 +257,9 @@ Writes to *different* namespaces proceed in parallel with no contention.
 Node files are written atomically: write to a temp file, then rename. This prevents
 partial reads if a reader accesses a file mid-write.
 
-### Git Commits
+### Git
 
-The engine auto-commits changes to git, batched within a configurable window
-(default: 5 seconds). Multiple writes within the window are combined into a single
-commit. This prevents commit-per-write explosion while maintaining reasonable history.
-
-- Commit messages are auto-generated: `"marmot: update auth/login, add db/cache/redis"`
-- The batch window is configurable via `_config.md` (`git_commit_batch_window: 5s`)
-- `marmot serve --no-autocommit` disables auto-commit for manual workflows
+ContextMarmot does not auto-commit to git. The supersede chain (Phase 8) provides semantic history — intentional node replacements with `valid_from`/`valid_until` timestamps and `superseded_by` links — which covers the meaningful history an agent system needs. Users manage `.marmot/` in their project's git the same way they manage any other directory.
 
 ## LLM Provider
 
@@ -287,10 +273,9 @@ The engine has an explicit LLM dependency for two subsystems:
 ### Configuration
 
 ```yaml
-# In _config.md settings:
-llm_provider: anthropic          # anthropic, openai, ollama, or custom
-llm_model: claude-haiku-4-5      # cheap/fast model for classification
-llm_api_key_env: ANTHROPIC_API_KEY  # env var name (never stored in config)
+# In _config.md frontmatter:
+classifier_provider: openai           # openai | anthropic | none
+classifier_model: gpt-5.1-codex-mini  # model name; set by marmot configure
 ```
 
 The LLM provider is abstracted behind an interface. The CRUD classifier and summary
@@ -389,12 +374,12 @@ gives you graph visualization, backlinks, and search for free.
 | **Graph Manager** | Core graph operations: add/remove/update/soft-delete nodes and edges. Maintains in-memory adjacency list. Enforces structural acyclicity (behavioral cycles allowed). Atomic file writes. |
 | **Verifier** | Structural acyclicity enforcement (topological sort on structural edges only). Content hash computation. Staleness detection via source hash comparison. Behavioral edges skip cycle checks. |
 | **Namespace Manager** | Project isolation. Resolves qualified cross-namespace references. Manages bridge manifests (allowed_relations whitelist). |
-| **Update Engine** | Hash-based change detection. Compares stored source hashes to current file state. Propagates staleness flags to dependent nodes. Pushes changes via WebSocket. Triggers summary regeneration. Manages git auto-commit batching. |
+| **Update Engine** | Hash-based change detection. Compares stored source hashes to current file state. Propagates staleness flags to dependent nodes. Pushes changes via WebSocket. Triggers summary regeneration. |
 | **Summary Engine** | Async generation of `_summary.md` per namespace. Uses LLM Provider to synthesize from active nodes. Runs outside the critical path. Degrades gracefully (goes stale, not broken). |
 | **Node Store** | File I/O layer. Reads/writes markdown node files. Parses YAML frontmatter (including temporal fields) + wikilinks + markdown sections. Atomic writes via temp-file-then-rename. |
 | **Embedding Index** | SQLite + sqlite-vec. Stores node ID -> embedding + model tag. Decay-agnostic. Supports similarity search for CRUD classification. Rejects cross-model queries. |
 | **Heat Map** | Per-namespace co-access frequency store. Exponential decay with floor (never reaches zero). Informs traversal prioritization only — never affects discoverability. |
-| **Git Layer** | Versioning and temporal history. Auto-commits in batched windows. All node files (including superseded), heat maps, and bridge manifests are committed. |
+| **Git Layer** | Not used. ContextMarmot does not auto-commit. The supersede chain provides semantic history. Users manage `.marmot/` in git like any other directory. |
 
 ## Decay Model
 

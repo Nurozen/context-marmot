@@ -173,7 +173,9 @@ CHECKS:
 
 WHEN TO USE: When a node's content is no longer accurate because the source code changed or a new node replaces it. Superseded nodes are excluded from future queries by default but retained for historical reference.
 
-This does NOT permanently delete the node file. The node is marked with status="superseded" and a valid_until timestamp. Use context_write to create the replacement node first, then call context_delete with its ID in superseded_by.`),
+This does NOT permanently delete the node file. The node is marked with status="superseded" and a valid_until timestamp. Use context_write to create the replacement node first, then call context_delete with its ID in superseded_by.
+
+Always await the response from context_write before calling context_delete — do not batch them in the same request.`),
 		mcp.WithString("id",
 			mcp.Required(),
 			mcp.Description("ID of the node to supersede"),

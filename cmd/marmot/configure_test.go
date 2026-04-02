@@ -26,8 +26,8 @@ func newTestVault(t *testing.T) string {
 func TestConfigureSelectMock(t *testing.T) {
 	dir := newTestVault(t)
 
-	// Simulate: select "2" (mock) at provider prompt.
-	input := createInput(t, "2\n")
+	// Simulate: select "2" (mock) at provider prompt, then accept default classifier (none).
+	input := createInput(t, "2\n\n")
 	defer input.Close()
 
 	if err := runConfigure(dir, input); err != nil {
@@ -50,8 +50,8 @@ func TestConfigureSelectOpenAI(t *testing.T) {
 	dir := newTestVault(t)
 	t.Setenv("OPENAI_API_KEY", "")
 
-	// Simulate: "1" (openai), "1" (text-embedding-3-small), "sk-test-key-1234567890" (API key).
-	input := createInput(t, "1\n1\nsk-test-key-1234567890\n")
+	// Simulate: "1" (openai), "1" (text-embedding-3-small), "sk-test-key-1234567890" (API key), then accept default openai classifier.
+	input := createInput(t, "1\n1\nsk-test-key-1234567890\n\n")
 	defer input.Close()
 
 	if err := runConfigure(dir, input); err != nil {
@@ -80,8 +80,8 @@ func TestConfigureSelectOpenAILargeModel(t *testing.T) {
 	dir := newTestVault(t)
 	t.Setenv("OPENAI_API_KEY", "")
 
-	// Simulate: "1" (openai), "2" (text-embedding-3-large), "sk-big-key" (API key).
-	input := createInput(t, "1\n2\nsk-big-key\n")
+	// Simulate: "1" (openai), "2" (text-embedding-3-large), "sk-big-key" (API key), then accept default openai classifier.
+	input := createInput(t, "1\n2\nsk-big-key\n\n")
 	defer input.Close()
 
 	if err := runConfigure(dir, input); err != nil {
@@ -100,8 +100,8 @@ func TestConfigureSelectOpenAILargeModel(t *testing.T) {
 func TestConfigureDefaultsOnEmptyInput(t *testing.T) {
 	dir := newTestVault(t)
 
-	// Simulate: just press enter (defaults to mock).
-	input := createInput(t, "\n")
+	// Simulate: just press enter (defaults to mock), then accept default classifier (none).
+	input := createInput(t, "\n\n")
 	defer input.Close()
 
 	if err := runConfigure(dir, input); err != nil {
@@ -120,8 +120,8 @@ func TestConfigureDefaultsOnEmptyInput(t *testing.T) {
 func TestConfigurePreservesBody(t *testing.T) {
 	dir := newTestVault(t)
 
-	// Select mock (default).
-	input := createInput(t, "\n")
+	// Select mock (default), then accept default classifier (none).
+	input := createInput(t, "\n\n")
 	defer input.Close()
 
 	if err := runConfigure(dir, input); err != nil {
@@ -145,6 +145,63 @@ func TestConfigureNonexistentVault(t *testing.T) {
 	err := runConfigure("/nonexistent/path", input)
 	if err == nil {
 		t.Fatal("expected error for nonexistent vault")
+	}
+}
+
+func TestConfigureClassifierOpenAI(t *testing.T) {
+	dir := newTestVault(t)
+	t.Setenv("OPENAI_API_KEY", "")
+	// Select openai embedding (1), model small (1), key, then openai classifier (1, default)
+	input := createInput(t, "1\n1\nsk-embed-key\n\n")
+	defer input.Close()
+	if err := runConfigure(dir, input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg, _ := config.Load(dir)
+	if cfg.ClassifierProvider != "openai" {
+		t.Errorf("expected classifier openai, got %q", cfg.ClassifierProvider)
+	}
+	if cfg.ClassifierModel != "gpt-5.1-codex-mini" {
+		t.Errorf("expected classifier model gpt-5.1-codex-mini, got %q", cfg.ClassifierModel)
+	}
+}
+
+func TestConfigureClassifierNone(t *testing.T) {
+	dir := newTestVault(t)
+	t.Setenv("OPENAI_API_KEY", "")
+	// Select openai embedding (1), model small (1), key, then none classifier (3)
+	input := createInput(t, "1\n1\nsk-embed-key\n3\n")
+	defer input.Close()
+	if err := runConfigure(dir, input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg, _ := config.Load(dir)
+	if cfg.ClassifierProvider != "none" {
+		t.Errorf("expected classifier none, got %q", cfg.ClassifierProvider)
+	}
+}
+
+func TestConfigureClassifierAnthropic(t *testing.T) {
+	dir := newTestVault(t)
+	t.Setenv("OPENAI_API_KEY", "sk-openai")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	// Select openai embedding (1), model small (1), keep key (Y), then anthropic classifier (2), enter key
+	input := createInput(t, "1\n1\ny\n2\nsk-ant-testkey\n")
+	defer input.Close()
+	if err := runConfigure(dir, input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg, _ := config.Load(dir)
+	if cfg.ClassifierProvider != "anthropic" {
+		t.Errorf("expected classifier anthropic, got %q", cfg.ClassifierProvider)
+	}
+	if cfg.ClassifierModel != "claude-haiku-4-5-20251001" {
+		t.Errorf("expected classifier model claude-haiku, got %q", cfg.ClassifierModel)
+	}
+	// Verify ANTHROPIC_API_KEY was saved
+	key := config.APIKeyWithVault("anthropic", dir)
+	if key != "sk-ant-testkey" {
+		t.Errorf("expected anthropic key sk-ant-testkey, got %q", key)
 	}
 }
 

@@ -21,9 +21,12 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Structural acyclicity** --- `contains`, `imports`, `extends`, `implements` edges enforce DAG structure; `calls`, `reads`, `writes`, `references` edges allow cycles (mutual recursion is real)
 - **Semantic search** --- embedding index for natural language queries with graph traversal expansion
 - **Token-budget compaction** --- results fit your context window, with full/compact/truncated tiers
-- **MCP server** --- 3 tools (`context_query`, `context_write`, `context_verify`) over stdio
+- **MCP server** --- 4 tools (`context_query`, `context_write`, `context_verify`, `context_delete`) over stdio
 - **Obsidian-compatible** --- every node file renders natively in Obsidian with working graph view
 - **Integrity verification** --- hash-based staleness detection, dangling edge checks, cycle detection
+- **Temporal node lifecycle** --- soft-delete and supersede nodes; active-only queries by default with `include_superseded` opt-in
+- **CRUD classifier** --- `context_write` classifies incoming nodes as ADD / UPDATE / SUPERSEDE / NOOP using embedding similarity + optional LLM; falls back to embedding-distance thresholds when no LLM is configured
+- **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
 ## Quick Start
@@ -73,7 +76,7 @@ marmot init
 
 `marmot init` runs three stages:
 1. Creates the `.marmot/` vault directory
-2. **`configure`** --- prompts for embedding provider, model, and API key
+2. **`configure`** --- prompts for embedding provider, model, API key, and CRUD classifier (provider + model)
 3. **`setup`** --- detects your tools (Claude Code, Codex, VS Code, Cursor) and writes MCP configs
 
 After init, write nodes and index:
@@ -102,13 +105,14 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
-Once connected, agents get three tools:
+Once connected, agents get four tools:
 
 | Tool | Description |
 |------|-------------|
 | `context_query` | Search the graph by natural language. Returns XML-compacted subgraph within token budget. |
 | `context_write` | Write or update a node. Enforces structural acyclicity. Updates embedding index. |
 | `context_verify` | Check node staleness, dangling edges, and structural integrity. |
+| `context_delete` | Soft-delete (supersede) a node. Marks it `status: superseded` with a `valid_until` timestamp. Excluded from future queries by default. |
 
 ### Example: context_query
 
@@ -199,12 +203,49 @@ marmot index --force
 
 If `embedding_provider` is set to `openai` (or another non-mock provider) but the required API key is not found in the environment, ContextMarmot logs a warning to stderr and falls back to the mock embedder automatically. This ensures the tool never fails to start due to a missing key.
 
+## CRUD Classifier
+
+When an agent calls `context_write`, ContextMarmot automatically classifies the write before persisting:
+
+| Action | Meaning |
+|--------|---------|
+| **ADD** | New concept — no similar node exists |
+| **UPDATE** | Enriches or corrects an existing node (same concept, better content) |
+| **SUPERSEDE** | Replaces an existing node — old node is soft-deleted, chain preserved |
+| **NOOP** | Content is essentially identical to an existing node — skipped |
+
+Classification uses embedding similarity to find candidates, then optionally an LLM to decide. Without an LLM, pure embedding distance thresholds are used (NOOP ≥ 0.95, UPDATE ≥ 0.80, SUPERSEDE ≥ 0.65, else ADD).
+
+### Configuring the classifier
+
+Run `marmot configure` (also runs during `marmot init`) — it prompts for classifier provider after the embedding section:
+
+```
+CRUD Classifier:
+  > 1) openai   (gpt-5.1-codex-mini)
+    2) anthropic (claude-haiku-4-5-20251001)
+    3) none     (embedding-distance fallback)
+```
+
+If you select **openai** and your embedding provider is also OpenAI, the same `OPENAI_API_KEY` is reused — no second key needed. Selecting **anthropic** prompts for `ANTHROPIC_API_KEY` separately. Selecting **none** uses the embedding-distance fallback with no API calls.
+
+**Manual configuration** — edit `.marmot/_config.md` frontmatter directly:
+
+```yaml
+classifier_provider: openai
+classifier_model: gpt-5.1-codex-mini
+```
+
+### Fallback behavior
+
+If the configured classifier provider's API key is not found at serve time, ContextMarmot logs a warning to stderr and falls back to embedding-distance classification automatically.
+
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
 | `marmot init [--dir .marmot]` | Create a new vault, run configure, then setup |
-| `marmot configure [--dir .marmot]` | Interactive prompt for embedding provider, model, and API key |
+| `marmot configure [--dir .marmot]` | Interactive prompt for embedding provider, model, API key, and CRUD classifier |
 | `marmot setup [--dir .marmot] [--claude] [--codex] [--vscode] [--cursor]` | Generate MCP configs for detected (or specified) tools |
 | `marmot index [--dir .marmot] [--force]` | Index all node files into the embedding store. `--force` clears and rebuilds all embeddings (use after changing provider/model). |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
@@ -258,13 +299,15 @@ export async function login(email: string, password: string) { ... }
 ```
 cmd/marmot/              CLI (init, configure, setup, index, query, serve, verify)
 internal/
-  config/                Vault config parser, .env key storage, embedder factory
-  node/                  Markdown parser/writer, atomic file I/O
-  graph/                 In-memory graph, adjacency lists, cycle detection
-  verify/                Hash integrity, staleness, structural acyclicity
+  config/                Vault config parser, .env key storage, embedder + classifier factory
+  node/                  Markdown parser/writer, atomic file I/O, temporal fields
+  graph/                 In-memory graph, adjacency lists, cycle detection, active-node index
+  verify/                Hash integrity, staleness, structural + temporal chain checks
   embedding/             SQLite store, KNN search, OpenAI + mock embedders
-  traversal/             BFS traversal, token-budget XML compaction
-  mcp/                   MCP server (3 tools), engine wiring
+  traversal/             BFS traversal, token-budget XML compaction, superseded-node filtering
+  llm/                   LLM provider interface, OpenAI + Anthropic + mock implementations
+  classifier/            CRUD classifier: embedding search + LLM path + distance fallback
+  mcp/                   MCP server (4 tools), engine wiring
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full system design, and [docs/data-structures.md](docs/data-structures.md) for format specifications.
@@ -309,11 +352,15 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Embedding index with KNN search (Go-side, SQLite-backed)
 - Pluggable embedding providers (OpenAI and mock) with config-driven selection
 - Token-budget-aware graph traversal and XML compaction
-- MCP server with 3 tools over stdio
+- MCP server with 4 tools over stdio
 - CLI with init, configure, setup, index, query, verify, serve
 - Interactive configuration (provider, model, API key) with vault `.env` storage
 - Auto-setup for Claude Code, Codex, VS Code, and Cursor (MCP config generation)
 - Security hardened (path traversal protection, input validation, parameterized SQL)
+- Temporal node lifecycle (Phase 8): soft-delete, supersede, `valid_from`/`valid_until`/`superseded_by` fields, active-only queries
+- CRUD classifier (Phase 9): ADD/UPDATE/SUPERSEDE/NOOP classification on every `context_write`, LLM + embedding-distance fallback, OpenAI and Anthropic providers
+- `context_delete` MCP tool for explicit soft-delete with optional `superseded_by` reference
+- Namespace-level write mutex (Phase 10): concurrent writes to different namespaces proceed in parallel; same-namespace writes serialize to prevent CRUD races and TOCTOU bugs
 
 ### Known MVP limitations
 
@@ -323,7 +370,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including temporal fields, LLM-based CRUD classification, heat maps, summary engine, static analysis indexing, and the TypeScript web UI. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), and namespace-level concurrency (Phase 10) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

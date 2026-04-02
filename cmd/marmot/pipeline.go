@@ -9,6 +9,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	"github.com/nurozen/context-marmot/internal/llm"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
@@ -205,6 +206,33 @@ func runServePipeline(dir string) error {
 		return fmt.Errorf("create engine: %w", err)
 	}
 	defer engine.Close()
+
+	// Wire classifier from vault config.
+	vaultCfg, err := config.Load(dir)
+	if err != nil {
+		vaultCfg = &config.VaultConfig{} // safe default: no classifier
+	}
+	switch vaultCfg.ClassifierProvider {
+	case "openai":
+		if key := config.APIKeyWithVault("openai", dir); key != "" {
+			engine.WithLLMClassifier(llm.NewOpenAIProvider(key))
+			fmt.Fprintln(os.Stderr, "classifier: using openai/"+vaultCfg.ClassifierModel)
+		} else {
+			engine.WithLLMClassifier(nil)
+			fmt.Fprintln(os.Stderr, "classifier: openai configured but OPENAI_API_KEY not found; using embedding-distance fallback")
+		}
+	case "anthropic":
+		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
+			engine.WithLLMClassifier(llm.NewAnthropicProvider(key))
+			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+vaultCfg.ClassifierModel)
+		} else {
+			engine.WithLLMClassifier(nil)
+			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
+		}
+	default: // "none" or ""
+		engine.WithLLMClassifier(nil)
+		fmt.Fprintln(os.Stderr, "classifier: using embedding-distance fallback")
+	}
 
 	srv := mcpserver.NewServer(engine)
 	fmt.Fprintln(os.Stderr, "ContextMarmot MCP server ready on stdio")

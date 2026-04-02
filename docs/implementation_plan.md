@@ -279,30 +279,30 @@ After MVP validates the core hypothesis, layer in full features.
 - [x] Write unit tests for soft-delete lifecycle
 - [x] Write unit tests for temporal queries
 
-## Phase 9: CRUD Classifier (LLM-Based)
+## Phase 9: CRUD Classifier (LLM-Based) — COMPLETE (2026-04-01)
 
-- [ ] Define `LLMProvider` interface (classify, summarize)
-- [ ] Implement Anthropic provider (Haiku-class model, structured output)
-- [ ] Implement `FindSimilar(embedding, threshold) -> []ScoredNodeID` in Embedding Index
-- [ ] Implement CRUD classification flow:
-  - [ ] Embed incoming node summary
-  - [ ] Retrieve top-k similar candidates
-  - [ ] If candidates: send to LLM for ADD/UPDATE/SUPERSEDE/NOOP classification
-  - [ ] If no candidates: classify as ADD
-- [ ] Implement fallback: pure embedding distance when LLM unavailable
-- [ ] Integrate into `context_write` handler (replace simple upsert)
-- [ ] Write integration tests for all 4 classification paths
-- [ ] Write tests for LLM-unavailable fallback
+- [x] Define `LLMProvider` interface (classify, summarize)
+- [x] Implement Anthropic provider (Haiku-class model, structured output)
+- [x] Implement OpenAI provider (gpt-5.1-codex-mini, reuses existing OPENAI_API_KEY)
+- [x] Implement `FindSimilar(embedding, threshold) -> []ScoredNodeID` in Embedding Index
+- [x] Implement CRUD classification flow:
+  - [x] Embed incoming node summary
+  - [x] Retrieve top-k similar candidates
+  - [x] If candidates: send to LLM for ADD/UPDATE/SUPERSEDE/NOOP classification
+  - [x] If no candidates: classify as ADD
+- [x] Implement fallback: pure embedding distance when LLM unavailable
+- [x] Integrate into `context_write` handler (replace simple upsert)
+- [x] Write integration tests for all 4 classification paths
+- [x] Write tests for LLM-unavailable fallback
 
-## Phase 10: Concurrency + Git Strategy
+## Phase 10: Concurrency — COMPLETE (2026-04-01)
 
-- [ ] Implement namespace-level write mutex
-- [ ] Implement atomic file writes (temp file + rename) — verify from M2
-- [ ] Implement git auto-commit batching (configurable window, default 5s)
-- [ ] Implement auto-generated commit messages
-- [ ] Add `--no-autocommit` flag to `marmot serve`
-- [ ] Write concurrent write tests (multiple goroutines/agents writing to same namespace)
-- [ ] Write concurrent read-during-write tests
+- [x] Implement namespace-level write mutex
+- [x] Implement atomic file writes (temp file + rename) — verified from M2
+- [x] Write concurrent write tests (multiple goroutines/agents writing to same namespace)
+- [x] Write concurrent read-during-write tests
+
+> **Note:** Git auto-commit was removed from this phase. The supersede chain (Phase 8) already provides semantic history — intentional replacements with timestamps and `superseded_by` links. Git's mechanical byte-level history adds little value on top of this and would intrude on the host project's commit history. Users manage `.marmot/` in git the same way they manage any other project directory.
 
 ## Phase 11: Namespace Manager + Bridges
 

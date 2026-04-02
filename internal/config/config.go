@@ -13,10 +13,12 @@ import (
 
 // VaultConfig represents the settings in _config.md frontmatter.
 type VaultConfig struct {
-	Version           string `yaml:"version"`
-	Namespace         string `yaml:"namespace"`
-	EmbeddingProvider string `yaml:"embedding_provider"` // openai | mock
-	EmbeddingModel    string `yaml:"embedding_model"`    // model name
+	Version            string `yaml:"version"`
+	Namespace          string `yaml:"namespace"`
+	EmbeddingProvider  string `yaml:"embedding_provider"`           // openai | mock
+	EmbeddingModel     string `yaml:"embedding_model"`              // model name
+	ClassifierProvider string `yaml:"classifier_provider,omitempty"` // openai | anthropic | none
+	ClassifierModel    string `yaml:"classifier_model,omitempty"`    // model name; empty = provider default
 }
 
 // Load reads and parses _config.md from the given vault directory.
@@ -199,6 +201,8 @@ func EnvKeyName(provider string) string {
 		return "OPENAI_API_KEY"
 	case "voyage":
 		return "VOYAGE_API_KEY"
+	case "anthropic":
+		return "ANTHROPIC_API_KEY"
 	default:
 		return ""
 	}

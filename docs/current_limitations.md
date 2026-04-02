@@ -40,25 +40,13 @@ This document covers known limitations in the ContextMarmot MVP (Phases M1-M7) a
 
 **Resolution:** Phase 11 (Namespace Manager + Bridges). Adds `_namespace.md` per namespace, `_bridges/` directory with allowed-relation whitelists, qualified ID resolution, and cross-namespace edge validation.
 
-### No temporal fields
+### ~~No temporal fields~~ — Resolved in Phase 8
 
-**What:** All nodes have `status: active`. There is no `valid_from`, `valid_until`, or `superseded_by` field. Nodes cannot be soft-deleted or marked as superseded.
+Temporal fields (`status`, `valid_from`, `valid_until`, `superseded_by`) are fully implemented. Nodes can be soft-deleted via `context_delete` or superseded via the CRUD classifier. Active-only queries are the default; `include_superseded: true` opts in to historical state. See Phase 8 in [docs/implementation_plan.md](implementation_plan.md).
 
-**Why:** Intentional MVP scoping. The node struct and markdown parser/writer handle only the active status.
+### ~~No CRUD classifier~~ — Resolved in Phase 9
 
-**Impact:** When a function is refactored or renamed, the old node must be manually deleted or overwritten. There is no way to query historical state ("what was the auth flow last month?"), and no supersession chain linking old nodes to their replacements. Deleted knowledge is lost from the graph (though git retains file history).
-
-**Resolution:** Phase 8 (Temporal Fields + Soft-Delete). Adds `status: superseded`, `status: disputed`, `valid_from`, `valid_until`, `superseded_by` fields. Implements `SoftDeleteNode` and `SupersedeNode` operations. Query results exclude superseded nodes by default but support `include_superseded` for temporal queries.
-
-### No CRUD classifier
-
-**What:** Writes via `context_write` are simple upserts. If a node with the given ID exists, it is overwritten. If it does not exist, it is created. There is no semantic deduplication.
-
-**Why:** Intentional MVP scoping. The CRUD classifier requires an LLM provider (for ADD/UPDATE/SUPERSEDE/NOOP classification), which is a post-MVP dependency.
-
-**Impact:** Duplicate nodes can accumulate if agents create nodes with different IDs for the same concept. Renamed functions produce orphaned old nodes. The system cannot distinguish between "this is a new thing" and "this is an update to an existing thing" -- it relies on the caller to provide the correct ID.
-
-**Resolution:** Phase 9 (CRUD Classifier). On write, the engine embeds the incoming node, retrieves semantically similar candidates, and uses an LLM (Haiku-class) to classify the operation as ADD, UPDATE, SUPERSEDE, or NOOP. Falls back to pure embedding distance when the LLM is unavailable.
+The CRUD classifier is fully implemented. Every `context_write` call classifies the operation as ADD / UPDATE / SUPERSEDE / NOOP using embedding similarity search followed by optional LLM classification (OpenAI `gpt-5.1-codex-mini` or Anthropic `claude-haiku-4-5-20251001`). Falls back to embedding-distance thresholds when no LLM is configured. Configured via `marmot configure` or `_config.md` (`classifier_provider`, `classifier_model`). See Phase 9 in [docs/implementation_plan.md](implementation_plan.md).
 
 ### No heat map
 
@@ -84,15 +72,11 @@ This document covers known limitations in the ContextMarmot MVP (Phases M1-M7) a
 
 ## Infrastructure
 
-### No git auto-commit
+### No git auto-commit — by design
 
-**What:** Changes to node files (via `context_write` or `marmot index`) are not automatically committed to git. The `.marmot/` directory must be committed manually.
+ContextMarmot does not auto-commit to git. The supersede chain (Phase 8) already provides semantic history: intentional node replacements with `valid_from`/`valid_until` timestamps and `superseded_by` links. Git's byte-level change history adds little value on top of this for an agent memory system and would intrude on the host project's commit log.
 
-**Why:** Intentional MVP scoping. Auto-commit requires batching logic (to avoid commit-per-write explosion), configurable windows, and auto-generated commit messages.
-
-**Impact:** Users must remember to commit `.marmot/` changes. If the working directory is reset or files are lost before a manual commit, graph state is lost. There is no automatic versioning of knowledge evolution.
-
-**Resolution:** Phase 10 (Concurrency + Git Strategy). Implements batched auto-commit with a configurable window (default 5 seconds). Multiple writes within the window are combined into a single commit. Auto-generated commit messages summarize which nodes were added or updated. Disableable via `--no-autocommit`.
+Users manage `.marmot/` in git the same way they manage any other directory — commit it when they want to snapshot it, gitignore it if they prefer it local-only.
 
 ### No file watcher
 
@@ -146,7 +130,7 @@ This document covers known limitations in the ContextMarmot MVP (Phases M1-M7) a
 
 **Impact:** Sufficient for single-agent use and the expected MVP scale. Multi-agent concurrent access serializes at the mutex -- agents take turns. For read-heavy workloads this adds latency proportional to the number of concurrent agents. Write contention is low because writes are infrequent relative to reads.
 
-**Resolution:** Phase 10 (Concurrency + Git Strategy) addresses the broader concurrency model. For the embedding store specifically, the mutex approach remains adequate unless benchmarks at scale show it as a bottleneck. If needed, a connection pool with WAL mode can be introduced without changing the `Store` interface.
+**Resolution:** Phase 10 (Concurrency) addresses the broader concurrency model. For the embedding store specifically, the mutex approach remains adequate unless benchmarks at scale show it as a bottleneck. If needed, a connection pool with WAL mode can be introduced without changing the `Store` interface.
 
 ### In-memory graph
 
@@ -158,15 +142,9 @@ This document covers known limitations in the ContextMarmot MVP (Phases M1-M7) a
 
 **Resolution:** No specific phase targets this. If scale demands it, the graph can be partitioned by namespace (load only queried namespaces) or switched to a lazy-loading model that pages nodes in from disk. The in-memory approach is expected to remain viable well beyond current use cases.
 
-### No namespace-level write mutex
+### ~~No namespace-level write mutex~~ --- Resolved in Phase 10
 
-**What:** Concurrent writes to the same vault are serialized only at the embedding store mutex. There is no dedicated write lock at the node store or graph manager level.
-
-**Why:** Intentional MVP scoping. With a single namespace and single-agent use, the embedding store mutex provides sufficient serialization.
-
-**Impact:** If two agents write to the same vault concurrently, node file writes are atomic (temp file + rename), so no file corruption occurs. However, the in-memory graph could see inconsistent state during multi-step operations (e.g., a supersede that involves deleting one node and creating another). The CRUD classifier (when added) would also be vulnerable to a TOCTOU race without a higher-level lock.
-
-**Resolution:** Phase 10 (Concurrency + Git Strategy). Adds namespace-level write mutexes. Writes to different namespaces proceed in parallel. Writes within the same namespace serialize at the namespace lock, preventing CRUD classification races and multi-step operation inconsistencies.
+Namespace-level write mutexes are fully implemented. Each namespace gets a lazily-created `sync.Mutex` (via `sync.Map`). `HandleContextWrite` and `HandleContextDelete` acquire the lock before any mutation. Writes to different namespaces proceed in parallel with no contention. Same-namespace writes serialize at the lock, preventing CRUD classification races and TOCTOU bugs. `HandleContextDelete` re-fetches the node inside the lock to guard against concurrent deletes. See Phase 10 in [docs/implementation_plan.md](implementation_plan.md).
 
 ---
 

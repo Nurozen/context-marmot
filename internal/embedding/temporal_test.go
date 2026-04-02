@@ -118,6 +118,156 @@ func TestSearchActive_ExcludesSuperseded(t *testing.T) {
 	}
 }
 
+// TestFindSimilar_Basic inserts three nodes with varying similarity to a query
+// and verifies that only those meeting the threshold are returned, sorted descending.
+func TestFindSimilar_Basic(t *testing.T) {
+	store := newTestStore(t)
+	emb := NewMockEmbedder("test-model")
+
+	// "a" — very close to query ("user authentication login" vs query "authenticate user login")
+	vecA, err := emb.Embed("user authentication login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "b" — somewhat related (shares "user" and "login" but adds "session")
+	vecB, err := emb.Embed("user login session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "c" — unrelated (database domain)
+	vecC, err := emb.Embed("database connection pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Upsert("node/a", vecA, "ha", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert("node/b", vecB, "hb", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert("node/c", vecC, "hc", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	query, err := emb.Embed("authenticate user login")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Compute actual scores to pick a threshold that separates a+b from c.
+	scoreA := 1.0 / (1.0 + l2Distance(query, vecA))
+	scoreB := 1.0 / (1.0 + l2Distance(query, vecB))
+	scoreC := 1.0 / (1.0 + l2Distance(query, vecC))
+	t.Logf("scores: a=%.4f b=%.4f c=%.4f", scoreA, scoreB, scoreC)
+
+	// Choose a threshold that includes a and b but not c.
+	// Use a threshold just above c's score but at or below b's.
+	threshold := (scoreB + scoreC) / 2.0
+	if scoreB <= scoreC {
+		// Fallback: use a very low threshold and just check ordering.
+		threshold = 0.0
+	}
+	t.Logf("using threshold %.4f", threshold)
+
+	results, err := store.FindSimilar(query, threshold, "test-model")
+	if err != nil {
+		t.Fatalf("FindSimilar: %v", err)
+	}
+
+	// node/c should not appear when threshold > scoreC.
+	if threshold > scoreC {
+		for _, r := range results {
+			if r.NodeID == "node/c" {
+				t.Errorf("node/c (score %.4f) should be excluded by threshold %.4f", scoreC, threshold)
+			}
+		}
+	}
+
+	// Results must be sorted descending.
+	for i := 1; i < len(results); i++ {
+		if results[i].Score > results[i-1].Score {
+			t.Errorf("results not sorted: results[%d].Score=%.4f > results[%d].Score=%.4f",
+				i, results[i].Score, i-1, results[i-1].Score)
+		}
+	}
+}
+
+// TestFindSimilar_ExcludesSuperseded verifies that superseded nodes are not
+// returned by FindSimilar even if their similarity exceeds the threshold.
+func TestFindSimilar_ExcludesSuperseded(t *testing.T) {
+	store := newTestStore(t)
+	emb := NewMockEmbedder("test-model")
+
+	vecA, err := emb.Embed("user authentication login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vecB, err := emb.Embed("user authentication login handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.Upsert("node/a", vecA, "ha", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert("node/b", vecB, "hb", "test-model"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mark node/b as superseded.
+	if err := store.UpdateStatus("node/b", "superseded"); err != nil {
+		t.Fatalf("UpdateStatus: %v", err)
+	}
+
+	query, err := emb.Embed("user authentication login")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a very low threshold so both would match if active.
+	results, err := store.FindSimilar(query, 0.0, "test-model")
+	if err != nil {
+		t.Fatalf("FindSimilar: %v", err)
+	}
+
+	for _, r := range results {
+		if r.NodeID == "node/b" {
+			t.Error("FindSimilar should not return superseded node node/b")
+		}
+	}
+
+	found := false
+	for _, r := range results {
+		if r.NodeID == "node/a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("FindSimilar should return active node node/a")
+	}
+}
+
+// TestFindSimilar_EmptyStore verifies that FindSimilar on an empty store
+// returns nil results and no error.
+func TestFindSimilar_EmptyStore(t *testing.T) {
+	store := newTestStore(t)
+	emb := NewMockEmbedder("test-model")
+
+	query, err := emb.Embed("authenticate user login")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := store.FindSimilar(query, 0.5, "test-model")
+	if err != nil {
+		t.Fatalf("FindSimilar on empty store returned error: %v", err)
+	}
+	if results != nil {
+		t.Errorf("FindSimilar on empty store should return nil, got %v", results)
+	}
+}
+
 // TestUpdateStatus_ReActivate verifies that a previously superseded node can
 // be re-activated by calling UpdateStatus("active") and will then appear in
 // SearchActive results again.

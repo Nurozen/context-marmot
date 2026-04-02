@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
+	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	"github.com/nurozen/context-marmot/internal/llm"
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
@@ -20,8 +23,16 @@ type Engine struct {
 	Graph          *graph.Graph
 	EmbeddingStore *embedding.Store
 	Embedder       embedding.Embedder
+	Classifier     *classifier.Classifier // optional; nil = no CRUD classification
 	// MarmotDir is the root .marmot directory.
 	MarmotDir string
+	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
+}
+
+// namespaceLock returns the write mutex for the given namespace, creating it if needed.
+func (e *Engine) namespaceLock(namespace string) *sync.Mutex {
+	v, _ := e.nsMu.LoadOrStore(namespace, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // NewEngine creates an Engine rooted at marmotDir, using the provided embedder
@@ -60,6 +71,17 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		Embedder:       embedder,
 		MarmotDir:      marmotDir,
 	}, nil
+}
+
+// WithLLMClassifier wires up a CRUD classifier on the engine using the
+// engine's own EmbeddingStore and Embedder, plus an optional LLM provider.
+// Pass nil for llmProvider to use the pure-embedding fallback path.
+func (e *Engine) WithLLMClassifier(llmProvider llm.Provider) {
+	e.Classifier = &classifier.Classifier{
+		Store:    e.EmbeddingStore,
+		Embedder: e.Embedder,
+		LLM:      llmProvider, // may be nil for embedding-distance fallback
+	}
 }
 
 // Close releases resources held by the engine.
