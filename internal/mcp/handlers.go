@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/embedding"
+	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/verify"
@@ -70,6 +71,12 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultText(emptyXML), nil
 	}
 
+	// Inject heat map weights for traversal priority.
+	var heatWeights map[string]float64
+	if e.HeatMap != nil {
+		heatWeights = e.HeatMap.GetWeights(entryIDs)
+	}
+
 	// Step 3: Traverse graph from entry nodes.
 	cfg := traversal.TraversalConfig{
 		EntryIDs:          entryIDs,
@@ -77,11 +84,21 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 		TokenBudget:       budget,
 		Mode:              mode,
 		IncludeSuperseded: includeSuperseded,
+		HeatWeights:       heatWeights,
 	}
 	subgraph := traversal.Traverse(e.Graph, cfg)
 
 	// Step 4: Compact into XML.
 	compacted := traversal.Compact(e.Graph, subgraph, budget)
+
+	// Record co-access for heat map.
+	if e.HeatMap != nil && len(subgraph.Nodes) >= 2 {
+		resultIDs := make([]string, len(subgraph.Nodes))
+		for i, n := range subgraph.Nodes {
+			resultIDs[i] = n.ID
+		}
+		e.HeatMap.RecordCoAccess(resultIDs, heatmap.DefaultLearningRate)
+	}
 
 	return mcp.NewToolResultText(compacted.XML), nil
 }

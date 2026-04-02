@@ -6,16 +6,18 @@ import (
 	"container/heap"
 
 	"github.com/nurozen/context-marmot/internal/graph"
+	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
 // TraversalConfig controls the traversal behaviour.
 type TraversalConfig struct {
-	EntryIDs          []string // Starting node IDs for BFS expansion.
-	MaxDepth          int      // Maximum BFS depth from any entry node.
-	TokenBudget       int      // Approximate token ceiling (chars/4 heuristic).
-	Mode              string   // Compaction mode; default "adjacency".
-	IncludeSuperseded bool     // if false (default), superseded/archived nodes are skipped
+	EntryIDs          []string           // Starting node IDs for BFS expansion.
+	MaxDepth          int                // Maximum BFS depth from any entry node.
+	TokenBudget       int                // Approximate token ceiling (chars/4 heuristic).
+	Mode              string             // Compaction mode; default "adjacency".
+	IncludeSuperseded bool               // if false (default), superseded/archived nodes are skipped
+	HeatWeights       map[string]float64 // PairKey -> weight; optional, nil = no heat boost
 }
 
 // Subgraph is the result of a traversal: the collected nodes together with
@@ -51,7 +53,7 @@ func Traverse(g *graph.Graph, config TraversalConfig) *Subgraph {
 		}
 		sub.EntryNodes[id] = true
 		sub.Depths[id] = 0
-		heap.Push(pq, &queueItem{id: id, depth: 0})
+		heap.Push(pq, &queueItem{id: id, depth: 0, priority: 0})
 	}
 
 	// BFS expansion with depth limiting.
@@ -87,7 +89,21 @@ func Traverse(g *graph.Graph, config TraversalConfig) *Subgraph {
 			for _, e := range edges {
 				if _, seen := sub.Depths[e.Target]; !seen {
 					sub.Depths[e.Target] = depth + 1
-					heap.Push(pq, &queueItem{id: e.Target, depth: depth + 1})
+
+					// Base priority from depth.
+					basePriority := float64(depth + 1)
+
+					// Boost with heat weight if available (higher heat = lower priority number).
+					if config.HeatWeights != nil {
+						// Heat weight boosts: subtract heat weight from priority.
+						// PairKey is canonical: min(a,b) + "\x00" + max(a,b)
+						heatKey := heatmap.PairKey(id, e.Target)
+						if w, ok := config.HeatWeights[heatKey]; ok {
+							basePriority -= w // heat-boosted edges get explored first
+						}
+					}
+
+					heap.Push(pq, &queueItem{id: e.Target, depth: depth + 1, priority: basePriority})
 				}
 			}
 		}
@@ -153,15 +169,17 @@ func less(a, b struct {
 // ---------------------------------------------------------------------------
 
 type queueItem struct {
-	id    string
-	depth int
-	index int // managed by heap
+	id       string
+	depth    int
+	priority float64 // lower = higher priority; depth-based, optionally boosted by heat
+	index    int     // managed by heap
 }
 
 type nodeQueue []*queueItem
 
 func (q nodeQueue) Len() int            { return len(q) }
-func (q nodeQueue) Less(i, j int) bool  { return q[i].depth < q[j].depth }
+func (q nodeQueue) Less(i, j int) bool  { return q[i].priority < q[j].priority }
 func (q nodeQueue) Swap(i, j int)       { q[i], q[j] = q[j], q[i]; q[i].index = i; q[j].index = j }
 func (q *nodeQueue) Push(x interface{}) { item := x.(*queueItem); item.index = len(*q); *q = append(*q, item) }
 func (q *nodeQueue) Pop() interface{}   { old := *q; n := len(old); item := old[n-1]; old[n-1] = nil; item.index = -1; *q = old[:n-1]; return item }
+

@@ -378,7 +378,7 @@ gives you graph visualization, backlinks, and search for free.
 | **Summary Engine** | Async generation of `_summary.md` per namespace. Uses LLM Provider to synthesize from active nodes. Runs outside the critical path. Degrades gracefully (goes stale, not broken). |
 | **Node Store** | File I/O layer. Reads/writes markdown node files. Parses YAML frontmatter (including temporal fields) + wikilinks + markdown sections. Atomic writes via temp-file-then-rename. |
 | **Embedding Index** | SQLite + sqlite-vec. Stores node ID -> embedding + model tag. Decay-agnostic. Supports similarity search for CRUD classification. Rejects cross-model queries. |
-| **Heat Map** | Per-namespace co-access frequency store. Exponential decay with floor (never reaches zero). Informs traversal prioritization only — never affects discoverability. |
+| **Heat Map** | Per-namespace co-access frequency store (`internal/heatmap/`). Tracks pairwise co-access weights with exponential decay (`decay_rate=0.95`) and floor (`decay_floor=0.05` — weights never reach zero). Informs traversal prioritization only — never affects node discoverability. Loaded at serve startup, saved on shutdown. Co-access logged automatically from `context_query` results. Promotion candidates (`weight >= 0.80`) surfaced for potential edge creation. |
 | **Git Layer** | Not used. ContextMarmot does not auto-commit. The supersede chain provides semantic history. Users manage `.marmot/` in git like any other directory. |
 
 ## Decay Model

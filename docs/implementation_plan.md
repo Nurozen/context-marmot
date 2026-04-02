@@ -324,20 +324,21 @@ Project isolation + cross-namespace references.
 - [x] Integrate namespace manager into MCP engine — cross-namespace edge validation on `context_write`
 - [x] Wire namespace manager into serve pipeline
 
-## Phase 12: Heat Map
+## Phase 12: Heat Map — COMPLETE (2026-04-01)
 
 Co-access frequency tracking. Decay affects traversal priority only.
 
-- [ ] Define `HeatMap` struct (including `decay_floor` field)
-- [ ] Implement heat map file parsing (`_heat/<namespace>.md` YAML frontmatter)
-- [ ] Implement heat map file writing
-- [ ] Implement `RecordCoAccess(node_ids []string) -> error` (pairwise weight update)
-- [ ] Implement `GetWeights(node_ids []string) -> map[pair]float64`
-- [ ] Implement `Decay() -> error` (apply decay_rate, enforce decay_floor — weights never reach zero)
-- [ ] Implement promotion detection (`weight >= threshold` for sustained period)
-- [ ] Integrate heat map into Graph Traversal edge priority scoring
-- [ ] Log co-access from `context_query` responses
-- [ ] Write unit tests for weight accumulation, decay math, and floor enforcement
+- [x] Define `HeatMap` struct (including `decay_floor` field) — `internal/heatmap/heatmap.go`
+- [x] Implement heat map file parsing (`_heat/<namespace>.md` YAML frontmatter)
+- [x] Implement heat map file writing
+- [x] Implement `RecordCoAccess(node_ids []string) -> error` (pairwise weight update)
+- [x] Implement `GetWeights(node_ids []string) -> map[pair]float64`
+- [x] Implement `Decay() -> error` (apply decay_rate, enforce decay_floor — weights never reach zero)
+- [x] Implement promotion detection (`weight >= threshold` for sustained period)
+- [x] Integrate heat map into Graph Traversal edge priority scoring
+- [x] Log co-access from `context_query` responses
+- [x] Write unit tests for weight accumulation, decay math, and floor enforcement — 15 tests in `heatmap_test.go`
+- [x] Wire heat map into serve pipeline (load on startup, save on shutdown)
 
 ## Phase 13: Summary Engine + Update Engine
 

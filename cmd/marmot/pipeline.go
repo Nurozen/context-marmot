@@ -9,6 +9,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/llm"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/namespace"
@@ -214,11 +215,27 @@ func runServePipeline(dir string) error {
 		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges\n", len(nsMgr.Namespaces), len(nsMgr.Bridges))
 	}
 
-	// Wire classifier from vault config.
+	// Wire heat map (load from _heat/default.md or create empty).
 	vaultCfg, err := config.Load(dir)
 	if err != nil {
-		vaultCfg = &config.VaultConfig{} // safe default: no classifier
+		vaultCfg = &config.VaultConfig{} // safe default
 	}
+	nsName := vaultCfg.Namespace
+	if nsName == "" {
+		nsName = "default"
+	}
+	hm, hmErr := heatmap.Load(dir, nsName)
+	if hmErr == nil {
+		engine.WithHeatMap(hm)
+		fmt.Fprintf(os.Stderr, "heatmap: %d pairs loaded for %s\n", hm.PairCount(), nsName)
+		defer func() {
+			if saveErr := heatmap.Save(dir, hm); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "heatmap: save error: %v\n", saveErr)
+			}
+		}()
+	}
+
+	// Wire classifier from vault config (reuses vaultCfg loaded above for heat map).
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {

@@ -27,6 +27,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Temporal node lifecycle** --- soft-delete and supersede nodes; active-only queries by default with `include_superseded` opt-in
 - **CRUD classifier** --- `context_write` classifies incoming nodes as ADD / UPDATE / SUPERSEDE / NOOP using embedding similarity + optional LLM; falls back to embedding-distance thresholds when no LLM is configured
 - **Multi-namespace** --- project isolation with namespace directories, bridge manifests for cross-namespace edges, qualified ID resolution
+- **Heat map** --- co-access frequency tracking with exponential decay and floor; hot edges get traversal priority within budget constraints
 - **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
@@ -364,6 +365,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - `context_delete` MCP tool for explicit soft-delete with optional `superseded_by` reference
 - Namespace-level write mutex (Phase 10): concurrent writes to different namespaces proceed in parallel; same-namespace writes serialize to prevent CRUD races and TOCTOU bugs
 - Namespace manager + bridges (Phase 11): `_namespace.md` per-namespace config, `_bridges/*.md` relation whitelists, qualified ID resolution, cross-namespace edge validation on write, auto-discovery of cross-namespace edges
+- Heat map (Phase 12): co-access frequency tracking in `_heat/<namespace>.md`, exponential decay with floor, heat-boosted BFS traversal priority, automatic co-access logging from `context_query`
 
 ### Known MVP limitations
 
@@ -372,7 +374,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), and namespace manager + bridges (Phase 11) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), and heat map (Phase 12) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

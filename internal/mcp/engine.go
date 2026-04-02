@@ -12,6 +12,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/llm"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
@@ -26,6 +27,7 @@ type Engine struct {
 	Embedder       embedding.Embedder
 	Classifier     *classifier.Classifier // optional; nil = no CRUD classification
 	NSManager      *namespace.Manager    // optional; nil = single-namespace mode
+	HeatMap        *heatmap.HeatMap      // optional; nil = no heat-based priority
 	// MarmotDir is the root .marmot directory.
 	MarmotDir string
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
@@ -73,6 +75,11 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		Embedder:       embedder,
 		MarmotDir:      marmotDir,
 	}, nil
+}
+
+// WithHeatMap attaches a heat map to the engine for traversal priority.
+func (e *Engine) WithHeatMap(h *heatmap.HeatMap) {
+	e.HeatMap = h
 }
 
 // WithNamespaceManager attaches a namespace manager to the engine.
