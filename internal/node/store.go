@@ -233,8 +233,9 @@ func (s *Store) ListNodes() ([]NodeMeta, error) {
 			return nil // skip unreadable entries
 		}
 		if info.IsDir() {
-			// Skip hidden directories (e.g., .obsidian, .marmot-data).
-			if strings.HasPrefix(info.Name(), ".") && path != s.basePath {
+			name := info.Name()
+			// Skip hidden dirs (.obsidian, .marmot-data) and system dirs (_bridges, _heat).
+			if path != s.basePath && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
 				return filepath.SkipDir
 			}
 			return nil

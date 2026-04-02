@@ -22,7 +22,9 @@ func LoadGraph(store *node.Store) (*Graph, error) {
 			return nil // skip unreadable entries
 		}
 		if info.IsDir() {
-			if strings.HasPrefix(info.Name(), ".") && path != basePath {
+			name := info.Name()
+			// Skip hidden dirs (.obsidian, .marmot-data) and system dirs (_bridges, _heat).
+			if path != basePath && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
 				return filepath.SkipDir
 			}
 			return nil

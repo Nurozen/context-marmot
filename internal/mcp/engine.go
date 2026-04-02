@@ -13,6 +13,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/llm"
+	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
@@ -24,6 +25,7 @@ type Engine struct {
 	EmbeddingStore *embedding.Store
 	Embedder       embedding.Embedder
 	Classifier     *classifier.Classifier // optional; nil = no CRUD classification
+	NSManager      *namespace.Manager    // optional; nil = single-namespace mode
 	// MarmotDir is the root .marmot directory.
 	MarmotDir string
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
@@ -71,6 +73,12 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		Embedder:       embedder,
 		MarmotDir:      marmotDir,
 	}, nil
+}
+
+// WithNamespaceManager attaches a namespace manager to the engine.
+// When set, cross-namespace edges are validated against bridge manifests.
+func (e *Engine) WithNamespaceManager(mgr *namespace.Manager) {
+	e.NSManager = mgr
 }
 
 // WithLLMClassifier wires up a CRUD classifier on the engine using the

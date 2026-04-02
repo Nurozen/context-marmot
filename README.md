@@ -26,6 +26,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Integrity verification** --- hash-based staleness detection, dangling edge checks, cycle detection
 - **Temporal node lifecycle** --- soft-delete and supersede nodes; active-only queries by default with `include_superseded` opt-in
 - **CRUD classifier** --- `context_write` classifies incoming nodes as ADD / UPDATE / SUPERSEDE / NOOP using embedding similarity + optional LLM; falls back to embedding-distance thresholds when no LLM is configured
+- **Multi-namespace** --- project isolation with namespace directories, bridge manifests for cross-namespace edges, qualified ID resolution
 - **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
@@ -307,7 +308,8 @@ internal/
   traversal/             BFS traversal, token-budget XML compaction, superseded-node filtering
   llm/                   LLM provider interface, OpenAI + Anthropic + mock implementations
   classifier/            CRUD classifier: embedding search + LLM path + distance fallback
-  mcp/                   MCP server (4 tools), engine wiring
+  namespace/             Namespace manager, bridge manifests, qualified ID resolution
+  mcp/                   MCP server (4 tools), engine wiring, cross-namespace edge validation
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full system design, and [docs/data-structures.md](docs/data-structures.md) for format specifications.
@@ -361,16 +363,16 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - CRUD classifier (Phase 9): ADD/UPDATE/SUPERSEDE/NOOP classification on every `context_write`, LLM + embedding-distance fallback, OpenAI and Anthropic providers
 - `context_delete` MCP tool for explicit soft-delete with optional `superseded_by` reference
 - Namespace-level write mutex (Phase 10): concurrent writes to different namespaces proceed in parallel; same-namespace writes serialize to prevent CRUD races and TOCTOU bugs
+- Namespace manager + bridges (Phase 11): `_namespace.md` per-namespace config, `_bridges/*.md` relation whitelists, qualified ID resolution, cross-namespace edge validation on write, auto-discovery of cross-namespace edges
 
 ### Known MVP limitations
 
 - **Go-side KNN** --- sqlite-vec WASM bindings have an ABI mismatch with the current ncruces driver. Search scans all embeddings in Go. Fine for thousands of nodes; would need sqlite-vec for 100k+.
-- **Single namespace** --- multi-namespace support and cross-project bridges are post-MVP.
 - **Limited provider selection** --- OpenAI and mock are supported. Voyage AI, Ollama, and other providers are not yet available.
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), and namespace-level concurrency (Phase 10) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), and namespace manager + bridges (Phase 11) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

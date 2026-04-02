@@ -304,23 +304,25 @@ After MVP validates the core hypothesis, layer in full features.
 
 > **Note:** Git auto-commit was removed from this phase. The supersede chain (Phase 8) already provides semantic history — intentional replacements with timestamps and `superseded_by` links. Git's mechanical byte-level history adds little value on top of this and would intrude on the host project's commit history. Users manage `.marmot/` in git the same way they manage any other project directory.
 
-## Phase 11: Namespace Manager + Bridges
+## Phase 11: Namespace Manager + Bridges — COMPLETE (2026-04-01)
 
 Project isolation + cross-namespace references.
 
-- [ ] Define `Namespace` struct
-- [ ] Implement `LoadNamespace(path) -> Namespace`
-- [ ] Implement `CreateNamespace(name, root_path) -> Namespace`
-- [ ] Implement namespace config parsing (`_namespace.md` YAML frontmatter)
-- [ ] Implement qualified ID resolution (namespace + node_id from path)
-- [ ] Define `Bridge` struct (allowed_relations whitelist only — no manual edge list)
-- [ ] Implement bridge manifest parsing (`_bridges/*.md` YAML frontmatter)
-- [ ] Implement `ValidateCrossNamespaceEdge(edge, bridges) -> error` (check relation in whitelist)
-- [ ] Auto-discover cross-namespace edges by scanning node files
-- [ ] Implement `ListNamespaces(marmot_root) -> []Namespace`
+- [x] Define `Namespace` struct — `internal/namespace/namespace.go`
+- [x] Implement `LoadNamespace(path) -> Namespace`
+- [x] Implement `CreateNamespace(name, root_path) -> Namespace`
+- [x] Implement namespace config parsing (`_namespace.md` YAML frontmatter)
+- [x] Implement qualified ID resolution (namespace + node_id from path) — `Manager.ParseQualifiedID`
+- [x] Define `Bridge` struct (allowed_relations whitelist only — no manual edge list)
+- [x] Implement bridge manifest parsing (`_bridges/*.md` YAML frontmatter)
+- [x] Implement `ValidateCrossNamespaceEdge(edge, bridges) -> error` (check relation in whitelist)
+- [x] Auto-discover cross-namespace edges by scanning node files — `Manager.DiscoverCrossNamespaceEdges`
+- [x] Implement `ListNamespaces(marmot_root) -> []Namespace`
 - [x] Define `Config` struct (global config) — `internal/config/config.go`
 - [x] Implement global config parsing (`_config.md` YAML frontmatter) — `internal/config/config.go`
-- [ ] Write unit tests for namespace resolution and bridge validation
+- [x] Write unit tests for namespace resolution and bridge validation — 15 tests in `namespace_test.go`
+- [x] Integrate namespace manager into MCP engine — cross-namespace edge validation on `context_write`
+- [x] Wire namespace manager into serve pipeline
 
 ## Phase 12: Heat Map
 

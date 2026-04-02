@@ -11,6 +11,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/llm"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
+	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/verify"
@@ -206,6 +207,12 @@ func runServePipeline(dir string) error {
 		return fmt.Errorf("create engine: %w", err)
 	}
 	defer engine.Close()
+
+	// Wire namespace manager (best-effort — missing namespaces are fine).
+	if nsMgr, nsErr := namespace.NewManager(dir); nsErr == nil && len(nsMgr.Namespaces) > 0 {
+		engine.WithNamespaceManager(nsMgr)
+		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges\n", len(nsMgr.Namespaces), len(nsMgr.Bridges))
+	}
 
 	// Wire classifier from vault config.
 	vaultCfg, err := config.Load(dir)

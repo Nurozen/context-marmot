@@ -30,15 +30,9 @@ This document covers known limitations in the ContextMarmot MVP (Phases M1-M7) a
 
 ## Graph & Data Model
 
-### Single namespace
+### ~~Single namespace~~ --- Resolved in Phase 11
 
-**What:** The MVP supports one namespace per vault. There are no cross-project bridges, no namespace manager, and no qualified cross-namespace node references.
-
-**Why:** Intentional MVP scoping. Multi-namespace adds complexity (bridge manifests, cross-namespace edge validation, qualified ID resolution) that is not needed to test the core hypothesis.
-
-**Impact:** Each project requires its own `.marmot/` vault. Agents cannot query across related projects in a single operation. Shared libraries or microservice dependencies must be manually tracked.
-
-**Resolution:** Phase 11 (Namespace Manager + Bridges). Adds `_namespace.md` per namespace, `_bridges/` directory with allowed-relation whitelists, qualified ID resolution, and cross-namespace edge validation.
+Multi-namespace support is fully implemented. The `internal/namespace/` package provides `Manager`, `Namespace`, and `Bridge` types. Namespace directories are auto-discovered at startup; `_namespace.md` files store per-namespace config; `_bridges/*.md` manifests whitelist allowed cross-namespace relation types. Qualified ID resolution (`Manager.ParseQualifiedID`) disambiguates cross-namespace references (e.g., `beta/api/session`) from local node IDs. Cross-namespace edges are validated against bridge manifests on every `context_write`. See Phase 11 in [docs/implementation_plan.md](implementation_plan.md).
 
 ### ~~No temporal fields~~ — Resolved in Phase 8
 

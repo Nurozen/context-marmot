@@ -87,7 +87,9 @@ EDGE GUIDELINES:
 - Structural edges (contains, imports, extends, implements) define hierarchy and must not form cycles.
 - Behavioral edges (calls, reads, writes, references) describe runtime relationships and may form cycles.
 - Always add edges to related nodes you know exist. The graph's value comes from connections, not isolated nodes.
-- Prefer specific relations: 'calls' over 'references' when one function invokes another; 'contains' for parent-child module relationships.`),
+- Prefer specific relations: 'calls' over 'references' when one function invokes another; 'contains' for parent-child module relationships.
+
+When referencing nodes in other namespaces, use qualified IDs (e.g., 'other-namespace/node/path'). Cross-namespace edges require a bridge manifest with the relation type whitelisted.`),
 		mcp.WithString("id",
 			mcp.Required(),
 			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. Examples: 'auth/login', 'db/users', 'decisions/caching_strategy'. Must not contain '..' or start with '/'"),

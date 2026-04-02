@@ -189,6 +189,18 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		Context:   nodeCtx,
 	}
 
+	// Validate cross-namespace edges against bridge manifests.
+	if e.NSManager != nil {
+		for _, edge := range edges {
+			qid := e.NSManager.ParseQualifiedID(edge.Target, namespace)
+			if qid.Namespace != namespace {
+				if err := e.NSManager.ValidateCrossNamespaceEdge(namespace, qid.Namespace, string(edge.Relation)); err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("cross-namespace edge rejected: %v", err)), nil
+				}
+			}
+		}
+	}
+
 	// Determine whether this is a create or update before any mutation.
 	_, nodeExists := e.Graph.GetNode(id)
 	isNew := !nodeExists
