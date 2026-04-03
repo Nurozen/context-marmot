@@ -383,6 +383,10 @@ Complete command-line interface.
 - [x] Implement `marmot reembed [--namespace]` — regenerate all embeddings (delegates to index --force)
 - [x] Write CLI integration tests — 14 tests in `cli_phase15_test.go`
 - [x] Added `embedding.Store.Count()` method for status reporting
+- [x] Add `token_budget` to vault config (`_config.md` frontmatter) — configurable default for queries
+- [x] CLI `--budget` flag overrides config; MCP `budget` param overrides config; config overrides built-in default (4096)
+- [x] Add `marmot version` command with build-time ldflags (version, commit, date)
+- [x] Add GoReleaser cross-compilation + GitHub Actions auto-tag & release pipeline
 
 ## Phase 16: REST / WebSocket API
 

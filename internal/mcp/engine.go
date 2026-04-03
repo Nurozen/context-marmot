@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/nurozen/context-marmot/internal/classifier"
+	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/heatmap"
@@ -42,6 +43,19 @@ type Engine struct {
 func (e *Engine) namespaceLock(namespace string) *sync.Mutex {
 	v, _ := e.nsMu.LoadOrStore(namespace, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// defaultTokenBudget returns the token budget from the vault config, falling
+// back to config.DefaultTokenBudget if the config cannot be loaded.
+func (e *Engine) defaultTokenBudget() int {
+	if e.MarmotDir == "" {
+		return config.DefaultTokenBudget
+	}
+	cfg, err := config.Load(e.MarmotDir)
+	if err != nil {
+		return config.DefaultTokenBudget
+	}
+	return cfg.EffectiveTokenBudget()
 }
 
 // NewEngine creates an Engine rooted at marmotDir, using the provided embedder

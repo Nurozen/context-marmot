@@ -52,7 +52,7 @@ TIPS:
 			mcp.Description("How many relationship hops to follow from entry nodes. 1 = entry nodes only, 2 = entry + direct neighbors (default: 2), 3+ = broader context"),
 		),
 		mcp.WithNumber("budget",
-			mcp.Description("Max token budget for the response. Use 2000-4000 for quick lookups, 8000-16000 for deep exploration (default: 4096)"),
+			mcp.Description("Max token budget for the response. Use 2000-4000 for quick lookups, 8000-16000 for deep exploration. Omit to use vault config default (token_budget)."),
 		),
 		mcp.WithString("mode",
 			mcp.Description("Compaction mode. 'adjacency' (default) expands neighbors breadth-first; 'deep' follows call chains depth-first"),

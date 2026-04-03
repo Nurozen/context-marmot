@@ -34,9 +34,12 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 	if depth < 0 || depth > 10 {
 		depth = 2
 	}
-	budget := req.GetInt("budget", 4096)
-	if budget < 0 || budget > 100000 {
-		budget = 4096
+	budget := req.GetInt("budget", 0)
+	if budget <= 0 {
+		budget = e.defaultTokenBudget()
+	}
+	if budget > 100000 {
+		budget = 100000
 	}
 	mode := req.GetString("mode", "adjacency")
 	includeSuperseded := req.GetBool("include_superseded", false)

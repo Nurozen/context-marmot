@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nurozen/context-marmot/internal/config"
 )
 
 // Build-time variables set via -ldflags.
@@ -166,12 +168,15 @@ version: "1"
 namespace: default
 embedding_provider: mock
 embedding_model: ""
+token_budget: 4096
 ---
 # ContextMarmot Vault
 
 This is the root configuration for a ContextMarmot vault.
 # To use OpenAI embeddings, set embedding_provider to "openai"
 # and set OPENAI_API_KEY in your environment.
+# token_budget controls the default context window budget for queries.
+# Override per-query with --budget flag or budget parameter.
 `
 	if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(configContent), 0o644); err != nil {
 		return fmt.Errorf("write _config.md: %w", err)
@@ -265,7 +270,7 @@ func cmdQuery(args []string) int {
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	query := fs.String("query", "", "search query (required)")
 	depth := fs.Int("depth", 2, "traversal depth")
-	budget := fs.Int("budget", 4096, "token budget for compaction")
+	budget := fs.Int("budget", 0, "token budget for compaction (default: from vault config)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -276,6 +281,16 @@ func cmdQuery(args []string) int {
 	if *query == "" {
 		fmt.Fprintln(os.Stderr, "query: --query flag is required")
 		return 1
+	}
+
+	// Resolve budget: CLI flag overrides config, config overrides default.
+	if *budget <= 0 {
+		cfg, err := config.Load(*dir)
+		if err == nil {
+			*budget = cfg.EffectiveTokenBudget()
+		} else {
+			*budget = config.DefaultTokenBudget
+		}
 	}
 
 	if err := runQuery(*dir, *query, *depth, *budget); err != nil {

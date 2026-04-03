@@ -11,6 +11,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultTokenBudget is the token budget used when no override is provided.
+const DefaultTokenBudget = 4096
+
 // VaultConfig represents the settings in _config.md frontmatter.
 type VaultConfig struct {
 	Version            string `yaml:"version"`
@@ -19,6 +22,16 @@ type VaultConfig struct {
 	EmbeddingModel     string `yaml:"embedding_model"`              // model name
 	ClassifierProvider string `yaml:"classifier_provider,omitempty"` // openai | anthropic | none
 	ClassifierModel    string `yaml:"classifier_model,omitempty"`    // model name; empty = provider default
+	TokenBudget        int    `yaml:"token_budget,omitempty"`        // default token budget for queries; 0 = use DefaultTokenBudget
+}
+
+// EffectiveTokenBudget returns the configured token budget, falling back to
+// DefaultTokenBudget if not set or zero.
+func (c *VaultConfig) EffectiveTokenBudget() int {
+	if c.TokenBudget > 0 {
+		return c.TokenBudget
+	}
+	return DefaultTokenBudget
 }
 
 // Load reads and parses _config.md from the given vault directory.
