@@ -1,0 +1,47 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag
+        uses: anothrNick/github-tag-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Default bump when no #major / #minor / #patch in commit message.
+          DEFAULT_BUMP: patch
+          # Prefix for the tag.
+          TAG_PREFIX: v
+          # Only create a tag; release.yml handles the actual release.
+          RELEASE_BRANCHES: main
+          # Use conventional-style keywords in commit messages:
+          #   "feat:" or "#minor" → minor bump
+          #   "fix:" or "#patch" → patch bump
+          #   "BREAKING CHANGE" or "#major" → major bump
+          MAJOR_STRING_TOKEN: "#major"
+          MINOR_STRING_TOKEN: "#minor"
+          PATCH_STRING_TOKEN: "#patch"
+          # Also detect conventional commit prefixes.
+          CUSTOM_TAG: ""
+          WITH_V: true
+          DRY_RUN: false
+
+      - name: Summary
+        if: steps.tag.outputs.new_tag != ''
+        run: |
+          echo "### New tag created: ${{ steps.tag.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "Previous tag: ${{ steps.tag.outputs.old_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "Bump type: ${{ steps.tag.outputs.part }}" >> $GITHUB_STEP_SUMMARY

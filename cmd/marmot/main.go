@@ -24,6 +24,13 @@ import (
 	"strings"
 )
 
+// Build-time variables set via -ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 const defaultDir = ".marmot"
 
 // discoverVault walks up from the current directory looking for a .marmot/
@@ -61,6 +68,9 @@ func run(args []string) int {
 	cmdArgs := args[1:]
 
 	switch command {
+	case "version", "--version", "-v":
+		fmt.Printf("marmot %s (commit %s, built %s)\n", version, commit, date)
+		return 0
 	case "init":
 		return cmdInit(cmdArgs)
 	case "configure":
@@ -94,7 +104,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed")
 }
 
 // ---------------------------------------------------------------------------
