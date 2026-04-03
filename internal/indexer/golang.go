@@ -142,7 +142,7 @@ func (g *GoIndexer) IndexFile(path string, relPath string, namespace string) (*I
 		Summary: fileSummary,
 		Source: SourceRef{
 			Path:  path,
-			Lines: [2]int{1, len(lines)},
+			Lines: [2]int{0, 0}, // whole file — matches ComputeSourceHash's io.Copy path
 		},
 	}
 

@@ -193,15 +193,34 @@ func cmdIndex(args []string) int {
 	}
 
 	// Check for positional arg (source path).
+	// Go's flag.FlagSet stops parsing at the first non-flag argument, so
+	// flags placed after the positional path (e.g., `marmot index ./src --incremental`)
+	// end up in the remaining args. We scan for them manually.
 	remaining := fs.Args()
 	if len(remaining) > 0 {
-		// Static analysis indexing of a source directory.
-		srcDir := remaining[0]
-		if err := runStaticIndex(*dir, srcDir, *incremental); err != nil {
-			fmt.Fprintf(os.Stderr, "index: %v\n", err)
-			return 1
+		var srcDir string
+		for _, arg := range remaining {
+			switch arg {
+			case "--incremental", "-incremental":
+				inc := true
+				incremental = &inc
+			case "--force", "-force":
+				f := true
+				force = &f
+			default:
+				if srcDir == "" {
+					srcDir = arg
+				}
+			}
 		}
-		return 0
+		if srcDir != "" {
+			// Static analysis indexing of a source directory.
+			if err := runStaticIndex(*dir, srcDir, *incremental); err != nil {
+				fmt.Fprintf(os.Stderr, "index: %v\n", err)
+				return 1
+			}
+			return 0
+		}
 	}
 
 	if err := runIndex(*dir, *force); err != nil {

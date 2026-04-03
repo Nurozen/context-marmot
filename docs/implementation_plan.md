@@ -418,18 +418,18 @@ Automated code-to-graph indexer (first use case enabler).
 - [x] `Registry` with `NewDefaultRegistry()` pre-populating Go, TypeScript, and Generic indexers
 - [x] `Runner` orchestrator with `NodeStore`, `EmbeddingStore`, `Embedder`, `Classifier`, `GraphReader` interfaces; batch embedding; `RunResult` reporting
 
-## Phase 18: Integration Testing & Hardening
+## Phase 18: Integration Testing & Hardening — COMPLETE (2026-04-02)
 
-- [ ] End-to-end test: index a real project -> query via MCP -> verify results
-- [ ] End-to-end test: mutual recursion in code -> verify behavioral cycles preserved
-- [ ] End-to-end test: multi-namespace with bridges -> cross-project queries
-- [ ] End-to-end test: open indexed vault in Obsidian, verify graph renders correctly
-- [ ] End-to-end test: CRUD lifecycle — ADD -> UPDATE -> SUPERSEDE -> verify temporal chain
-- [ ] End-to-end test: summary generation after indexing, verify wikilinks resolve
-- [ ] End-to-end test: concurrent agents writing to same namespace
-- [ ] Load test: synthetic graph with 10k+ nodes -> query performance
-- [ ] Fuzz test: malformed node files, invalid edges, corrupt embeddings
-- [ ] CI/CD pipeline setup (GitHub Actions)
+- [x] End-to-end test: index a real project -> query via MCP -> verify results — `TestE2E_IndexProjectThenQuery` + `TestIndexProjectThenQueryViaMCP`: creates mini Go project, runs static analysis indexer, queries via MCP engine, verifies functions/types found
+- [x] End-to-end test: mutual recursion in code -> verify behavioral cycles preserved — `TestE2E_MutualRecursionBehavioralCycles` + `TestMutualRecursionBehavioralCycles`: IsEven/IsOdd mutual recursion, verifies bidirectional `calls` edges classified as behavioral, no structural cycle issues
+- [x] End-to-end test: multi-namespace with bridges -> cross-project queries — `TestE2E_MultiNamespaceBridges` + `TestMultiNamespaceWithBridges`: frontend/backend namespaces, bridge with allowed relations, cross-namespace edge validation, disallowed relation rejection
+- [x] End-to-end test: open indexed vault in Obsidian, verify graph renders correctly — `TestE2E_ObsidianCompatibleOutput` + `TestObsidianCompatibility`: verifies YAML frontmatter, `## Relationships` with `[[wikilinks]]`, `## Context` sections, valid UTF-8, `_config.md`, `.obsidian/graph.json`
+- [x] End-to-end test: CRUD lifecycle — ADD -> UPDATE -> SUPERSEDE -> verify temporal chain — `TestE2E_CRUDLifecycleTemporalChain` + `TestCRUDLifecycleADDUpdateSupersede`: MockProvider-controlled classification, verifies status transitions, superseded_by/valid_until fields, include_superseded query filtering, disk persistence
+- [x] End-to-end test: summary generation after indexing, verify wikilinks resolve — `TestE2E_SummaryGenerationWikilinks` + `TestSummaryGenerationAfterIndexing`: mock LLM with wikilinks, WriteSummary/ReadSummary roundtrip, verifies wikilinks resolve to actual graph nodes, frontmatter (node_count, generated_at)
+- [x] End-to-end test: concurrent agents writing to same namespace — `TestE2E_ConcurrentWritesSameNamespace` + `TestConcurrentAgentsWriting`: 20 goroutines writing unique nodes, verifies all nodes exist, correct edge count, no data corruption, integrity check passes
+- [x] Load test: synthetic graph with 10k+ nodes -> query performance — `TestE2E_LoadTest10kNodes`: 10,000 nodes with 3-5 random edges, graph load + search + traversal + verify performance timings; completes in ~13s with race detector
+- [x] Fuzz test: malformed node files, invalid edges, corrupt embeddings — `TestE2E_FuzzMalformedNodes` (8 malformed file types), `TestE2E_FuzzInvalidEdges` (unknown relations, empty targets, oversized IDs, null bytes), `TestE2E_FuzzCorruptEmbeddings` (corrupt .db file recovery)
+- [x] CI/CD pipeline setup (GitHub Actions) — `.github/workflows/ci.yml`: matrix build (Go 1.23/1.24/1.26), unit tests + integration tests with race detector, golangci-lint; `.golangci.yml` config
 
 ---
 

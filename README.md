@@ -389,7 +389,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), and static analysis indexer (Phase 17) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), and integration testing + CI/CD (Phase 18) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

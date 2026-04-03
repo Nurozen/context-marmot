@@ -2081,7 +2081,9 @@ func Login(name string) *User {
 		if e.Source.Hash == "" {
 			t.Errorf("entity %s (%s) has empty source hash", e.ID, e.Type)
 		}
-		if e.Source.Lines[0] < 1 {
+		// File-level entities use [0,0] to indicate "whole file" hash mode;
+		// sub-entities must have a valid start line.
+		if e.Type != "file" && e.Source.Lines[0] < 1 {
 			t.Errorf("entity %s has invalid start line: %d", e.ID, e.Source.Lines[0])
 		}
 	}
