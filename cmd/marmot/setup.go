@@ -221,7 +221,7 @@ args = ["serve", "--dir", %q]
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.WriteString(section)
 	return err
 }

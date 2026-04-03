@@ -518,7 +518,7 @@ func runWatchPipeline(dir string) error {
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
 	}
-	defer embStore.Close()
+	defer func() { _ = embStore.Close() }()
 
 	embedder, err := loadEmbedder(dir)
 	if err != nil {
@@ -690,7 +690,7 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
 	}
-	defer embStore.Close()
+	defer func() { _ = embStore.Close() }()
 
 	// 5. Load embedder from vault config.
 	embedder, err := loadEmbedder(dir)

@@ -46,7 +46,7 @@ func NewIgnoreMatcher(rootDir string, extraPatterns []string) *IgnoreMatcher {
 	// Parse .gitignore if present.
 	gitignorePath := filepath.Join(rootDir, ".gitignore")
 	if f, err := os.Open(gitignorePath); err == nil {
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
 			if p, ok := parseLine(scanner.Text()); ok {

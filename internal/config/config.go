@@ -67,7 +67,7 @@ func Save(vaultDir string, cfg *VaultConfig, body string) error {
 		return fmt.Errorf("write tmp config: %w", err)
 	}
 	if err := os.Rename(tmpPath, configPath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename config: %w", err)
 	}
 	return nil

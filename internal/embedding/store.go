@@ -293,8 +293,12 @@ func (s *Store) UpdateStatus(nodeID, status string) error {
 	}
 	defer func() { _ = stmt.Close() }()
 
-	stmt.BindText(1, status)
-	stmt.BindText(2, nodeID)
+	if err := stmt.BindText(1, status); err != nil {
+		return fmt.Errorf("bind status: %w", err)
+	}
+	if err := stmt.BindText(2, nodeID); err != nil {
+		return fmt.Errorf("bind node_id: %w", err)
+	}
 	if err := stmt.Exec(); err != nil {
 		return fmt.Errorf("exec update status: %w", err)
 	}
@@ -332,7 +336,9 @@ func (s *Store) SearchActive(queryEmbedding []float32, topK int, model string) (
 	}
 	defer func() { _ = stmt.Close() }()
 
-	stmt.BindText(1, model)
+	if err := stmt.BindText(1, model); err != nil {
+		return nil, fmt.Errorf("bind model: %w", err)
+	}
 
 	var candidates scoredHeap
 	for stmt.Step() {
@@ -411,7 +417,9 @@ func (s *Store) FindSimilar(queryEmbedding []float32, threshold float64, model s
 	}
 	defer func() { _ = stmt.Close() }()
 
-	stmt.BindText(1, model)
+	if err := stmt.BindText(1, model); err != nil {
+		return nil, fmt.Errorf("bind model: %w", err)
+	}
 
 	var results []ScoredResult
 	for stmt.Step() {
@@ -469,7 +477,9 @@ func (s *Store) Delete(nodeID string) error {
 	}
 	defer func() { _ = stmt.Close() }()
 
-	stmt.BindText(1, nodeID)
+	if err := stmt.BindText(1, nodeID); err != nil {
+		return fmt.Errorf("bind node_id: %w", err)
+	}
 	if err := stmt.Exec(); err != nil {
 		return fmt.Errorf("exec delete: %w", err)
 	}
@@ -489,7 +499,9 @@ func (s *Store) StaleCheck(nodeID string, currentHash string) (bool, error) {
 	}
 	defer func() { _ = stmt.Close() }()
 
-	stmt.BindText(1, nodeID)
+	if err := stmt.BindText(1, nodeID); err != nil {
+		return false, fmt.Errorf("bind node_id: %w", err)
+	}
 	if !stmt.Step() {
 		return true, nil
 	}
