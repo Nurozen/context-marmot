@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -179,9 +178,4 @@ func extractFileSummary(answer, file string) string {
 		return answer[:200]
 	}
 	return answer
-}
-
-func sha256Hex(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", h[:8])
 }
