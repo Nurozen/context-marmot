@@ -71,10 +71,12 @@ func (e *Engine) reindexNeighbors(nodeID string) {
 	// Propagate staleness one hop from the changed node to find affected neighbors.
 	affected := e.UpdateEngine.PropagateStale([]string{nodeID}, 1)
 
-	// Collect neighbor IDs (skip the source node itself — it was just written).
+	// Collect neighbor IDs. The source node (depth=0) is skipped because it
+	// was just written/deleted by the handler with a fresh hash and embedding;
+	// we only need to refresh nodes that *depend on* it (depth=1 via inbound edges).
 	var neighborIDs []string
 	for _, a := range affected {
-		if a.NodeID != nodeID {
+		if a.Depth > 0 {
 			neighborIDs = append(neighborIDs, a.NodeID)
 		}
 	}
