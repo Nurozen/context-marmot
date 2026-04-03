@@ -53,5 +53,6 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
+          install-mode: goinstall
           version: v2.1.6
           args: --timeout=5m
