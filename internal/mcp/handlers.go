@@ -321,6 +321,9 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
+	// Reindex neighbors whose edges point to this node (background, non-blocking).
+	e.reindexNeighbors(id)
+
 	result := WriteResult{
 		NodeID: id,
 		Hash:   nodeHash,
@@ -490,6 +493,9 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 			e.SummaryScheduler.NotifyChange(len(metas))
 		}
 	}
+
+	// Reindex neighbors whose edges pointed to the deleted node (background).
+	e.reindexNeighbors(id)
 
 	result := DeleteResult{
 		NodeID:       id,

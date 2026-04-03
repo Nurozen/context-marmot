@@ -4,10 +4,12 @@
 package mcp
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/config"
@@ -56,6 +58,36 @@ func (e *Engine) defaultTokenBudget() int {
 		return config.DefaultTokenBudget
 	}
 	return cfg.EffectiveTokenBudget()
+}
+
+// reindexNeighbors kicks off a background reindex of nodes directly connected
+// to the given node ID. This keeps the graph fresh after MCP writes/deletes
+// without blocking the response. Only runs if UpdateEngine is wired in.
+func (e *Engine) reindexNeighbors(nodeID string) {
+	if e.UpdateEngine == nil {
+		return
+	}
+
+	// Propagate staleness one hop from the changed node to find affected neighbors.
+	affected := e.UpdateEngine.PropagateStale([]string{nodeID}, 1)
+
+	// Collect neighbor IDs (skip the source node itself — it was just written).
+	var neighborIDs []string
+	for _, a := range affected {
+		if a.NodeID != nodeID {
+			neighborIDs = append(neighborIDs, a.NodeID)
+		}
+	}
+	if len(neighborIDs) == 0 {
+		return
+	}
+
+	// Run reindex in the background so the MCP response returns immediately.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = e.UpdateEngine.Reindex(ctx, neighborIDs)
+	}()
 }
 
 // NewEngine creates an Engine rooted at marmotDir, using the provided embedder
