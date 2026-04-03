@@ -48,7 +48,7 @@ func NewWatcher(engine *Engine, config WatcherConfig) (*Watcher, error) {
 
 	for _, p := range config.Paths {
 		if err := fw.Add(p); err != nil {
-			fw.Close()
+			_ = fw.Close()
 			return nil, fmt.Errorf("watch path %q: %w", p, err)
 		}
 	}

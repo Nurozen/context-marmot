@@ -46,7 +46,7 @@ func NewStore(dbPath string) (*Store, error) {
 
 	s := &Store{db: db}
 	if err := s.initSchema(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
@@ -111,7 +111,7 @@ func (s *Store) storedDimensionLocked() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("prepare stored dimension: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	if !stmt.Step() {
 		return 0, nil // empty store
@@ -158,12 +158,20 @@ func (s *Store) Upsert(nodeID string, embedding []float32, summaryHash string, m
 	if err != nil {
 		return fmt.Errorf("prepare upsert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
-	stmt.BindText(1, nodeID)
-	stmt.BindBlob(2, blob)
-	stmt.BindText(3, summaryHash)
-	stmt.BindText(4, model)
+	if err := stmt.BindText(1, nodeID); err != nil {
+		return fmt.Errorf("bind node_id: %w", err)
+	}
+	if err := stmt.BindBlob(2, blob); err != nil {
+		return fmt.Errorf("bind embedding: %w", err)
+	}
+	if err := stmt.BindText(3, summaryHash); err != nil {
+		return fmt.Errorf("bind summary_hash: %w", err)
+	}
+	if err := stmt.BindText(4, model); err != nil {
+		return fmt.Errorf("bind model: %w", err)
+	}
 
 	if err := stmt.Exec(); err != nil {
 		return fmt.Errorf("exec upsert: %w", err)
@@ -201,7 +209,7 @@ func (s *Store) Search(queryEmbedding []float32, topK int, model string) ([]Scor
 	if err != nil {
 		return nil, fmt.Errorf("prepare search scan: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	// Use a min-heap (by distance) to collect all results, then extract top-K.
 	var candidates scoredHeap
@@ -246,7 +254,7 @@ func (s *Store) checkModel(model string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("prepare count: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	if !stmt.Step() {
 		return true, nil
@@ -260,9 +268,11 @@ func (s *Store) checkModel(model string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("prepare model check: %w", err)
 	}
-	defer mismatchStmt.Close()
+	defer func() { _ = mismatchStmt.Close() }()
 
-	mismatchStmt.BindText(1, model)
+	if err := mismatchStmt.BindText(1, model); err != nil {
+		return false, fmt.Errorf("bind model: %w", err)
+	}
 	if !mismatchStmt.Step() {
 		return true, nil
 	}
@@ -281,7 +291,7 @@ func (s *Store) UpdateStatus(nodeID, status string) error {
 	if err != nil {
 		return fmt.Errorf("prepare update status: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	stmt.BindText(1, status)
 	stmt.BindText(2, nodeID)
@@ -320,7 +330,7 @@ func (s *Store) SearchActive(queryEmbedding []float32, topK int, model string) (
 	if err != nil {
 		return nil, fmt.Errorf("prepare search scan: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	stmt.BindText(1, model)
 
@@ -399,7 +409,7 @@ func (s *Store) FindSimilar(queryEmbedding []float32, threshold float64, model s
 	if err != nil {
 		return nil, fmt.Errorf("prepare find similar scan: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	stmt.BindText(1, model)
 
@@ -457,7 +467,7 @@ func (s *Store) Delete(nodeID string) error {
 	if err != nil {
 		return fmt.Errorf("prepare delete: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	stmt.BindText(1, nodeID)
 	if err := stmt.Exec(); err != nil {
@@ -477,7 +487,7 @@ func (s *Store) StaleCheck(nodeID string, currentHash string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("prepare stale check: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	stmt.BindText(1, nodeID)
 	if !stmt.Step() {
@@ -497,7 +507,7 @@ func (s *Store) Count() int {
 	if err != nil {
 		return 0
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	if !stmt.Step() {
 		return 0

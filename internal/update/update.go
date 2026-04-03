@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"os"
 
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
@@ -317,12 +316,3 @@ func (e *Engine) RunBatchUpdate(ctx context.Context, maxPropagationDepth int) (*
 	}, nil
 }
 
-// readSourceContent reads the content of a source file. Not currently used
-// externally but kept for potential future use in richer reindex logic.
-func readSourceContent(sourcePath string) (string, error) {
-	data, err := os.ReadFile(sourcePath)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}

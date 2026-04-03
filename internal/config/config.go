@@ -100,11 +100,6 @@ func parseRaw(data []byte) (*VaultConfig, string, error) {
 	return cfg, body, nil
 }
 
-func parse(data []byte) (*VaultConfig, error) {
-	cfg, _, err := parseRaw(data)
-	return cfg, err
-}
-
 func defaultConfig() *VaultConfig {
 	return &VaultConfig{
 		Version:           "1",

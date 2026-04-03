@@ -209,7 +209,7 @@ func SaveNamespace(nsDir string, ns *Namespace) error {
 		return fmt.Errorf("write tmp namespace: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename namespace: %w", err)
 	}
 	return nil
@@ -352,7 +352,7 @@ func SaveBridge(vaultDir string, b *Bridge) error {
 		return fmt.Errorf("write tmp bridge: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename bridge: %w", err)
 	}
 	return nil

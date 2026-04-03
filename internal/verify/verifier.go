@@ -89,7 +89,7 @@ func ComputeSourceHash(sourcePath string, lines [2]int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open source %s: %w", sourcePath, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	h := sha256.New()
 

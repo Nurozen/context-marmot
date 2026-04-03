@@ -58,7 +58,7 @@ func runIndexPipeline(dir string, force bool) error {
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
 	}
-	defer embStore.Close()
+	defer func() { _ = embStore.Close() }()
 
 	embedder, err := loadEmbedder(dir)
 	if err != nil {
@@ -155,7 +155,7 @@ func runQueryPipeline(dir, query string, depth, budget int) error {
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
 	}
-	defer embStore.Close()
+	defer func() { _ = embStore.Close() }()
 
 	// 3. Create embedder from config and embed the query.
 	embedder, err := loadEmbedder(dir)
@@ -214,7 +214,7 @@ func runServePipeline(dir string) error {
 	if err != nil {
 		return fmt.Errorf("create engine: %w", err)
 	}
-	defer engine.Close()
+	defer func() { _ = engine.Close() }()
 
 	// Wire namespace manager (best-effort — missing namespaces are fine).
 	if nsMgr, nsErr := namespace.NewManager(dir); nsErr == nil && len(nsMgr.Namespaces) > 0 {
@@ -448,7 +448,7 @@ func runStatusPipeline(dir string) error {
 	var embeddingCount int
 	if embStore, err := embedding.NewStore(dbPath); err == nil {
 		embeddingCount = embStore.Count()
-		embStore.Close()
+		_ = embStore.Close()
 	}
 
 	// Check for stale nodes (those with source.path set).

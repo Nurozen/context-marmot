@@ -191,7 +191,7 @@ func ReadSummary(dir string, namespace string) (*SummaryResult, error) {
 		case "namespace":
 			result.Namespace = val
 		case "node_count":
-			fmt.Sscanf(val, "%d", &result.NodeCount)
+			_, _ = fmt.Sscanf(val, "%d", &result.NodeCount)
 		case "generated_at":
 			if t, err := time.Parse(time.RFC3339, val); err == nil {
 				result.GeneratedAt = t

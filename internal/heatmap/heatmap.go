@@ -264,7 +264,7 @@ func Save(vaultDir string, h *HeatMap) error {
 		return fmt.Errorf("write tmp heatmap: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename heatmap: %w", err)
 	}
 	return nil
