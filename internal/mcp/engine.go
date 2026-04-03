@@ -20,6 +20,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/summary"
+	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/update"
 )
 
@@ -36,8 +37,10 @@ type Engine struct {
 	SummaryEngine    *summary.Engine        // optional; nil = no summary generation
 	UpdateEngine     *update.Engine         // optional; nil = no update detection
 	SummaryScheduler *summary.Scheduler     // optional; nil = no async summaries
+	VaultRegistry    *namespace.VaultRegistry // optional; nil = single-vault mode
 	// MarmotDir is the root .marmot directory.
-	MarmotDir string
+	MarmotDir    string
+	LocalVaultID string // cached from config; avoids repeated disk reads in handlers
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
 }
 
@@ -165,6 +168,28 @@ func (e *Engine) WithUpdateEngine(ue *update.Engine) {
 // WithSummaryScheduler attaches a summary scheduler to the MCP engine.
 func (e *Engine) WithSummaryScheduler(ss *summary.Scheduler) {
 	e.SummaryScheduler = ss
+}
+
+// WithVaultRegistry attaches a vault registry for cross-vault traversal.
+func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
+	e.VaultRegistry = vr
+	// Cache local vault ID to avoid repeated disk reads in handlers.
+	if e.MarmotDir != "" {
+		if cfg, err := config.Load(e.MarmotDir); err == nil {
+			e.LocalVaultID = cfg.VaultID
+		}
+	}
+}
+
+// graphResolver returns a GraphResolver — either bridged (cross-vault) or plain local.
+func (e *Engine) graphResolver() traversal.GraphResolver {
+	if e.VaultRegistry != nil {
+		return &traversal.BridgedGraphResolver{
+			Local:  e.Graph,
+			Vaults: e.VaultRegistry,
+		}
+	}
+	return e.Graph
 }
 
 // Close releases resources held by the engine.

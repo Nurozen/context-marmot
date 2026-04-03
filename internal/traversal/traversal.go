@@ -10,6 +10,13 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
+// GraphResolver abstracts graph node and edge resolution, allowing traversal
+// across vault boundaries via cross-vault bridges.
+type GraphResolver interface {
+	GetNode(id string) (*node.Node, bool)
+	GetEdges(id string, direction graph.Direction) []node.Edge
+}
+
 // TraversalConfig controls the traversal behaviour.
 type TraversalConfig struct {
 	EntryIDs          []string           // Starting node IDs for BFS expansion.
@@ -33,7 +40,7 @@ type Subgraph struct {
 // config.MaxDepth, collecting reachable nodes. Nodes are prioritised by
 // depth (shallow first) and ordered via a min-heap so that the token budget
 // is spent on the most relevant context.
-func Traverse(g *graph.Graph, config TraversalConfig) *Subgraph {
+func Traverse(g GraphResolver, config TraversalConfig) *Subgraph {
 	if config.Mode == "" {
 		config.Mode = "adjacency"
 	}

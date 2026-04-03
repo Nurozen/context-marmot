@@ -89,10 +89,11 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 		IncludeSuperseded: includeSuperseded,
 		HeatWeights:       heatWeights,
 	}
-	subgraph := traversal.Traverse(e.Graph, cfg)
+	resolver := e.graphResolver()
+	subgraph := traversal.Traverse(resolver, cfg)
 
 	// Step 4: Compact into XML.
-	compacted := traversal.Compact(e.Graph, subgraph, budget)
+	compacted := traversal.Compact(resolver, subgraph, budget)
 
 	// Record co-access for heat map.
 	if e.HeatMap != nil && len(subgraph.Nodes) >= 2 {
@@ -210,12 +211,29 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	// Validate cross-namespace edges against bridge manifests.
+	// Skip edges that target a different vault (@vault-id/...) — those are
+	// validated separately in the cross-vault check below.
 	if e.NSManager != nil {
 		for _, edge := range edges {
 			qid := e.NSManager.ParseQualifiedID(edge.Target, namespace)
+			if qid.VaultID != "" {
+				continue // cross-vault edge; validated below
+			}
 			if qid.Namespace != namespace {
 				if err := e.NSManager.ValidateCrossNamespaceEdge(namespace, qid.Namespace, string(edge.Relation)); err != nil {
 					return mcp.NewToolResultError(fmt.Sprintf("cross-namespace edge rejected: %v", err)), nil
+				}
+			}
+		}
+	}
+
+	// Validate cross-vault edges against bridge manifests.
+	if e.NSManager != nil && e.VaultRegistry != nil && e.LocalVaultID != "" {
+		for _, edge := range edges {
+			qid := e.NSManager.ParseQualifiedID(edge.Target, namespace)
+			if qid.VaultID != "" {
+				if err := e.NSManager.ValidateCrossVaultEdge(e.LocalVaultID, qid.VaultID, string(edge.Relation)); err != nil {
+					return mcp.NewToolResultError(fmt.Sprintf("cross-vault edge rejected: %v", err)), nil
 				}
 			}
 		}

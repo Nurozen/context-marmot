@@ -8,10 +8,11 @@
 //	marmot index      [--dir .marmot] [--force] [<path>] [--incremental]  Index nodes or source code
 //	marmot query      --query "..." [flags]                      Query the knowledge graph
 //	marmot serve      [--dir .marmot]                            Start MCP server on stdio
-//	marmot verify     [--dir .marmot] [--namespace] [--staleness] Run integrity checks
+//	marmot verify     [--dir .marmot] [--namespace] [--staleness] [--bridges] Run integrity checks
 //	marmot status     [--dir .marmot]                            Show vault statistics
 //	marmot watch      [--dir .marmot]                            Watch for file changes and auto-reindex
 //	marmot bridge     <ns-a> <ns-b> [--relations ...] [--dir]   Create cross-namespace bridge
+//	marmot bridge     /path/to/.marmot [--relations ...] [--dir] Create cross-vault bridge
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 package main
@@ -348,6 +349,7 @@ func cmdVerify(args []string) int {
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	ns := fs.String("namespace", "", "namespace to verify (default: all)")
 	staleness := fs.Bool("staleness", false, "also check source staleness (requires source.path in nodes)")
+	bridges := fs.Bool("bridges", false, "check cross-vault bridge connectivity and staleness")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -355,7 +357,7 @@ func cmdVerify(args []string) int {
 		*dir = discoverVault()
 	}
 
-	if err := runVerifyEnhanced(*dir, *ns, *staleness); err != nil {
+	if err := runVerifyEnhanced(*dir, *ns, *staleness, *bridges); err != nil {
 		fmt.Fprintf(os.Stderr, "verify: %v\n", err)
 		return 1
 	}
@@ -406,6 +408,13 @@ func cmdWatch(args []string) int {
 // bridge
 // ---------------------------------------------------------------------------
 
+// looksLikeVaultPath returns true if s looks like a filesystem path rather than
+// a simple namespace identifier.
+func looksLikeVaultPath(s string) bool {
+	return strings.Contains(s, "/") || strings.Contains(s, "\\") ||
+		strings.HasSuffix(s, ".marmot") || s == "." || s == ".."
+}
+
 func cmdBridge(args []string) int {
 	fs := flag.NewFlagSet("bridge", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
@@ -417,11 +426,47 @@ func cmdBridge(args []string) int {
 		*dir = discoverVault()
 	}
 	remaining := fs.Args()
-	if len(remaining) != 2 {
-		fmt.Fprintln(os.Stderr, "bridge: requires exactly two namespace names: marmot bridge <ns-a> <ns-b>")
+
+	// Detect cross-vault mode:
+	// - 1 positional arg that looks like a path -> local=--dir, remote=arg
+	// - 2 positional args where either looks like a path -> first=local, second=remote
+	crossVault := false
+	var localVault, remoteVault string
+
+	switch len(remaining) {
+	case 1:
+		if looksLikeVaultPath(remaining[0]) {
+			crossVault = true
+			localVault = *dir
+			remoteVault = remaining[0]
+		} else {
+			fmt.Fprintln(os.Stderr, "bridge: requires exactly two namespace names or a vault path")
+			fmt.Fprintln(os.Stderr, "  namespace mode: marmot bridge <ns-a> <ns-b>")
+			fmt.Fprintln(os.Stderr, "  cross-vault:    marmot bridge /path/to/.marmot [--dir .marmot]")
+			return 1
+		}
+	case 2:
+		if looksLikeVaultPath(remaining[0]) || looksLikeVaultPath(remaining[1]) {
+			crossVault = true
+			localVault = remaining[0]
+			remoteVault = remaining[1]
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "bridge: requires exactly two namespace names or a vault path")
+		fmt.Fprintln(os.Stderr, "  namespace mode: marmot bridge <ns-a> <ns-b>")
+		fmt.Fprintln(os.Stderr, "  cross-vault:    marmot bridge /path/to/.marmot [--dir .marmot]")
 		return 1
 	}
-	// Validate namespace names to prevent path traversal.
+
+	if crossVault {
+		if err := runCrossVaultBridgePipeline(localVault, remoteVault, *relations); err != nil {
+			fmt.Fprintf(os.Stderr, "bridge: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	// Namespace bridge mode (existing behavior).
 	for _, ns := range remaining {
 		if ns == "" || strings.Contains(ns, "/") || strings.Contains(ns, "\\") || strings.Contains(ns, "..") || strings.HasPrefix(ns, ".") || strings.HasPrefix(ns, "_") {
 			fmt.Fprintf(os.Stderr, "bridge: invalid namespace name %q (must be a simple identifier)\n", ns)

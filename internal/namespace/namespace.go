@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nurozen/context-marmot/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -37,10 +38,23 @@ type Bridge struct {
 	Target           string   `yaml:"target"`
 	Created          string   `yaml:"created,omitempty"`
 	AllowedRelations []string `yaml:"allowed_relations"`
+
+	// Cross-vault fields (non-empty only for cross-vault bridges)
+	SourceVaultPath string `yaml:"source_vault_path,omitempty"`
+	TargetVaultPath string `yaml:"target_vault_path,omitempty"`
+	SourceVaultID   string `yaml:"source_vault_id,omitempty"`
+	TargetVaultID   string `yaml:"target_vault_id,omitempty"`
+}
+
+// IsCrossVault returns true if the bridge spans two different vaults.
+func (b *Bridge) IsCrossVault() bool {
+	return b.SourceVaultPath != "" || b.TargetVaultPath != "" ||
+		(b.SourceVaultID != "" && b.TargetVaultID != "")
 }
 
 // QualifiedID holds a parsed cross-namespace reference.
 type QualifiedID struct {
+	VaultID   string // "" = local vault; non-empty = cross-vault (@prefix)
 	Namespace string // "" means local / same namespace
 	NodeID    string
 }
@@ -56,9 +70,10 @@ type CrossNamespaceEdge struct {
 
 // Manager provides namespace and bridge operations for a vault.
 type Manager struct {
-	VaultDir   string
-	Namespaces map[string]*Namespace
-	Bridges    map[string]*Bridge // key: "source--target"
+	VaultDir          string
+	Namespaces        map[string]*Namespace
+	Bridges           map[string]*Bridge // key: "source--target"
+	CrossVaultBridges []*Bridge          // bridges where IsCrossVault() is true
 }
 
 // NewManager creates a Manager and loads all namespaces and bridges from disk.
@@ -124,6 +139,9 @@ func (m *Manager) loadBridges() error {
 		}
 		key := BridgeKey(b.Source, b.Target)
 		m.Bridges[key] = b
+		if b.IsCrossVault() {
+			m.CrossVaultBridges = append(m.CrossVaultBridges, b)
+		}
 	}
 	return nil
 }
@@ -244,6 +262,18 @@ func (m *Manager) NamespaceDir(name string) string {
 // The first path component is checked against known namespaces to disambiguate
 // from local node IDs that contain slashes (e.g., "auth/login").
 func (m *Manager) ParseQualifiedID(target, currentNamespace string) QualifiedID {
+	// Cross-vault reference: @vault-id/node-id
+	if strings.HasPrefix(target, "@") {
+		rest := target[1:]
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) < 2 || parts[0] == "" {
+			// Invalid cross-vault reference (e.g., "@", "@/node") — treat as local.
+			return QualifiedID{Namespace: currentNamespace, NodeID: target}
+		}
+		return QualifiedID{VaultID: parts[0], NodeID: parts[1]}
+	}
+
+	// Intra-vault logic (unchanged).
 	parts := strings.SplitN(target, "/", 2)
 	if len(parts) < 2 {
 		return QualifiedID{Namespace: currentNamespace, NodeID: target}
@@ -492,4 +522,123 @@ func formatRelationList(relations []string) string {
 		quoted[i] = "`" + r + "`"
 	}
 	return strings.Join(quoted, ", ")
+}
+
+// --- Cross-Vault Operations ---
+
+// ValidateCrossVaultEdge checks whether a cross-vault edge is allowed by the
+// bridge configuration. Returns nil if allowed, error if not.
+func (m *Manager) ValidateCrossVaultEdge(sourceVaultID, targetVaultID, relation string) error {
+	// Check all cross-vault bridges for a match.
+	for _, b := range m.CrossVaultBridges {
+		srcMatch := (b.SourceVaultID == sourceVaultID && b.TargetVaultID == targetVaultID)
+		tgtMatch := (b.SourceVaultID == targetVaultID && b.TargetVaultID == sourceVaultID)
+		if srcMatch || tgtMatch {
+			// Check allowed relations.
+			for _, r := range b.AllowedRelations {
+				if r == relation {
+					return nil
+				}
+			}
+			return fmt.Errorf("relation %q not allowed by cross-vault bridge %s <-> %s", relation, sourceVaultID, targetVaultID)
+		}
+	}
+	return fmt.Errorf("no cross-vault bridge between %s and %s", sourceVaultID, targetVaultID)
+}
+
+// CreateCrossVaultBridge creates a cross-vault bridge and writes manifests to
+// both the local and remote vaults.
+func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelations []string) (*Bridge, error) {
+	// Load configs from both vaults to get vault_ids.
+	localCfg, err := config.Load(localVaultDir)
+	if err != nil {
+		return nil, fmt.Errorf("load local vault config: %w", err)
+	}
+	remoteCfg, err := config.Load(remoteVaultDir)
+	if err != nil {
+		return nil, fmt.Errorf("load remote vault config: %w", err)
+	}
+
+	if localCfg.VaultID == "" {
+		return nil, fmt.Errorf("local vault at %s has no vault_id set; run 'marmot configure' first", localVaultDir)
+	}
+	if remoteCfg.VaultID == "" {
+		return nil, fmt.Errorf("remote vault at %s has no vault_id set; run 'marmot configure' in that project first", remoteVaultDir)
+	}
+
+	absLocal, err := filepath.Abs(localVaultDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve local path: %w", err)
+	}
+	absRemote, err := filepath.Abs(remoteVaultDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve remote path: %w", err)
+	}
+
+	bridge := &Bridge{
+		Source:           localCfg.VaultID,
+		Target:           remoteCfg.VaultID,
+		SourceVaultPath:  absLocal,
+		TargetVaultPath:  absRemote,
+		SourceVaultID:    localCfg.VaultID,
+		TargetVaultID:    remoteCfg.VaultID,
+		Created:          time.Now().UTC().Format(time.RFC3339),
+		AllowedRelations: allowedRelations,
+	}
+
+	// Two-phase write: write temp files to both vaults first, then rename both.
+	localFile, localTmp, err := writeCrossVaultBridgeTemp(absLocal, bridge)
+	if err != nil {
+		return nil, fmt.Errorf("write bridge to local vault: %w", err)
+	}
+	remoteFile, remoteTmp, err := writeCrossVaultBridgeTemp(absRemote, bridge)
+	if err != nil {
+		_ = os.Remove(localTmp)
+		return nil, fmt.Errorf("write bridge to remote vault: %w", err)
+	}
+
+	// Phase 2: rename both (atomic on most filesystems).
+	if err := os.Rename(localTmp, localFile); err != nil {
+		_ = os.Remove(localTmp)
+		_ = os.Remove(remoteTmp)
+		return nil, fmt.Errorf("commit bridge to local vault: %w", err)
+	}
+	if err := os.Rename(remoteTmp, remoteFile); err != nil {
+		// Roll back local by removing the committed file.
+		_ = os.Remove(localFile)
+		_ = os.Remove(remoteTmp)
+		return nil, fmt.Errorf("commit bridge to remote vault: %w", err)
+	}
+
+	return bridge, nil
+}
+
+// writeCrossVaultBridgeTemp writes a cross-vault bridge manifest to a temp file
+// in the vault's _bridges/ directory. Returns (finalPath, tmpPath, error).
+// Caller is responsible for renaming tmpPath to finalPath.
+func writeCrossVaultBridgeTemp(vaultDir string, b *Bridge) (string, string, error) {
+	bridgeDir := filepath.Join(vaultDir, "_bridges")
+	if err := os.MkdirAll(bridgeDir, 0o755); err != nil {
+		return "", "", fmt.Errorf("create bridges dir: %w", err)
+	}
+
+	filename := fmt.Sprintf("@%s--@%s.md", b.SourceVaultID, b.TargetVaultID)
+
+	yamlBytes, err := yaml.Marshal(b)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal bridge: %w", err)
+	}
+
+	var buf strings.Builder
+	buf.WriteString("---\n")
+	buf.Write(yamlBytes)
+	buf.WriteString("---\n")
+	buf.WriteString(fmt.Sprintf("# Cross-Vault Bridge: %s <-> %s\n", b.SourceVaultID, b.TargetVaultID))
+
+	path := filepath.Join(bridgeDir, filename)
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, []byte(buf.String()), 0o644); err != nil {
+		return "", "", fmt.Errorf("write tmp bridge: %w", err)
+	}
+	return path, tmpPath, nil
 }

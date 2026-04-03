@@ -437,6 +437,25 @@ Automated code-to-graph indexer (first use case enabler).
 
 ---
 
+## Phase 18.5: Cross-Vault Bridges — COMPLETE (2026-04-03)
+
+- [x] Add `vault_id` field to `VaultConfig` for stable cross-vault identity
+- [x] Extend `Bridge` struct with `SourceVaultPath`, `TargetVaultPath`, `SourceVaultID`, `TargetVaultID`
+- [x] Add `IsCrossVault()` method, `QualifiedID.VaultID` for `@vault-id/node-id` format
+- [x] Implement `VaultRegistry` with lazy-loading of remote vault graphs (`internal/namespace/registry.go`)
+- [x] Implement `CreateCrossVaultBridge()` writing manifests to both vaults
+- [x] Extend CLI `marmot bridge` to detect path arguments and dispatch to cross-vault bridge creation
+- [x] Define `GraphResolver` interface in traversal package (`GetNode`, `GetEdges`)
+- [x] Implement `BridgedGraphResolver` wrapping local graph + `VaultGraphProvider` for cross-vault traversal
+- [x] Refactor `Traverse()` and `Compact()` to accept `GraphResolver` interface (backward compatible — `*graph.Graph` satisfies it)
+- [x] Wire `VaultRegistry` into MCP Engine with `graphResolver()` helper
+- [x] Update `HandleContextQuery` to use `BridgedGraphResolver` for cross-vault traversal
+- [x] Add cross-vault edge validation in `HandleContextWrite` for `@vault-id/...` edge targets
+- [x] Add `--bridges` flag to `marmot verify` for cross-vault bridge connectivity checks (path existence, vault_id match)
+- [x] 28 unit tests: `registry_test.go` (10), `bridged_test.go` (10), `namespace_test.go` cross-vault additions (8)
+
+---
+
 ## Phase 19 (Deferred): Custom Visualization Frontend
 
 Interactive graph UI. Deferred until Obsidian no longer meets visualization needs.

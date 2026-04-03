@@ -217,7 +217,9 @@ func runServePipeline(dir string) error {
 	defer func() { _ = engine.Close() }()
 
 	// Wire namespace manager (best-effort — missing namespaces are fine).
-	if nsMgr, nsErr := namespace.NewManager(dir); nsErr == nil && len(nsMgr.Namespaces) > 0 {
+	var nsMgr *namespace.Manager
+	if mgr, nsErr := namespace.NewManager(dir); nsErr == nil && len(mgr.Namespaces) > 0 {
+		nsMgr = mgr
 		engine.WithNamespaceManager(nsMgr)
 		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges\n", len(nsMgr.Namespaces), len(nsMgr.Bridges))
 	}
@@ -231,6 +233,17 @@ func runServePipeline(dir string) error {
 	if nsName == "" {
 		nsName = "default"
 	}
+
+	// Wire vault registry for cross-vault traversal (requires namespace manager with cross-vault bridges).
+	if nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0 {
+		vaultID := vaultCfg.VaultID
+		if vaultID != "" {
+			vr := namespace.NewVaultRegistry(vaultID, dir, nsMgr.CrossVaultBridges)
+			engine.WithVaultRegistry(vr)
+			fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered\n", len(vr.KnownVaultIDs()))
+		}
+	}
+
 	hm, hmErr := heatmap.Load(dir, nsName)
 	if hmErr == nil {
 		engine.WithHeatMap(hm)
@@ -326,7 +339,7 @@ func runServePipeline(dir string) error {
 
 // runVerifyEnhanced loads nodes (optionally filtered by namespace) and runs
 // integrity verification with optional staleness checks.
-func runVerifyEnhanced(dir, ns string, checkStaleness bool) error {
+func runVerifyEnhanced(dir, ns string, checkStaleness, checkBridges bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist", dir)
 	}
@@ -385,6 +398,87 @@ func runVerifyEnhanced(dir, ns string, checkStaleness bool) error {
 					Message:   fmt.Sprintf("source hash mismatch: stored %s, current %s", truncateHashForDisplay(status.StoredHash), truncateHashForDisplay(status.CurrentHash)),
 					Severity:  verify.Warning,
 				})
+			}
+		}
+	}
+
+	// Check cross-vault bridge connectivity.
+	if checkBridges {
+		nsMgr, nsErr := namespace.NewManager(dir)
+		if nsErr != nil {
+			issues = append(issues, verify.IntegrityIssue{
+				NodeID:    "",
+				IssueType: "bridge_error",
+				Message:   fmt.Sprintf("failed to load namespace manager: %v", nsErr),
+				Severity:  verify.Error,
+			})
+		} else if len(nsMgr.CrossVaultBridges) > 0 {
+			vaultCfg, _ := config.Load(dir)
+			localVaultID := ""
+			if vaultCfg != nil {
+				localVaultID = vaultCfg.VaultID
+			}
+
+			if localVaultID == "" {
+				issues = append(issues, verify.IntegrityIssue{
+					NodeID:    "",
+					IssueType: "bridge_config",
+					Message:   "vault has no vault_id set; cross-vault bridge verification requires vault_id in _config.md",
+					Severity:  verify.Warning,
+				})
+			} else {
+				for _, b := range nsMgr.CrossVaultBridges {
+					// Check that the remote vault path exists and is accessible.
+					remoteDir := b.TargetVaultPath
+					if b.SourceVaultPath != "" && b.SourceVaultID != localVaultID {
+						remoteDir = b.SourceVaultPath
+					}
+
+					if remoteDir == "" {
+						issues = append(issues, verify.IntegrityIssue{
+							NodeID:    "",
+							IssueType: "bridge_missing_path",
+							Message:   fmt.Sprintf("cross-vault bridge %s <-> %s has no remote vault path", b.SourceVaultID, b.TargetVaultID),
+							Severity:  verify.Warning,
+						})
+						continue
+					}
+
+					if _, err := os.Stat(remoteDir); os.IsNotExist(err) {
+						issues = append(issues, verify.IntegrityIssue{
+							NodeID:    "",
+							IssueType: "bridge_unreachable",
+							Message:   fmt.Sprintf("cross-vault bridge target %q is unreachable (path: %s)", b.TargetVaultID, remoteDir),
+							Severity:  verify.Error,
+						})
+						continue
+					}
+
+					// Check that the remote vault config is loadable and vault_id matches.
+					remoteCfg, err := config.Load(remoteDir)
+					if err != nil {
+						issues = append(issues, verify.IntegrityIssue{
+							NodeID:    "",
+							IssueType: "bridge_config_error",
+							Message:   fmt.Sprintf("cross-vault bridge: cannot load config from %s: %v", remoteDir, err),
+							Severity:  verify.Warning,
+						})
+						continue
+					}
+
+					expectedID := b.TargetVaultID
+					if b.SourceVaultID != localVaultID {
+						expectedID = b.SourceVaultID
+					}
+					if remoteCfg.VaultID != expectedID {
+						issues = append(issues, verify.IntegrityIssue{
+							NodeID:    "",
+							IssueType: "bridge_id_mismatch",
+							Message:   fmt.Sprintf("cross-vault bridge expects vault_id %q but remote vault has %q", expectedID, remoteCfg.VaultID),
+							Severity:  verify.Error,
+						})
+					}
+				}
 			}
 		}
 	}
@@ -570,6 +664,33 @@ func runBridgePipeline(dir, nsA, nsB, relationsStr string) error {
 
 	fmt.Printf("Created bridge %s <-> %s\n", nsA, nsB)
 	fmt.Printf("Allowed relations: %s\n", strings.Join(relations, ", "))
+	return nil
+}
+
+// runCrossVaultBridgePipeline creates a cross-vault bridge between two vault directories.
+func runCrossVaultBridgePipeline(localDir, remoteDir, relationsStr string) error {
+	// Validate both directories exist.
+	if info, err := os.Stat(localDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("local vault directory %q does not exist or is not a directory", localDir)
+	}
+	if info, err := os.Stat(remoteDir); err != nil || !info.IsDir() {
+		return fmt.Errorf("remote vault directory %q does not exist or is not a directory", remoteDir)
+	}
+
+	relations := strings.Split(relationsStr, ",")
+	for i := range relations {
+		relations[i] = strings.TrimSpace(relations[i])
+	}
+
+	bridge, err := namespace.CreateCrossVaultBridge(localDir, remoteDir, relations)
+	if err != nil {
+		return fmt.Errorf("create cross-vault bridge: %w", err)
+	}
+
+	fmt.Printf("Created cross-vault bridge %s <-> %s\n", bridge.Source, bridge.Target)
+	fmt.Printf("  Local:  %s\n", localDir)
+	fmt.Printf("  Remote: %s\n", remoteDir)
+	fmt.Printf("  Allowed relations: %s\n", strings.Join(relations, ", "))
 	return nil
 }
 

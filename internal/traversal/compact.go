@@ -23,7 +23,7 @@ type CompactedResult struct {
 // Entry/depth-0 nodes receive full <node> elements (summary, edges, context).
 // Deeper nodes receive <node_compact> elements (summary, source ref only).
 // Nodes that would exceed the budget are listed in a <truncated> section.
-func Compact(g *graph.Graph, subgraph *Subgraph, budget int) *CompactedResult {
+func Compact(g GraphResolver, subgraph *Subgraph, budget int) *CompactedResult {
 	if subgraph == nil || len(subgraph.Nodes) == 0 {
 		xml := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
 		return &CompactedResult{
@@ -109,7 +109,7 @@ func Compact(g *graph.Graph, subgraph *Subgraph, budget int) *CompactedResult {
 }
 
 // renderFullNode produces a <node> element with summary, edges, and context.
-func renderFullNode(g *graph.Graph, n *node.Node, depth int) string {
+func renderFullNode(g GraphResolver, n *node.Node, depth int) string {
 	var b strings.Builder
 	status := n.Status
 	if status == "" {

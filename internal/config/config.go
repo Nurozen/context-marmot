@@ -17,6 +17,7 @@ const DefaultTokenBudget = 4096
 // VaultConfig represents the settings in _config.md frontmatter.
 type VaultConfig struct {
 	Version            string `yaml:"version"`
+	VaultID            string `yaml:"vault_id,omitempty"`
 	Namespace          string `yaml:"namespace"`
 	EmbeddingProvider  string `yaml:"embedding_provider"`           // openai | mock
 	EmbeddingModel     string `yaml:"embedding_model"`              // model name

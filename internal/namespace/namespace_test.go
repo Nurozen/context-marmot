@@ -380,5 +380,160 @@ func writeMinimalNamespace(t *testing.T, dir, name string) {
 	}
 }
 
+// --- Cross-Vault Tests ---
+
+func TestCreateCrossVaultBridge(t *testing.T) {
+	localDir := t.TempDir()
+	remoteDir := t.TempDir()
+
+	// Write _config.md with vault_id to each vault.
+	localConfig := "---\nversion: \"1\"\nvault_id: local-vault\nnamespace: default\nembedding_provider: mock\n---\n"
+	remoteConfig := "---\nversion: \"1\"\nvault_id: remote-vault\nnamespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(localDir, "_config.md"), []byte(localConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteDir, "_config.md"), []byte(remoteConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bridge, err := CreateCrossVaultBridge(localDir, remoteDir, []string{"references", "calls"})
+	if err != nil {
+		t.Fatalf("CreateCrossVaultBridge: %v", err)
+	}
+
+	// Verify bridge fields.
+	if bridge.SourceVaultID != "local-vault" {
+		t.Errorf("SourceVaultID = %q, want local-vault", bridge.SourceVaultID)
+	}
+	if bridge.TargetVaultID != "remote-vault" {
+		t.Errorf("TargetVaultID = %q, want remote-vault", bridge.TargetVaultID)
+	}
+	if !bridge.IsCrossVault() {
+		t.Error("expected IsCrossVault() to return true")
+	}
+	if len(bridge.AllowedRelations) != 2 {
+		t.Fatalf("expected 2 allowed relations, got %d", len(bridge.AllowedRelations))
+	}
+
+	// Verify bridge manifest exists in both vaults.
+	expectedFilename := "@local-vault--@remote-vault.md"
+	localBridgePath := filepath.Join(localDir, "_bridges", expectedFilename)
+	remoteBridgePath := filepath.Join(remoteDir, "_bridges", expectedFilename)
+
+	if _, err := os.Stat(localBridgePath); os.IsNotExist(err) {
+		t.Fatalf("bridge manifest not found in local vault: %s", localBridgePath)
+	}
+	if _, err := os.Stat(remoteBridgePath); os.IsNotExist(err) {
+		t.Fatalf("bridge manifest not found in remote vault: %s", remoteBridgePath)
+	}
+
+	// Verify the bridge can be loaded back.
+	loaded, err := LoadBridge(localBridgePath)
+	if err != nil {
+		t.Fatalf("LoadBridge from local: %v", err)
+	}
+	if loaded.SourceVaultID != "local-vault" || loaded.TargetVaultID != "remote-vault" {
+		t.Errorf("loaded bridge: SourceVaultID=%s TargetVaultID=%s", loaded.SourceVaultID, loaded.TargetVaultID)
+	}
+}
+
+func TestCreateCrossVaultBridge_MissingVaultID(t *testing.T) {
+	localDir := t.TempDir()
+	remoteDir := t.TempDir()
+
+	// Local vault has no vault_id set.
+	localConfig := "---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\n---\n"
+	remoteConfig := "---\nversion: \"1\"\nvault_id: remote-vault\nnamespace: default\nembedding_provider: mock\n---\n"
+	os.WriteFile(filepath.Join(localDir, "_config.md"), []byte(localConfig), 0o644)
+	os.WriteFile(filepath.Join(remoteDir, "_config.md"), []byte(remoteConfig), 0o644)
+
+	_, err := CreateCrossVaultBridge(localDir, remoteDir, []string{"references"})
+	if err == nil {
+		t.Fatal("expected error when local vault has no vault_id")
+	}
+}
+
+func TestValidateCrossVaultEdge(t *testing.T) {
+	m := &Manager{
+		CrossVaultBridges: []*Bridge{
+			{SourceVaultID: "vault-a", TargetVaultID: "vault-b", AllowedRelations: []string{"references", "calls"}},
+		},
+	}
+
+	// Allowed relation.
+	if err := m.ValidateCrossVaultEdge("vault-a", "vault-b", "references"); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	// Reverse direction should also work.
+	if err := m.ValidateCrossVaultEdge("vault-b", "vault-a", "calls"); err != nil {
+		t.Fatalf("expected no error for reverse direction, got %v", err)
+	}
+
+	// Disallowed relation.
+	if err := m.ValidateCrossVaultEdge("vault-a", "vault-b", "contains"); err == nil {
+		t.Fatal("expected error for disallowed relation")
+	}
+
+	// Non-existent bridge.
+	if err := m.ValidateCrossVaultEdge("vault-a", "vault-c", "references"); err == nil {
+		t.Fatal("expected error for non-existent bridge")
+	}
+}
+
+func TestValidateCrossVaultEdge_EmptyBridges(t *testing.T) {
+	m := &Manager{CrossVaultBridges: nil}
+	if err := m.ValidateCrossVaultEdge("a", "b", "references"); err == nil {
+		t.Fatal("expected error when no cross-vault bridges exist")
+	}
+}
+
+func TestParseQualifiedID_CrossVault(t *testing.T) {
+	dir := t.TempDir()
+	writeMinimalNamespace(t, dir, "backend")
+	m, err := NewManager(dir)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Cross-vault reference.
+	qid := m.ParseQualifiedID("@remote-vault/some/node", "default")
+	if qid.VaultID != "remote-vault" || qid.NodeID != "some/node" {
+		t.Fatalf("expected VaultID=remote-vault NodeID=some/node, got VaultID=%s NodeID=%s", qid.VaultID, qid.NodeID)
+	}
+
+	// Normal reference (not cross-vault).
+	qid = m.ParseQualifiedID("simple-node", "default")
+	if qid.VaultID != "" || qid.Namespace != "default" || qid.NodeID != "simple-node" {
+		t.Fatalf("unexpected QualifiedID: %+v", qid)
+	}
+
+	// @incomplete (no slash) should be treated as local.
+	qid = m.ParseQualifiedID("@incomplete", "default")
+	if qid.VaultID != "" {
+		t.Fatalf("expected empty VaultID for @incomplete, got %q", qid.VaultID)
+	}
+}
+
+func TestBridgeIsCrossVault(t *testing.T) {
+	tests := []struct {
+		name   string
+		bridge Bridge
+		want   bool
+	}{
+		{"intra-vault bridge", Bridge{Source: "a", Target: "b"}, false},
+		{"cross-vault with source path", Bridge{Source: "a", Target: "b", SourceVaultPath: "/tmp/a"}, true},
+		{"cross-vault with target path", Bridge{Source: "a", Target: "b", TargetVaultPath: "/tmp/b"}, true},
+		{"cross-vault with both paths", Bridge{Source: "a", Target: "b", SourceVaultPath: "/tmp/a", TargetVaultPath: "/tmp/b"}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.bridge.IsCrossVault(); got != tt.want {
+				t.Errorf("IsCrossVault() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // Suppress unused import warnings.
 var _ = strings.Contains

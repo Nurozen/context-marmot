@@ -71,7 +71,7 @@ func TestVerifyOnEmptyVault(t *testing.T) {
 	}
 
 	// Verify should succeed with no issues (no nodes to check).
-	err := runVerifyEnhanced(vault, "", false)
+	err := runVerifyEnhanced(vault, "", false, false)
 	if err != nil {
 		t.Fatalf("verify failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestVerifyRequiresVault(t *testing.T) {
 	dir := t.TempDir()
 	vault := filepath.Join(dir, "nonexistent")
 
-	err := runVerifyEnhanced(vault, "", false)
+	err := runVerifyEnhanced(vault, "", false, false)
 	if err == nil {
 		t.Fatal("expected error for nonexistent vault, got nil")
 	}
