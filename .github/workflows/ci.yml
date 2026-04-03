@@ -51,11 +51,7 @@ jobs:
           cache: true
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          # Build from source so it uses the Go 1.26 toolchain set up above;
-          # pre-built binaries are still compiled with Go 1.24 and reject
-          # go.mod targets above that version.
-          install-mode: goinstall
           version: v2.1.6
           args: --timeout=5m
