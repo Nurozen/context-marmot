@@ -31,6 +31,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Summary engine** --- auto-generates `_summary.md` per namespace using LLM; async scheduler regenerates on significant node changes; graceful degradation when LLM unavailable
 - **Update engine** --- detects source file changes via hash comparison, propagates staleness through reverse edges, reindexes affected nodes; file watcher mode for continuous operation
 - **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
+- **Static analysis indexer** --- `marmot index <path>` parses Go (full AST), TypeScript (regex-based), and 30+ other languages into graph nodes with typed edges; incremental mode skips unchanged files; respects `.gitignore`
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
 ## Quick Start
@@ -251,10 +252,15 @@ If the configured classifier provider's API key is not found at serve time, Cont
 | `marmot init [--dir .marmot]` | Create a new vault, run configure, then setup |
 | `marmot configure [--dir .marmot]` | Interactive prompt for embedding provider, model, API key, and CRUD classifier |
 | `marmot setup [--dir .marmot] [--claude] [--codex] [--vscode] [--cursor]` | Generate MCP configs for detected (or specified) tools |
-| `marmot index [--dir .marmot] [--force]` | Index all node files into the embedding store. `--force` clears and rebuilds all embeddings (use after changing provider/model). |
+| `marmot index [--dir .marmot] [--force] [<path>] [--incremental]` | Index node files into the embedding store. With `<path>`: run static analysis indexer on source code directory. `--incremental` skips unchanged files. `--force` clears and rebuilds all embeddings. |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
 | `marmot verify [--dir .marmot]` | Run integrity and staleness checks |
 | `marmot serve [--dir .marmot]` | Start the MCP server on stdio |
+| `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, stale nodes, namespaces, heat map |
+| `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
+| `marmot bridge <ns-a> <ns-b> [--relations ...] [--dir .marmot]` | Create bridge manifest between two namespaces |
+| `marmot summarize [--namespace ...] [--dir .marmot]` | Force summary regeneration for a namespace |
+| `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
 
 ## Node Format
 
@@ -314,6 +320,7 @@ internal/
   namespace/             Namespace manager, bridge manifests, qualified ID resolution
   summary/               Namespace summary generation, async scheduler, _summary.md I/O
   update/                Source change detection, staleness propagation, reindex, file watcher
+  indexer/               Static analysis indexer: Go AST, TypeScript regex, generic file, ignore patterns, runner
   mcp/                   MCP server (4 tools), engine wiring, cross-namespace edge validation
 ```
 
@@ -372,6 +379,8 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Heat map (Phase 12): co-access frequency tracking in `_heat/<namespace>.md`, exponential decay with floor, heat-boosted BFS traversal priority, automatic co-access logging from `context_query`
 - Summary engine (Phase 13): `_summary.md` per namespace via LLM synthesis, async regeneration scheduler with delta threshold + periodic interval, graceful degradation
 - Update engine (Phase 13): source hash change detection, reverse-edge staleness propagation, automatic reindexing, fsnotify file watcher, batch update mode
+- Full CLI (Phase 15): `status`, `watch`, `bridge`, `summarize`, `reembed` commands; enhanced `verify` with namespace filter and staleness checks
+- Static analysis indexer (Phase 17): Go AST indexer (packages, functions, methods, types, interfaces), TypeScript regex-based indexer (classes, interfaces, functions, type aliases), generic file indexer (30+ extensions), `.gitignore` support, incremental indexing with CRUD classification, `marmot index <path>` CLI integration
 
 ### Known MVP limitations
 
@@ -380,7 +389,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including heat maps, summary engine, static analysis indexing, and the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), and summary + update engines (Phase 13) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), and static analysis indexer (Phase 17) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

@@ -370,18 +370,19 @@ Co-access frequency tracking. Decay affects traversal priority only.
 - [x] Handle config `embedding_model` changes gracefully (warn + require `--force` reindex)
 - [x] Write tests for model mismatch detection and migration
 
-## Phase 15: Full CLI
+## Phase 15: Full CLI — COMPLETE (2026-04-02)
 
 Complete command-line interface.
 
-- [ ] Implement `marmot index <path>` — index a source directory into a namespace
-- [ ] Implement `marmot verify [--namespace]` — run integrity/staleness checks
-- [ ] Implement `marmot status` — show namespace stats, node counts, stale counts, superseded counts
-- [ ] Implement `marmot watch` — start file watcher + auto-reindex
-- [ ] Implement `marmot bridge <ns-a> <ns-b>` — create bridge manifest
-- [ ] Implement `marmot summarize [--namespace]` — force summary regeneration
-- [ ] Implement `marmot reembed [--namespace]` — regenerate embeddings after model change
-- [ ] Write CLI integration tests
+- [x] Implement `marmot index <path>` — accepts path argument, defers to static analysis indexer (Phase 17) with clear message
+- [x] Implement `marmot verify [--namespace] [--staleness]` — namespace filter and source staleness checks
+- [x] Implement `marmot status` — vault stats: node counts by status, edges, embeddings, stale nodes, namespaces, bridges, heat map pairs, summary status
+- [x] Implement `marmot watch` — starts fsnotify file watcher + auto-reindex via Update Engine; graceful shutdown on SIGINT/SIGTERM
+- [x] Implement `marmot bridge <ns-a> <ns-b> [--relations ...]` — creates bridge manifest with configurable allowed relations
+- [x] Implement `marmot summarize [--namespace]` — force summary regeneration using configured LLM provider
+- [x] Implement `marmot reembed [--namespace]` — regenerate all embeddings (delegates to index --force)
+- [x] Write CLI integration tests — 14 tests in `cli_phase15_test.go`
+- [x] Added `embedding.Store.Count()` method for status reporting
 
 ## Phase 16: REST / WebSocket API
 
@@ -401,19 +402,21 @@ HTTP + WebSocket interface. Enables future custom UIs without coupling to Obsidi
 - [ ] Serve static frontend assets in production mode (when frontend exists)
 - [ ] Write API integration tests
 
-## Phase 17: Static Analysis Indexer
+## Phase 17: Static Analysis Indexer — COMPLETE (2026-04-02)
 
 Automated code-to-graph indexer (first use case enabler).
 
-- [ ] Define `Indexer` interface
-- [ ] Implement Go indexer (parse Go AST -> nodes + edges with correct edge classes)
-- [ ] Implement TypeScript indexer (parse TS AST -> nodes + edges)
-- [ ] Implement generic file indexer (module-level nodes for unsupported languages)
-- [ ] Implement incremental indexing (only re-index changed files)
-  - [ ] On re-index, use CRUD classifier to determine ADD/UPDATE/SUPERSEDE per node
-- [ ] Implement ignore patterns (respect `.gitignore` + namespace config globs)
-- [ ] Integrate with `marmot index` CLI command
-- [ ] Write tests against sample codebases
+- [x] Define `Indexer` interface — `internal/indexer/indexer.go`: `SourceEntity`, `SourceRef`, `EntityEdge`, `IndexResult`, `Indexer` interface
+- [x] Implement Go indexer (parse Go AST -> nodes + edges with correct edge classes) — `internal/indexer/golang.go`: full `go/ast` + `go/parser` analysis; extracts packages, functions, methods, types, interfaces; edges: `contains`, `imports`, `calls`, `extends` (embedded structs), `implements` (same-package best-effort); import resolution via `go.mod` module path
+- [x] Implement TypeScript indexer (parse TS AST -> nodes + edges) — `internal/indexer/typescript.go`: regex-based parsing with string/comment masking; extracts modules, classes, interfaces, functions, arrow functions, type aliases, methods; edges: `contains`, `imports`, `extends`, `implements`; JSDoc comment extraction; brace-depth line tracking
+- [x] Implement generic file indexer (module-level nodes for unsupported languages) — `internal/indexer/generic.go`: 30+ extensions; one module/file node per file; best-effort import detection (Python, Java, Ruby, Rust, C/C++); symbol counting for summaries; binary file detection
+- [x] Implement incremental indexing (only re-index changed files) — `Runner` compares source hashes; skips unchanged entities
+  - [x] On re-index, use CRUD classifier to determine ADD/UPDATE/SUPERSEDE per node — `classifierAdapter` wraps `classifier.Classifier` for Runner's interface
+- [x] Implement ignore patterns (respect `.gitignore` + namespace config globs) — `internal/indexer/ignore.go`: standard gitignore syntax (comments, negation, `**` recursive, trailing `/`), always-ignore defaults (`.git/`, `node_modules/`, `vendor/`, etc.), extra patterns from config
+- [x] Integrate with `marmot index` CLI command — `marmot index <path>` runs static analysis; `marmot index <path> --incremental` for incremental mode; `marmot index` (no path) still embeds existing nodes
+- [x] Write tests against sample codebases — 40 tests in `indexer_test.go`: Go indexer (11), TypeScript indexer (9), generic indexer (7), registry (3), ignore matcher (6), runner (6)
+- [x] `Registry` with `NewDefaultRegistry()` pre-populating Go, TypeScript, and Generic indexers
+- [x] `Runner` orchestrator with `NodeStore`, `EmbeddingStore`, `Embedder`, `Classifier`, `GraphReader` interfaces; batch embedding; `RunResult` reporting
 
 ## Phase 18: Integration Testing & Hardening
 

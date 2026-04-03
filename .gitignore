@@ -39,3 +39,4 @@ testdata/
 test_rig/
 .env
 marmot-eval
+marmot

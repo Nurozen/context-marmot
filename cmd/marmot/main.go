@@ -2,11 +2,18 @@
 //
 // Commands:
 //
-//	marmot init    [--dir .marmot]              Create a new vault
-//	marmot index   [--dir .marmot]              Index all nodes into embedding store
-//	marmot query   --query "..." [flags]        Query the knowledge graph
-//	marmot serve   [--dir .marmot]              Start MCP server on stdio
-//	marmot verify  [--dir .marmot]              Run integrity checks
+//	marmot init       [--dir .marmot]                            Create a new vault
+//	marmot configure  [--dir .marmot]                            Configure vault settings
+//	marmot setup      [--dir .marmot]                            Generate MCP tool configs
+//	marmot index      [--dir .marmot] [--force] [<path>] [--incremental]  Index nodes or source code
+//	marmot query      --query "..." [flags]                      Query the knowledge graph
+//	marmot serve      [--dir .marmot]                            Start MCP server on stdio
+//	marmot verify     [--dir .marmot] [--namespace] [--staleness] Run integrity checks
+//	marmot status     [--dir .marmot]                            Show vault statistics
+//	marmot watch      [--dir .marmot]                            Watch for file changes and auto-reindex
+//	marmot bridge     <ns-a> <ns-b> [--relations ...] [--dir]   Create cross-namespace bridge
+//	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
+//	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 package main
 
 import (
@@ -14,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const defaultDir = ".marmot"
@@ -67,6 +75,16 @@ func run(args []string) int {
 		return cmdServe(cmdArgs)
 	case "verify":
 		return cmdVerify(cmdArgs)
+	case "status":
+		return cmdStatus(cmdArgs)
+	case "watch":
+		return cmdWatch(cmdArgs)
+	case "bridge":
+		return cmdBridge(cmdArgs)
+	case "summarize":
+		return cmdSummarize(cmdArgs)
+	case "reembed":
+		return cmdReembed(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		usage()
@@ -76,7 +94,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: init, configure, setup, index, query, serve, verify")
+	fmt.Fprintln(os.Stderr, "commands: init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed")
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +184,7 @@ func cmdIndex(args []string) int {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	force := fs.Bool("force", false, "clear and rebuild all embeddings (use after changing embedding provider)")
+	incremental := fs.Bool("incremental", false, "skip unchanged files during static analysis indexing")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -173,11 +192,31 @@ func cmdIndex(args []string) int {
 		*dir = discoverVault()
 	}
 
+	// Check for positional arg (source path).
+	remaining := fs.Args()
+	if len(remaining) > 0 {
+		// Static analysis indexing of a source directory.
+		srcDir := remaining[0]
+		if err := runStaticIndex(*dir, srcDir, *incremental); err != nil {
+			fmt.Fprintf(os.Stderr, "index: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	if err := runIndex(*dir, *force); err != nil {
 		fmt.Fprintf(os.Stderr, "index: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+func runStaticIndex(dir, srcDir string, incremental bool) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
+	}
+
+	return runStaticIndexPipeline(dir, srcDir, incremental)
 }
 
 func runIndex(dir string, force bool) error {
@@ -263,6 +302,8 @@ func runServe(dir string) error {
 func cmdVerify(args []string) int {
 	fs := flag.NewFlagSet("verify", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	ns := fs.String("namespace", "", "namespace to verify (default: all)")
+	staleness := fs.Bool("staleness", false, "also check source staleness (requires source.path in nodes)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -270,17 +311,127 @@ func cmdVerify(args []string) int {
 		*dir = discoverVault()
 	}
 
-	if err := runVerify(*dir); err != nil {
+	if err := runVerifyEnhanced(*dir, *ns, *staleness); err != nil {
 		fmt.Fprintf(os.Stderr, "verify: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func runVerify(dir string) error {
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
-	}
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
 
-	return runVerifyPipeline(dir)
+func cmdStatus(args []string) int {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	dir := fs.String("dir", "", "marmot vault directory")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	if err := runStatusPipeline(*dir); err != nil {
+		fmt.Fprintf(os.Stderr, "status: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// watch
+// ---------------------------------------------------------------------------
+
+func cmdWatch(args []string) int {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	dir := fs.String("dir", "", "marmot vault directory")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	if err := runWatchPipeline(*dir); err != nil {
+		fmt.Fprintf(os.Stderr, "watch: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// bridge
+// ---------------------------------------------------------------------------
+
+func cmdBridge(args []string) int {
+	fs := flag.NewFlagSet("bridge", flag.ContinueOnError)
+	dir := fs.String("dir", "", "marmot vault directory")
+	relations := fs.String("relations", "calls,reads,writes,references,cross_project,associated", "comma-separated list of allowed relations")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	remaining := fs.Args()
+	if len(remaining) != 2 {
+		fmt.Fprintln(os.Stderr, "bridge: requires exactly two namespace names: marmot bridge <ns-a> <ns-b>")
+		return 1
+	}
+	// Validate namespace names to prevent path traversal.
+	for _, ns := range remaining {
+		if ns == "" || strings.Contains(ns, "/") || strings.Contains(ns, "\\") || strings.Contains(ns, "..") || strings.HasPrefix(ns, ".") || strings.HasPrefix(ns, "_") {
+			fmt.Fprintf(os.Stderr, "bridge: invalid namespace name %q (must be a simple identifier)\n", ns)
+			return 1
+		}
+	}
+	if err := runBridgePipeline(*dir, remaining[0], remaining[1], *relations); err != nil {
+		fmt.Fprintf(os.Stderr, "bridge: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// summarize
+// ---------------------------------------------------------------------------
+
+func cmdSummarize(args []string) int {
+	fs := flag.NewFlagSet("summarize", flag.ContinueOnError)
+	dir := fs.String("dir", "", "marmot vault directory")
+	ns := fs.String("namespace", "", "namespace to summarize (default: from config)")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	if err := runSummarizePipeline(*dir, *ns); err != nil {
+		fmt.Fprintf(os.Stderr, "summarize: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// reembed
+// ---------------------------------------------------------------------------
+
+func cmdReembed(args []string) int {
+	fs := flag.NewFlagSet("reembed", flag.ContinueOnError)
+	dir := fs.String("dir", "", "marmot vault directory")
+	ns := fs.String("namespace", "", "namespace to reembed (currently applies to all; reserved for future use)")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	if *ns != "" {
+		fmt.Fprintf(os.Stderr, "reembed: --namespace flag is reserved for future use; rebuilding all embeddings\n")
+	}
+	if err := runReembedPipeline(*dir); err != nil {
+		fmt.Fprintf(os.Stderr, "reembed: %v\n", err)
+		return 1
+	}
+	return 0
 }

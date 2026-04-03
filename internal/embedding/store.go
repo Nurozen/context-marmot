@@ -488,6 +488,23 @@ func (s *Store) StaleCheck(nodeID string, currentHash string) (bool, error) {
 	return storedHash != currentHash, nil
 }
 
+// Count returns the number of embeddings in the store.
+func (s *Store) Count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	stmt, _, err := s.db.Prepare(`SELECT COUNT(*) FROM embeddings`)
+	if err != nil {
+		return 0
+	}
+	defer stmt.Close()
+
+	if !stmt.Step() {
+		return 0
+	}
+	return stmt.ColumnInt(0)
+}
+
 // Close closes the underlying SQLite connection.
 func (s *Store) Close() error {
 	s.mu.Lock()
