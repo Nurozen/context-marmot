@@ -93,7 +93,7 @@ When referencing nodes in other namespaces, use qualified IDs (e.g., 'other-name
 When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vault edges require a cross-vault bridge with the relation type whitelisted.`),
 		mcp.WithString("id",
 			mcp.Required(),
-			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. Examples: 'auth/login', 'db/users', 'decisions/caching_strategy'. Must not contain '..' or start with '/'"),
+			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. When using a non-default namespace, prefix the ID with the namespace (e.g., 'my-ns/auth/login'). If you omit the namespace prefix, it will be added automatically. Examples: 'auth/login', 'db/users', 'my-namespace/render/api-client'. Must not contain '..' or start with '/'"),
 		),
 		mcp.WithString("type",
 			mcp.Required(),

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/embedding"
@@ -146,6 +147,13 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	}
 	nodeType := req.GetString("type", "concept")
 	namespace := req.GetString("namespace", "default")
+
+	// Auto-prefix namespace to ID when using namespaces, so the on-disk path
+	// matches the ID. LLMs often omit the namespace prefix from the ID since
+	// they pass it as a separate parameter.
+	if namespace != "default" && !strings.HasPrefix(id, namespace+"/") {
+		id = namespace + "/" + id
+	}
 
 	mu := e.namespaceLock(namespace)
 	mu.Lock()

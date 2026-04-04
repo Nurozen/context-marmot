@@ -100,4 +100,7 @@ type NodeMeta struct {
 	Type      string `yaml:"type"`
 	Namespace string `yaml:"namespace"`
 	Status    string `yaml:"status"`
+	// FilePath is the on-disk path discovered during ListNodes. It may differ
+	// from NodePath(ID) when the frontmatter ID doesn't match the file location.
+	FilePath string `yaml:"-"`
 }

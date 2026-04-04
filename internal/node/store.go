@@ -258,6 +258,7 @@ func (s *Store) ListNodes() ([]NodeMeta, error) {
 			return nil // skip malformed files
 		}
 
+		meta.FilePath = path
 		metas = append(metas, *meta)
 		return nil
 	})

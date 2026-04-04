@@ -72,7 +72,10 @@ func runIndexPipeline(dir string, force bool) error {
 	}
 	var batch []nodeText
 	for _, m := range metas {
-		path := store.NodePath(m.ID)
+		path := m.FilePath
+		if path == "" {
+			path = store.NodePath(m.ID)
+		}
 		n, err := store.LoadNode(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", m.ID, err)
@@ -361,7 +364,10 @@ func runVerifyEnhanced(dir, ns string, checkStaleness, checkBridges bool) error 
 		if ns != "" && m.Namespace != ns {
 			continue
 		}
-		path := store.NodePath(m.ID)
+		path := m.FilePath
+		if path == "" {
+			path = store.NodePath(m.ID)
+		}
 		n, err := store.LoadNode(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", m.ID, err)
@@ -548,7 +554,10 @@ func runStatusPipeline(dir string) error {
 	// Check for stale nodes (those with source.path set).
 	var staleCount int
 	for _, m := range allMetas {
-		path := store.NodePath(m.ID)
+		path := m.FilePath
+		if path == "" {
+			path = store.NodePath(m.ID)
+		}
 		n, err := store.LoadNode(path)
 		if err != nil || n.Source.Path == "" || n.Source.Hash == "" {
 			continue
@@ -740,7 +749,10 @@ func runSummarizePipeline(dir, ns string) error {
 
 	var nodes []*node.Node
 	for _, m := range activeMetas {
-		path := store.NodePath(m.ID)
+		path := m.FilePath
+		if path == "" {
+			path = store.NodePath(m.ID)
+		}
 		n, err := store.LoadNode(path)
 		if err != nil {
 			continue
