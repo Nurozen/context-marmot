@@ -192,6 +192,25 @@ func (e *Engine) graphResolver() traversal.GraphResolver {
 	return e.Graph
 }
 
+// resolveNodeID looks up a node by ID in the graph. If not found and a
+// namespace manager is available, it tries prefixing each known namespace
+// (e.g. "render/api-client" → "hl-warde/render/api-client"). This handles
+// the common case where LLMs omit the namespace prefix from node IDs.
+func (e *Engine) resolveNodeID(id string) (*node.Node, bool) {
+	if n, ok := e.Graph.GetNode(id); ok {
+		return n, true
+	}
+	if e.NSManager != nil {
+		for nsName := range e.NSManager.Namespaces {
+			prefixed := nsName + "/" + id
+			if n, ok := e.Graph.GetNode(prefixed); ok {
+				return n, true
+			}
+		}
+	}
+	return nil, false
+}
+
 // Close releases resources held by the engine.
 func (e *Engine) Close() error {
 	if e.EmbeddingStore != nil {

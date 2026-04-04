@@ -161,7 +161,7 @@ CHECKS:
 - 'integrity': Detects dangling edges (pointing to non-existent nodes), structural cycles, and missing source files.
 - 'all': Runs both checks (default).`),
 		mcp.WithArray("node_ids",
-			mcp.Description("Specific node IDs to check. Omit to verify the entire graph"),
+			mcp.Description("Specific node IDs to check. Use the full namespace-prefixed ID (e.g., 'my-ns/auth/login'). If the namespace prefix is omitted, known namespaces are searched automatically. Omit to verify the entire graph"),
 			mcp.WithStringItems(),
 		),
 		mcp.WithString("check",
@@ -181,10 +181,10 @@ This does NOT permanently delete the node file. The node is marked with status="
 Always await the response from context_write before calling context_delete — do not batch them in the same request.`),
 		mcp.WithString("id",
 			mcp.Required(),
-			mcp.Description("ID of the node to supersede"),
+			mcp.Description("ID of the node to supersede. Use the full namespace-prefixed ID (e.g., 'my-ns/auth/login'). If the namespace prefix is omitted, known namespaces are searched automatically"),
 		),
 		mcp.WithString("superseded_by",
-			mcp.Description("ID of the node that replaces this one. Omit if retiring without a replacement."),
+			mcp.Description("ID of the replacement node. Use the full namespace-prefixed ID (e.g., 'my-ns/auth/login-v2'). If the namespace prefix is omitted, known namespaces are searched automatically. Omit if retiring without a replacement."),
 		),
 	)
 

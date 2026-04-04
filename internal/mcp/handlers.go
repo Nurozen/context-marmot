@@ -180,8 +180,14 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 			if ie.Relation == "" {
 				return mcp.NewToolResultError("edge relation must not be empty"), nil
 			}
+			target := ie.Target
+			// Auto-prefix namespace on edge targets for same-namespace references.
+			// Skip cross-vault (@vault/...) and already-prefixed targets.
+			if namespace != "default" && !strings.HasPrefix(target, "@") && !strings.HasPrefix(target, namespace+"/") {
+				target = namespace + "/" + target
+			}
 			edges = append(edges, node.Edge{
-				Target:   ie.Target,
+				Target:   target,
 				Relation: node.EdgeRelation(ie.Relation),
 				Class:    node.ClassifyRelation(ie.Relation),
 			})
@@ -401,7 +407,7 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 		nodes = e.Graph.AllNodes()
 	} else {
 		for _, id := range nodeIDs {
-			if n, ok := e.Graph.GetNode(id); ok {
+			if n, ok := e.resolveNodeID(id); ok {
 				nodes = append(nodes, n)
 			}
 		}
@@ -479,11 +485,13 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	}
 	supersededBy := req.GetString("superseded_by", "")
 
-	// Verify node exists.
-	existing, ok := e.Graph.GetNode(id)
+	// Try to find node, auto-prefixing namespace if the bare ID isn't found.
+	existing, ok := e.resolveNodeID(id)
 	if !ok {
 		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
 	}
+	// Use the resolved (possibly prefixed) ID for all subsequent operations.
+	id = existing.ID
 
 	mu := e.namespaceLock(existing.Namespace)
 	mu.Lock()
@@ -493,6 +501,13 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	current, ok := e.Graph.GetNode(id)
 	if !ok || current.Status == node.StatusSuperseded {
 		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
+	}
+
+	// Resolve superseded_by to its full ID if namespace prefix was omitted.
+	if supersededBy != "" {
+		if resolved, ok := e.resolveNodeID(supersededBy); ok {
+			supersededBy = resolved.ID
+		}
 	}
 
 	// Soft-delete on disk.
