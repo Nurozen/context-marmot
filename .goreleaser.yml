@@ -24,6 +24,12 @@ builds:
       - -X main.version={{.Version}}
       - -X main.commit={{.ShortCommit}}
       - -X main.date={{.Date}}
+    hooks:
+      post:
+        # Sign darwin binaries with Developer ID cert (or ad-hoc fallback).
+        # The release workflow sets APPLE_SIGNING_IDENTITY after importing the cert.
+        - cmd: >-
+            {{ if eq .Os "darwin" }}./scripts/sign-darwin.sh "{{ .Path }}"{{ else }}true{{ end }}
 
 archives:
   - id: default
@@ -31,6 +37,9 @@ archives:
       - tar.gz
     format_overrides:
       - goos: windows
+        formats:
+          - zip
+      - goos: darwin
         formats:
           - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -54,3 +63,19 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
+  header: |
+    ## Installation
+
+    **macOS** (signed and notarized):
+    ```bash
+    tar xzf marmot_*.zip  # or unzip
+    chmod +x marmot
+    sudo mv marmot /usr/local/bin/
+    ```
+
+    **Linux:**
+    ```bash
+    tar xzf marmot_*.tar.gz
+    chmod +x marmot
+    sudo mv marmot /usr/local/bin/
+    ```
