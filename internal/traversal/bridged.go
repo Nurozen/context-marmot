@@ -37,11 +37,16 @@ func (r *BridgedGraphResolver) GetNode(id string) (*node.Node, bool) {
 	if !ok {
 		return nil, false
 	}
-	// Return a shallow copy with the @-prefixed ID so the node's ID is
-	// consistent with the key used throughout traversal and compaction.
-	copy := *n
-	copy.ID = id
-	return &copy, true
+	// Return a copy with the @-prefixed ID so the node's ID is consistent
+	// with the key used throughout traversal and compaction. Deep-copy the
+	// Edges slice so mutations can't corrupt the remote vault's cached graph.
+	cp := *n
+	cp.ID = id
+	if len(n.Edges) > 0 {
+		cp.Edges = make([]node.Edge, len(n.Edges))
+		copy(cp.Edges, n.Edges)
+	}
+	return &cp, true
 }
 
 // GetEdges resolves edges, delegating to remote vault graphs for @-prefixed IDs.

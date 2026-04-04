@@ -96,13 +96,19 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 	// Step 4: Compact into XML.
 	compacted := traversal.Compact(resolver, subgraph, budget)
 
-	// Record co-access for heat map.
+	// Record co-access for heat map (local nodes only — cross-vault
+	// @-prefixed IDs are excluded because GetWeights only receives local
+	// entry IDs from embedding search, so remote pairs would be orphaned).
 	if e.HeatMap != nil && len(subgraph.Nodes) >= 2 {
-		resultIDs := make([]string, len(subgraph.Nodes))
-		for i, n := range subgraph.Nodes {
-			resultIDs[i] = n.ID
+		var resultIDs []string
+		for _, n := range subgraph.Nodes {
+			if !strings.HasPrefix(n.ID, "@") {
+				resultIDs = append(resultIDs, n.ID)
+			}
 		}
-		e.HeatMap.RecordCoAccess(resultIDs, heatmap.DefaultLearningRate)
+		if len(resultIDs) >= 2 {
+			e.HeatMap.RecordCoAccess(resultIDs, heatmap.DefaultLearningRate)
+		}
 	}
 
 	return mcp.NewToolResultText(compacted.XML), nil
