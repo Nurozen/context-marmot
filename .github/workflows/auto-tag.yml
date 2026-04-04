@@ -125,24 +125,71 @@ jobs:
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           KEY_PATH=~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+          SUBMISSION_IDS=()
 
+          # Phase 1: Submit all archives (no waiting).
           for archive in dist/marmot_*_darwin_*.zip; do
             [ -f "$archive" ] || continue
-            echo "Submitting $archive for notarization..."
-            xcrun notarytool submit "$archive" \
+            echo "Submitting $archive..."
+            OUTPUT=$(xcrun notarytool submit "$archive" \
               --key "$KEY_PATH" \
               --key-id "$APPLE_API_KEY_ID" \
-              --issuer "$APPLE_API_ISSUER_ID" \
-              --wait --timeout 10m \
-              2>&1 | tee /tmp/notarize-output.txt
-
-            if grep -q "status: Accepted" /tmp/notarize-output.txt; then
-              echo "✅ $archive notarized successfully"
+              --issuer "$APPLE_API_ISSUER_ID" 2>&1)
+            echo "$OUTPUT"
+            ID=$(echo "$OUTPUT" | grep "id:" | head -1 | awk '{print $2}')
+            if [ -n "$ID" ]; then
+              SUBMISSION_IDS+=("$ID:$archive")
+              echo "Submitted $archive → $ID"
             else
-              echo "::warning::Notarization may have failed for $archive"
-              cat /tmp/notarize-output.txt
+              echo "::warning::Failed to submit $archive"
             fi
           done
+
+          if [ ${#SUBMISSION_IDS[@]} -eq 0 ]; then
+            echo "No submissions to track."
+            exit 0
+          fi
+
+          # Phase 2: Poll all submissions (up to 15 min total).
+          DEADLINE=$((SECONDS + 900))
+          PENDING=("${SUBMISSION_IDS[@]}")
+
+          while [ ${#PENDING[@]} -gt 0 ] && [ $SECONDS -lt $DEADLINE ]; do
+            sleep 30
+            STILL_PENDING=()
+            for entry in "${PENDING[@]}"; do
+              ID="${entry%%:*}"
+              ARCHIVE="${entry#*:}"
+              STATUS=$(xcrun notarytool info "$ID" \
+                --key "$KEY_PATH" \
+                --key-id "$APPLE_API_KEY_ID" \
+                --issuer "$APPLE_API_ISSUER_ID" 2>&1 | grep "status:" | head -1 | awk '{print $2}')
+              case "$STATUS" in
+                Accepted)
+                  echo "✅ $ARCHIVE notarized ($ID)"
+                  ;;
+                Invalid|Rejected)
+                  echo "::warning::$ARCHIVE notarization rejected ($ID)"
+                  xcrun notarytool log "$ID" \
+                    --key "$KEY_PATH" \
+                    --key-id "$APPLE_API_KEY_ID" \
+                    --issuer "$APPLE_API_ISSUER_ID" 2>&1 || true
+                  ;;
+                *)
+                  STILL_PENDING+=("$entry")
+                  echo "⏳ $ARCHIVE still processing ($STATUS)..."
+                  ;;
+              esac
+            done
+            PENDING=("${STILL_PENDING[@]}")
+          done
+
+          if [ ${#PENDING[@]} -gt 0 ]; then
+            echo "::warning::Notarization still pending for ${#PENDING[@]} archive(s) after timeout. Apple will complete async — Gatekeeper checks online."
+            for entry in "${PENDING[@]}"; do
+              echo "  Pending: ${entry#*:} (${entry%%:*})"
+            done
+          fi
 
       # --- Cleanup ---
       - name: Clean up keychain
