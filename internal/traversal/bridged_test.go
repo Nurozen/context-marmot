@@ -127,10 +127,10 @@ func TestBridgedGraphResolver_CrossVault(t *testing.T) {
 		t.Fatal("expected to find local-node")
 	}
 
-	// Can resolve remote node via @prefix.
+	// Can resolve remote node via @prefix — ID is rewritten to @-prefixed form.
 	n, ok = resolver.GetNode("@remote-vault/remote-node")
-	if !ok || n.ID != "remote-node" {
-		t.Fatal("expected to find remote-node via @remote-vault/remote-node")
+	if !ok || n.ID != "@remote-vault/remote-node" {
+		t.Fatalf("expected ID @remote-vault/remote-node, got %q", n.ID)
 	}
 }
 
@@ -220,11 +220,11 @@ func TestBridgedGraphResolver_TraverseCrossVault(t *testing.T) {
 	if !found["local-node"] {
 		t.Error("expected local-node in traversal result")
 	}
-	if !found["remote-node"] {
-		t.Error("expected remote-node in traversal result")
+	if !found["@remote-vault/remote-node"] {
+		t.Error("expected @remote-vault/remote-node in traversal result")
 	}
-	if !found["deep-node"] {
-		t.Error("expected deep-node in depth-2 traversal result (reachable via @remote-vault/deep-node)")
+	if !found["@remote-vault/deep-node"] {
+		t.Error("expected @remote-vault/deep-node in depth-2 traversal result")
 	}
 	if len(sub2.Nodes) != 3 {
 		t.Fatalf("depth-2: expected 3 nodes, got %d: %v", len(sub2.Nodes), nodeIDs(sub2))
@@ -289,11 +289,11 @@ func TestBridgedGraphResolver_MultiHopCrossVault(t *testing.T) {
 	if !found["start"] {
 		t.Error("expected start in traversal result")
 	}
-	if !found["a"] {
-		t.Error("expected remote node a in traversal result")
+	if !found["@rv/a"] {
+		t.Error("expected @rv/a in traversal result")
 	}
-	if !found["b"] {
-		t.Error("expected remote node b in traversal result (multi-hop via @rv/b)")
+	if !found["@rv/b"] {
+		t.Error("expected @rv/b in traversal result (multi-hop via @rv/b)")
 	}
 	if len(sub.Nodes) != 3 {
 		t.Fatalf("expected 3 nodes (start + a + b), got %d: %v", len(sub.Nodes), nodeIDs(sub))

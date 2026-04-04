@@ -22,6 +22,8 @@ type BridgedGraphResolver struct {
 }
 
 // GetNode resolves a node, delegating to remote vault graphs for @-prefixed IDs.
+// For remote nodes, the returned node is a shallow copy with its ID rewritten to
+// the @vault-id/node-id form so it matches the traversal key used in Depths/EntryNodes.
 func (r *BridgedGraphResolver) GetNode(id string) (*node.Node, bool) {
 	vaultID, localID := parseVaultPrefix(id)
 	if vaultID == "" || r.Vaults == nil {
@@ -31,7 +33,15 @@ func (r *BridgedGraphResolver) GetNode(id string) (*node.Node, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return g.GetNode(localID)
+	n, ok := g.GetNode(localID)
+	if !ok {
+		return nil, false
+	}
+	// Return a shallow copy with the @-prefixed ID so the node's ID is
+	// consistent with the key used throughout traversal and compaction.
+	copy := *n
+	copy.ID = id
+	return &copy, true
 }
 
 // GetEdges resolves edges, delegating to remote vault graphs for @-prefixed IDs.
