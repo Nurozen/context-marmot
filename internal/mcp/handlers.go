@@ -188,9 +188,20 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 			}
 			target := ie.Target
 			// Auto-prefix namespace on edge targets for same-namespace references.
-			// Skip cross-vault (@vault/...) and already-prefixed targets.
+			// Skip cross-vault (@vault/...), already-prefixed targets, and targets
+			// that start with another known namespace (cross-namespace edges).
 			if namespace != "default" && !strings.HasPrefix(target, "@") && !strings.HasPrefix(target, namespace+"/") {
-				target = namespace + "/" + target
+				shouldPrefix := true
+				if e.NSManager != nil {
+					if idx := strings.Index(target, "/"); idx > 0 {
+						if _, ok := e.NSManager.Namespaces[target[:idx]]; ok {
+							shouldPrefix = false
+						}
+					}
+				}
+				if shouldPrefix {
+					target = namespace + "/" + target
+				}
 			}
 			edges = append(edges, node.Edge{
 				Target:   target,
