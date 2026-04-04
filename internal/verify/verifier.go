@@ -162,9 +162,10 @@ func VerifyIntegrity(nodes []*node.Node) []IntegrityIssue {
 	}
 
 	for _, n := range nodes {
-		// Check for dangling edges.
+		// Check for dangling edges. Skip @-prefixed targets (cross-vault
+		// references that can't be validated against the local node set).
 		for _, e := range n.Edges {
-			if !idSet[e.Target] {
+			if !strings.HasPrefix(e.Target, "@") && !idSet[e.Target] {
 				issues = append(issues, IntegrityIssue{
 					NodeID:    n.ID,
 					IssueType: DanglingEdge,

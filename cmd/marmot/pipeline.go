@@ -220,11 +220,14 @@ func runServePipeline(dir string) error {
 	defer func() { _ = engine.Close() }()
 
 	// Wire namespace manager (best-effort — missing namespaces are fine).
+	// Load even without explicit namespaces if bridges exist (cross-vault or cross-namespace).
 	var nsMgr *namespace.Manager
-	if mgr, nsErr := namespace.NewManager(dir); nsErr == nil && len(mgr.Namespaces) > 0 {
+	if mgr, nsErr := namespace.NewManager(dir); nsErr == nil &&
+		(len(mgr.Namespaces) > 0 || len(mgr.Bridges) > 0 || len(mgr.CrossVaultBridges) > 0) {
 		nsMgr = mgr
 		engine.WithNamespaceManager(nsMgr)
-		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges\n", len(nsMgr.Namespaces), len(nsMgr.Bridges))
+		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
+			len(nsMgr.Namespaces), len(nsMgr.Bridges), len(nsMgr.CrossVaultBridges))
 	}
 
 	// Wire heat map (load from _heat/default.md or create empty).
