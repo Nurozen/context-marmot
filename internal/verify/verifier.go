@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -123,9 +124,18 @@ func ComputeSourceHash(sourcePath string, lines [2]int) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// ResolveSourcePath resolves a source path that may be relative (to projectRoot)
+// or absolute. Returns the path as-is if absolute or projectRoot is empty.
+func ResolveSourcePath(sourcePath, projectRoot string) string {
+	if filepath.IsAbs(sourcePath) || projectRoot == "" {
+		return sourcePath
+	}
+	return filepath.Join(projectRoot, sourcePath)
+}
+
 // VerifyStaleness checks whether a node's source reference is still current
 // by comparing the stored hash against the current file content hash.
-func VerifyStaleness(n *node.Node) (*StaleStatus, error) {
+func VerifyStaleness(n *node.Node, projectRoot string) (*StaleStatus, error) {
 	status := &StaleStatus{
 		NodeID:     n.ID,
 		StoredHash: n.Source.Hash,
@@ -137,7 +147,8 @@ func VerifyStaleness(n *node.Node) (*StaleStatus, error) {
 		return status, nil
 	}
 
-	currentHash, err := ComputeSourceHash(n.Source.Path, n.Source.Lines)
+	resolved := ResolveSourcePath(n.Source.Path, projectRoot)
+	currentHash, err := ComputeSourceHash(resolved, n.Source.Lines)
 	if err != nil {
 		return nil, fmt.Errorf("verify staleness for %s: %w", n.ID, err)
 	}
@@ -152,7 +163,7 @@ func VerifyStaleness(n *node.Node) (*StaleStatus, error) {
 //   - Hash mismatches: node content hash differs from stored source hash
 //   - Structural cycles: cycles among structural edges (via Kahn's algorithm)
 //   - Missing sources: node references a source file that doesn't exist
-func VerifyIntegrity(nodes []*node.Node) []IntegrityIssue {
+func VerifyIntegrity(nodes []*node.Node, projectRoot string) []IntegrityIssue {
 	var issues []IntegrityIssue
 
 	// Build ID index for dangling-edge detection.
@@ -177,7 +188,8 @@ func VerifyIntegrity(nodes []*node.Node) []IntegrityIssue {
 
 		// Check for missing source files.
 		if n.Source.Path != "" {
-			if _, err := os.Stat(n.Source.Path); os.IsNotExist(err) {
+			resolved := ResolveSourcePath(n.Source.Path, projectRoot)
+			if _, err := os.Stat(resolved); os.IsNotExist(err) {
 				issues = append(issues, IntegrityIssue{
 					NodeID:    n.ID,
 					IssueType: MissingSource,
@@ -189,7 +201,8 @@ func VerifyIntegrity(nodes []*node.Node) []IntegrityIssue {
 
 		// Check for hash mismatches (source hash vs current content).
 		if n.Source.Path != "" && n.Source.Hash != "" {
-			currentHash, err := ComputeSourceHash(n.Source.Path, n.Source.Lines)
+			resolved := ResolveSourcePath(n.Source.Path, projectRoot)
+			currentHash, err := ComputeSourceHash(resolved, n.Source.Lines)
 			if err == nil && currentHash != n.Source.Hash {
 				issues = append(issues, IntegrityIssue{
 					NodeID:    n.ID,

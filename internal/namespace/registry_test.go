@@ -11,7 +11,7 @@ func TestNewVaultRegistry(t *testing.T) {
 	bridges := []*Bridge{
 		{SourceVaultID: "vault-a", TargetVaultID: "vault-b", SourceVaultPath: "/tmp/a", TargetVaultPath: "/tmp/b"},
 	}
-	r := NewVaultRegistry("vault-a", "/tmp/a", bridges)
+	r := NewVaultRegistry("vault-a", "/tmp/a", bridges, nil)
 	ids := r.KnownVaultIDs()
 	sort.Strings(ids)
 	if len(ids) != 2 {
@@ -23,7 +23,7 @@ func TestNewVaultRegistry(t *testing.T) {
 }
 
 func TestNewVaultRegistry_NilBridges(t *testing.T) {
-	r := NewVaultRegistry("local", "/tmp/local", nil)
+	r := NewVaultRegistry("local", "/tmp/local", nil, nil)
 	ids := r.KnownVaultIDs()
 	if len(ids) != 0 {
 		t.Fatalf("expected 0 known vault IDs with nil bridges, got %d", len(ids))
@@ -35,7 +35,7 @@ func TestNewVaultRegistry_SkipsNonCrossVault(t *testing.T) {
 	bridges := []*Bridge{
 		{Source: "ns-a", Target: "ns-b"},
 	}
-	r := NewVaultRegistry("local", "/tmp/local", bridges)
+	r := NewVaultRegistry("local", "/tmp/local", bridges, nil)
 	ids := r.KnownVaultIDs()
 	if len(ids) != 0 {
 		t.Fatalf("expected 0 known vault IDs for non-cross-vault bridge, got %d", len(ids))
@@ -43,7 +43,7 @@ func TestNewVaultRegistry_SkipsNonCrossVault(t *testing.T) {
 }
 
 func TestVaultRegistry_ResolveUnknownVault(t *testing.T) {
-	r := NewVaultRegistry("local", "/tmp/local", nil)
+	r := NewVaultRegistry("local", "/tmp/local", nil, nil)
 	_, ok := r.Resolve("unknown", "some-node")
 	if ok {
 		t.Fatal("expected Resolve to return false for unknown vault")
@@ -51,7 +51,7 @@ func TestVaultRegistry_ResolveUnknownVault(t *testing.T) {
 }
 
 func TestVaultRegistry_ResolveGraphUnknownVault(t *testing.T) {
-	r := NewVaultRegistry("local", "/tmp/local", nil)
+	r := NewVaultRegistry("local", "/tmp/local", nil, nil)
 	_, err := r.ResolveGraph("unknown")
 	if err == nil {
 		t.Fatal("expected error for unknown vault")
@@ -91,7 +91,7 @@ A remote concept node for testing.
 		},
 	}
 
-	r := NewVaultRegistry("vault-a", "/tmp/vault-a", bridges)
+	r := NewVaultRegistry("vault-a", "/tmp/vault-a", bridges, nil)
 
 	// Resolve a node from vault B.
 	n, ok := r.Resolve("vault-b", "remote-concept")
@@ -149,7 +149,7 @@ Node B summary.
 		},
 	}
 
-	r := NewVaultRegistry("local", "/tmp/local", bridges)
+	r := NewVaultRegistry("local", "/tmp/local", bridges, nil)
 
 	g, err := r.ResolveGraph("test-vault")
 	if err != nil {
@@ -171,7 +171,7 @@ func TestVaultRegistry_ResolveMissingNode(t *testing.T) {
 	bridges := []*Bridge{
 		{SourceVaultID: "local", TargetVaultID: "rv", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
 	}
-	r := NewVaultRegistry("local", "/tmp/local", bridges)
+	r := NewVaultRegistry("local", "/tmp/local", bridges, nil)
 
 	_, ok := r.Resolve("rv", "nonexistent")
 	if ok {
@@ -202,7 +202,7 @@ Original node.
 	bridges := []*Bridge{
 		{SourceVaultID: "local", TargetVaultID: "refresh-vault", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
 	}
-	r := NewVaultRegistry("local", "/tmp/local", bridges)
+	r := NewVaultRegistry("local", "/tmp/local", bridges, nil)
 
 	// Load vault first.
 	_, err := r.ResolveGraph("refresh-vault")
@@ -238,7 +238,7 @@ Added after initial load.
 }
 
 func TestVaultRegistry_RefreshUnloaded(t *testing.T) {
-	r := NewVaultRegistry("local", "/tmp/local", nil)
+	r := NewVaultRegistry("local", "/tmp/local", nil, nil)
 	err := r.Refresh("not-loaded")
 	if err == nil {
 		t.Fatal("expected error when refreshing unloaded vault")

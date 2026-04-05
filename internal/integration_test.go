@@ -2851,7 +2851,7 @@ func TestE2E_LoadTest10kNodes(t *testing.T) {
 	// Verify time (full integrity check).
 	verifyStart := time.Now()
 	allNodes := g.AllNodes()
-	issues := verify.VerifyIntegrity(allNodes)
+	issues := verify.VerifyIntegrity(allNodes, "")
 	verifyDuration := time.Since(verifyStart)
 	t.Logf("verify integrity: %v, issues: %d", verifyDuration, len(issues))
 
@@ -2980,7 +2980,7 @@ func TestE2E_FuzzMalformedNodes(t *testing.T) {
 
 	// 6. Verify should report issues for loadable-but-broken nodes.
 	allNodes := g.AllNodes()
-	issues := verify.VerifyIntegrity(allNodes)
+	issues := verify.VerifyIntegrity(allNodes, "")
 	t.Logf("verify found %d issues across %d nodes", len(issues), len(allNodes))
 }
 

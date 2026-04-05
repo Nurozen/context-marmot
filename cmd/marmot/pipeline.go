@@ -19,6 +19,7 @@ import (
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/routes"
 	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/update"
@@ -240,14 +241,20 @@ func runServePipeline(dir string) error {
 		nsName = "default"
 	}
 
-	// Wire vault registry for cross-vault traversal (requires namespace manager with cross-vault bridges).
-	if nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0 {
-		vaultID := vaultCfg.VaultID
-		if vaultID != "" {
-			vr := namespace.NewVaultRegistry(vaultID, dir, nsMgr.CrossVaultBridges)
-			engine.WithVaultRegistry(vr)
-			fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered\n", len(vr.KnownVaultIDs()))
+	// Wire vault registry for cross-vault traversal.
+	// Load the global routing table (~/.marmot/routes.yml) for vault path resolution.
+	rt, _ := routes.Load() // best-effort; nil is fine
+	vaultID := vaultCfg.VaultID
+	hasCrossVaultBridges := nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0
+	hasRoutes := rt != nil && len(rt.List()) > 0
+	if vaultID != "" && (hasCrossVaultBridges || hasRoutes) {
+		var bridges []*namespace.Bridge
+		if nsMgr != nil {
+			bridges = nsMgr.CrossVaultBridges
 		}
+		vr := namespace.NewVaultRegistry(vaultID, dir, bridges, rt)
+		engine.WithVaultRegistry(vr)
+		fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered\n", len(vr.KnownVaultIDs()))
 	}
 
 	hm, hmErr := heatmap.Load(dir, nsName)
@@ -388,7 +395,8 @@ func runVerifyEnhanced(dir, ns string, checkStaleness, checkBridges bool) error 
 		return nil
 	}
 
-	issues := verify.VerifyIntegrity(nodes)
+	projectRoot := filepath.Dir(dir)
+	issues := verify.VerifyIntegrity(nodes, projectRoot)
 
 	// Also check staleness if requested.
 	if checkStaleness {
@@ -396,7 +404,7 @@ func runVerifyEnhanced(dir, ns string, checkStaleness, checkBridges bool) error 
 			if n.Source.Path == "" || n.Source.Hash == "" {
 				continue
 			}
-			status, err := verify.VerifyStaleness(n)
+			status, err := verify.VerifyStaleness(n, projectRoot)
 			if err != nil {
 				continue
 			}
@@ -555,6 +563,7 @@ func runStatusPipeline(dir string) error {
 	}
 
 	// Check for stale nodes (those with source.path set).
+	projectRoot := filepath.Dir(dir)
 	var staleCount int
 	for _, m := range allMetas {
 		path := m.FilePath
@@ -565,7 +574,7 @@ func runStatusPipeline(dir string) error {
 		if err != nil || n.Source.Path == "" || n.Source.Hash == "" {
 			continue
 		}
-		status, err := verify.VerifyStaleness(n)
+		status, err := verify.VerifyStaleness(n, projectRoot)
 		if err == nil && status.IsStale {
 			staleCount++
 		}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/routes"
 	"gopkg.in/yaml.v3"
 )
 
@@ -608,6 +609,13 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 		_ = os.Remove(localFile)
 		_ = os.Remove(remoteTmp)
 		return nil, fmt.Errorf("commit bridge to remote vault: %w", err)
+	}
+
+	// Auto-register both vaults in the global routing table (best-effort).
+	if rt, rtErr := routes.Load(); rtErr == nil {
+		rt.Set(localCfg.VaultID, absLocal)
+		rt.Set(remoteCfg.VaultID, absRemote)
+		_ = routes.Save(rt)
 	}
 
 	return bridge, nil

@@ -15,6 +15,7 @@
 //	marmot bridge     /path/to/.marmot [--relations ...] [--dir] Create cross-vault bridge
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
+//	marmot route      [add|rm|resolve]                         Manage vault routing table
 package main
 
 import (
@@ -98,6 +99,8 @@ func run(args []string) int {
 		return cmdSummarize(cmdArgs)
 	case "reembed":
 		return cmdReembed(cmdArgs)
+	case "route":
+		return cmdRoute(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		usage()
@@ -107,7 +110,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route")
 }
 
 // ---------------------------------------------------------------------------

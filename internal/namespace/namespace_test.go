@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/nurozen/context-marmot/internal/routes"
 )
 
 func TestParseNamespace(t *testing.T) {
@@ -383,6 +385,10 @@ func writeMinimalNamespace(t *testing.T, dir, name string) {
 // --- Cross-Vault Tests ---
 
 func TestCreateCrossVaultBridge(t *testing.T) {
+	// Redirect routing table to temp dir so tests don't pollute ~/.marmot.
+	routes.SetOverridePath(filepath.Join(t.TempDir(), "routes.yml"))
+	t.Cleanup(func() { routes.SetOverridePath("") })
+
 	localDir := t.TempDir()
 	remoteDir := t.TempDir()
 

@@ -12,6 +12,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/embedding"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/namespace"
+	"github.com/nurozen/context-marmot/internal/routes"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,9 @@ func newEngineWithNS(t *testing.T, dir string, registry *namespace.VaultRegistry
 // ---------------------------------------------------------------------------
 
 func TestCrossVaultBridgeCreateAndVerify(t *testing.T) {
+	routes.SetOverridePath(filepath.Join(t.TempDir(), "routes.yml"))
+	t.Cleanup(func() { routes.SetOverridePath("") })
+
 	vaultADir := t.TempDir()
 	vaultBDir := t.TempDir()
 
@@ -120,6 +124,9 @@ func TestCrossVaultBridgeCreateAndVerify(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCrossVaultTraversalViaMCPEngine(t *testing.T) {
+	routes.SetOverridePath(filepath.Join(t.TempDir(), "routes.yml"))
+	t.Cleanup(func() { routes.SetOverridePath("") })
+
 	vaultADir := t.TempDir()
 	vaultBDir := t.TempDir()
 
@@ -147,7 +154,7 @@ func TestCrossVaultTraversalViaMCPEngine(t *testing.T) {
 	}
 	engA.WithNamespaceManager(mgrA)
 
-	registry := namespace.NewVaultRegistry("vault-a", vaultADir, []*namespace.Bridge{bridge})
+	registry := namespace.NewVaultRegistry("vault-a", vaultADir, []*namespace.Bridge{bridge}, nil)
 	engA.WithVaultRegistry(registry)
 
 	// Write node in vault A with edge to vault B.
@@ -209,6 +216,9 @@ func TestCrossVaultTraversalViaMCPEngine(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCrossVaultWriteValidation(t *testing.T) {
+	routes.SetOverridePath(filepath.Join(t.TempDir(), "routes.yml"))
+	t.Cleanup(func() { routes.SetOverridePath("") })
+
 	vaultADir := t.TempDir()
 	vaultBDir := t.TempDir()
 
@@ -223,7 +233,7 @@ func TestCrossVaultWriteValidation(t *testing.T) {
 	}
 
 	// Create engine for vault A with NSManager and VaultRegistry.
-	registry := namespace.NewVaultRegistry("vault-a", vaultADir, []*namespace.Bridge{bridge})
+	registry := namespace.NewVaultRegistry("vault-a", vaultADir, []*namespace.Bridge{bridge}, nil)
 	engA := newEngineWithNS(t, vaultADir, registry)
 	defer engA.Close()
 
@@ -297,6 +307,9 @@ func TestCrossVaultWriteValidation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCrossVaultVerifyBridges(t *testing.T) {
+	routes.SetOverridePath(filepath.Join(t.TempDir(), "routes.yml"))
+	t.Cleanup(func() { routes.SetOverridePath("") })
+
 	vaultADir := t.TempDir()
 	vaultBDir := t.TempDir()
 

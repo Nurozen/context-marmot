@@ -8,6 +8,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/routes"
 )
 
 // RemoteVault holds a lazily-loaded remote vault's graph and store.
@@ -21,22 +22,27 @@ type RemoteVault struct {
 }
 
 // VaultRegistry manages lazy loading and caching of remote vault graphs
-// for cross-vault bridge traversal.
+// for cross-vault bridge traversal. Resolution priority:
+//  1. Global routing table (~/.marmot/routes.yml)
+//  2. Bridge manifest paths (fallback)
 type VaultRegistry struct {
 	mu           sync.RWMutex
 	localVaultID string
 	localDir     string
-	vaults       map[string]*RemoteVault // vault_id -> loaded vault
-	pathToID     map[string]string       // vault_path -> vault_id
+	vaults       map[string]*RemoteVault       // vault_id -> loaded vault
+	pathToID     map[string]string             // vault_path -> vault_id (from bridges)
+	routingTable *routes.RoutingTable          // global routing table; may be nil
 }
 
-// NewVaultRegistry creates a registry seeded with cross-vault bridge paths.
-func NewVaultRegistry(localVaultID, localDir string, bridges []*Bridge) *VaultRegistry {
+// NewVaultRegistry creates a registry seeded with cross-vault bridge paths
+// and an optional global routing table.
+func NewVaultRegistry(localVaultID, localDir string, bridges []*Bridge, rt *routes.RoutingTable) *VaultRegistry {
 	r := &VaultRegistry{
 		localVaultID: localVaultID,
 		localDir:     localDir,
 		vaults:       make(map[string]*RemoteVault),
 		pathToID:     make(map[string]string),
+		routingTable: rt,
 	}
 	// Pre-register vault paths from bridge manifests.
 	for _, b := range bridges {
@@ -82,16 +88,25 @@ func (r *VaultRegistry) ResolveGraph(vaultID string) (*graph.Graph, error) {
 		return rv.Graph, nil
 	}
 
-	// Find vault path from registered bridges.
+	// Priority 1: Check global routing table.
 	var vaultDir string
-	for path, id := range r.pathToID {
-		if id == vaultID {
-			vaultDir = path
-			break
+	if r.routingTable != nil {
+		if p, ok := r.routingTable.Get(vaultID); ok {
+			vaultDir = p
+		}
+	}
+
+	// Priority 2: Fall back to bridge manifest paths.
+	if vaultDir == "" {
+		for path, id := range r.pathToID {
+			if id == vaultID {
+				vaultDir = path
+				break
+			}
 		}
 	}
 	if vaultDir == "" {
-		return nil, fmt.Errorf("unknown vault %q: no bridge registered", vaultID)
+		return nil, fmt.Errorf("unknown vault %q: not in routing table or bridge manifests", vaultID)
 	}
 
 	return r.loadVaultLocked(vaultID, vaultDir)
@@ -137,7 +152,7 @@ func (r *VaultRegistry) Refresh(vaultID string) error {
 	return err
 }
 
-// KnownVaultIDs returns all vault IDs registered from bridge manifests.
+// KnownVaultIDs returns all vault IDs from bridges and the routing table.
 func (r *VaultRegistry) KnownVaultIDs() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -147,6 +162,14 @@ func (r *VaultRegistry) KnownVaultIDs() []string {
 		if !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)
+		}
+	}
+	if r.routingTable != nil {
+		for id := range r.routingTable.List() {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
 		}
 	}
 	return ids

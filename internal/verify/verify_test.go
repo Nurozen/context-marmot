@@ -233,7 +233,7 @@ func TestVerifyStaleness_DetectsStale(t *testing.T) {
 	}
 
 	// Verify not stale initially.
-	status, err := VerifyStaleness(n)
+	status, err := VerifyStaleness(n, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestVerifyStaleness_DetectsStale(t *testing.T) {
 	}
 
 	// Now it should be stale.
-	status, err = VerifyStaleness(n)
+	status, err = VerifyStaleness(n, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestVerifyStaleness_NotStaleWhenMatching(t *testing.T) {
 		},
 	}
 
-	status, err := VerifyStaleness(n)
+	status, err := VerifyStaleness(n, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestVerifyStaleness_NoSourcePath(t *testing.T) {
 		Source: node.Source{},
 	}
 
-	status, err := VerifyStaleness(n)
+	status, err := VerifyStaleness(n, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestVerifyIntegrity_DetectsDanglingEdges(t *testing.T) {
 		},
 	}
 
-	issues := VerifyIntegrity(nodes)
+	issues := VerifyIntegrity(nodes, "")
 
 	found := false
 	for _, issue := range issues {
@@ -362,7 +362,7 @@ func TestVerifyIntegrity_DetectsStructuralCycles(t *testing.T) {
 		},
 	}
 
-	issues := VerifyIntegrity(nodes)
+	issues := VerifyIntegrity(nodes, "")
 
 	found := false
 	for _, issue := range issues {
@@ -393,7 +393,7 @@ func TestVerifyIntegrity_PassesBehavioralCycles(t *testing.T) {
 		},
 	}
 
-	issues := VerifyIntegrity(nodes)
+	issues := VerifyIntegrity(nodes, "")
 
 	for _, issue := range issues {
 		if issue.IssueType == StructuralCycle {
@@ -434,7 +434,7 @@ func TestVerifyIntegrity_CleanGraph(t *testing.T) {
 		},
 	}
 
-	issues := VerifyIntegrity(nodes)
+	issues := VerifyIntegrity(nodes, "")
 	if len(issues) != 0 {
 		t.Errorf("expected zero issues for clean graph, got %d:", len(issues))
 		for _, i := range issues {
@@ -460,7 +460,7 @@ func TestVerifyIntegrity_DetectsHashMismatch(t *testing.T) {
 		},
 	}
 
-	issues := VerifyIntegrity(nodes)
+	issues := VerifyIntegrity(nodes, "")
 
 	found := false
 	for _, issue := range issues {
@@ -485,7 +485,7 @@ func TestVerifyIntegrity_DetectsMissingSource(t *testing.T) {
 		},
 	}
 
-	issues := VerifyIntegrity(nodes)
+	issues := VerifyIntegrity(nodes, "")
 
 	found := false
 	for _, issue := range issues {

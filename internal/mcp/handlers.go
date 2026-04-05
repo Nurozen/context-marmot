@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -227,6 +228,14 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		if len(inputSource.Lines) >= 2 {
 			source.Lines = [2]int{inputSource.Lines[0], inputSource.Lines[1]}
 		}
+
+		// Convert absolute source.path to relative (relative to project root).
+		if source.Path != "" && filepath.IsAbs(source.Path) {
+			projectRoot := filepath.Dir(e.MarmotDir)
+			if rel, err := filepath.Rel(projectRoot, source.Path); err == nil && !strings.HasPrefix(rel, "..") {
+				source.Path = rel
+			}
+		}
 	}
 
 	// Construct node.
@@ -431,10 +440,11 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	var issues []VerifyIssue
+	projectRoot := filepath.Dir(e.MarmotDir)
 
 	// Run integrity check (dangling edges, structural cycles).
 	if check == "integrity" || check == "all" {
-		integrityIssues := verify.VerifyIntegrity(nodes)
+		integrityIssues := verify.VerifyIntegrity(nodes, projectRoot)
 		for _, ii := range integrityIssues {
 			issues = append(issues, VerifyIssue{
 				NodeID:   ii.NodeID,
@@ -451,7 +461,7 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 			if n.Source.Path == "" {
 				continue
 			}
-			status, err := verify.VerifyStaleness(n)
+			status, err := verify.VerifyStaleness(n, projectRoot)
 			if err != nil {
 				issues = append(issues, VerifyIssue{
 					NodeID:   n.ID,
