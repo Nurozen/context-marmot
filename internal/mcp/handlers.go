@@ -433,7 +433,7 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 		nodes = e.Graph.AllNodes()
 	} else {
 		for _, id := range nodeIDs {
-			if n, ok := e.resolveNodeID(id); ok {
+			if n, ok := e.ResolveNodeID(id); ok {
 				nodes = append(nodes, n)
 			}
 		}
@@ -513,7 +513,7 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	supersededBy := req.GetString("superseded_by", "")
 
 	// Try to find node, auto-prefixing namespace if the bare ID isn't found.
-	existing, ok := e.resolveNodeID(id)
+	existing, ok := e.ResolveNodeID(id)
 	if !ok {
 		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
 	}
@@ -532,7 +532,7 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 
 	// Resolve superseded_by to its full ID if namespace prefix was omitted.
 	if supersededBy != "" {
-		if resolved, ok := e.resolveNodeID(supersededBy); ok {
+		if resolved, ok := e.ResolveNodeID(supersededBy); ok {
 			supersededBy = resolved.ID
 		}
 	}

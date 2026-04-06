@@ -5,7 +5,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-eval test lint clean fmt vet tidy eval benchmark
+.PHONY: build build-eval build-ui build-full dev-ui test lint clean fmt vet tidy eval benchmark
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/marmot
@@ -44,6 +44,14 @@ eval: build build-eval
 
 eval-dry: build build-eval
 	bin/marmot-eval --questions 2 --output testdata/eval/results
+
+build-ui:
+	cd web && npm install && npm run build
+
+build-full: build-ui build
+
+dev-ui:
+	cd web && npm run dev
 
 clean:
 	rm -rf bin/ coverage.out coverage.html

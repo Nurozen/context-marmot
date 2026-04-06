@@ -4,17 +4,21 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/nurozen/context-marmot/internal/api"
 	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
-	"github.com/nurozen/context-marmot/internal/indexer"
 	"github.com/nurozen/context-marmot/internal/heatmap"
+	"github.com/nurozen/context-marmot/internal/indexer"
 	"github.com/nurozen/context-marmot/internal/llm"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/namespace"
@@ -24,6 +28,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/update"
 	"github.com/nurozen/context-marmot/internal/verify"
+	"github.com/nurozen/context-marmot/web"
 )
 
 // loadEmbedder reads vault config and creates the appropriate embedder.
@@ -208,20 +213,27 @@ func runQueryPipeline(dir, query string, depth, budget int) error {
 	return nil
 }
 
-// runServePipeline starts the MCP server on stdio.
-func runServePipeline(dir string) error {
+// engineResult holds the fully-wired engine and its cleanup function.
+type engineResult struct {
+	Engine    *mcpserver.Engine
+	HeatMap   *heatmap.HeatMap
+	Scheduler *summary.Scheduler
+	Cleanup   func()
+}
+
+// buildEngine creates a fully-wired MCP engine from a vault directory.
+// The returned cleanup function must be called when the engine is no longer needed.
+func buildEngine(dir string) (*engineResult, error) {
 	embedder, err := loadEmbedder(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	engine, err := mcpserver.NewEngine(dir, embedder)
 	if err != nil {
-		return fmt.Errorf("create engine: %w", err)
+		return nil, fmt.Errorf("create engine: %w", err)
 	}
-	defer func() { _ = engine.Close() }()
 
 	// Wire namespace manager (best-effort — missing namespaces are fine).
-	// Load even without explicit namespaces if bridges exist (cross-vault or cross-namespace).
 	var nsMgr *namespace.Manager
 	if mgr, nsErr := namespace.NewManager(dir); nsErr == nil &&
 		(len(mgr.Namespaces) > 0 || len(mgr.Bridges) > 0 || len(mgr.CrossVaultBridges) > 0) {
@@ -242,7 +254,6 @@ func runServePipeline(dir string) error {
 	}
 
 	// Wire vault registry for cross-vault traversal.
-	// Load the global routing table (~/.marmot/routes.yml) for vault path resolution.
 	rt, _ := routes.Load() // best-effort; nil is fine
 	vaultID := vaultCfg.VaultID
 	hasCrossVaultBridges := nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0
@@ -257,19 +268,15 @@ func runServePipeline(dir string) error {
 		fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered\n", len(vr.KnownVaultIDs()))
 	}
 
-	hm, hmErr := heatmap.Load(dir, nsName)
-	if hmErr == nil {
+	var hm *heatmap.HeatMap
+	if loaded, hmErr := heatmap.Load(dir, nsName); hmErr == nil {
+		hm = loaded
 		engine.WithHeatMap(hm)
 		fmt.Fprintf(os.Stderr, "heatmap: %d pairs loaded for %s\n", hm.PairCount(), nsName)
-		defer func() {
-			if saveErr := heatmap.Save(dir, hm); saveErr != nil {
-				fmt.Fprintf(os.Stderr, "heatmap: save error: %v\n", saveErr)
-			}
-		}()
 	}
 
-	// Wire classifier from vault config (reuses vaultCfg loaded above for heat map).
-	var llmProvider llm.Provider // captured for summary engine
+	// Wire classifier from vault config.
+	var llmProvider llm.Provider
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {
@@ -291,7 +298,7 @@ func runServePipeline(dir string) error {
 			engine.WithLLMClassifier(nil)
 			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
 		}
-	default: // "none" or ""
+	default:
 		engine.WithLLMClassifier(nil)
 		fmt.Fprintln(os.Stderr, "classifier: using embedding-distance fallback")
 	}
@@ -338,16 +345,106 @@ func runServePipeline(dir string) error {
 	engine.WithUpdateEngine(updateEng)
 	fmt.Fprintln(os.Stderr, "update: engine wired")
 
-	// Start summary scheduler in background.
-	ctx := context.Background()
-	if sumScheduler != nil {
-		sumScheduler.Start(ctx)
-		defer sumScheduler.Stop()
+	cleanup := func() {
+		if sumScheduler != nil {
+			sumScheduler.Stop()
+		}
+		if hm != nil {
+			if saveErr := heatmap.Save(dir, hm); saveErr != nil {
+				fmt.Fprintf(os.Stderr, "heatmap: save error: %v\n", saveErr)
+			}
+		}
+		_ = engine.Close()
 	}
 
-	srv := mcpserver.NewServer(engine)
+	return &engineResult{
+		Engine:    engine,
+		HeatMap:   hm,
+		Scheduler: sumScheduler,
+		Cleanup:   cleanup,
+	}, nil
+}
+
+// runServePipeline starts the MCP server on stdio.
+func runServePipeline(dir string) error {
+	result, err := buildEngine(dir)
+	if err != nil {
+		return err
+	}
+	defer result.Cleanup()
+
+	ctx := context.Background()
+	if result.Scheduler != nil {
+		result.Scheduler.Start(ctx)
+	}
+
+	srv := mcpserver.NewServer(result.Engine)
 	fmt.Fprintln(os.Stderr, "ContextMarmot MCP server ready on stdio")
 	return srv.ListenStdio(ctx, os.Stdin, os.Stdout)
+}
+
+// runUIPipeline starts the HTTP UI server backed by the shared engine.
+func runUIPipeline(dir string, port int, noOpen bool) error {
+	result, err := buildEngine(dir)
+	if err != nil {
+		return err
+	}
+	defer result.Cleanup()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if result.Scheduler != nil {
+		result.Scheduler.Start(ctx)
+	}
+
+	// Create API server with embedded frontend assets.
+	apiServer := api.NewServer(result.Engine, web.Assets)
+
+	addr := fmt.Sprintf(":%d", port)
+	url := fmt.Sprintf("http://localhost:%d", port)
+	fmt.Fprintf(os.Stderr, "ContextMarmot UI server starting at %s\n", url)
+
+	// Auto-open browser (best-effort).
+	if !noOpen {
+		go func() {
+			// Small delay to let the server start.
+			time.Sleep(500 * time.Millisecond)
+			openBrowser(url)
+		}()
+	}
+
+	// Graceful shutdown on SIGINT/SIGTERM.
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "\nShutting down UI server...")
+		cancel()
+		os.Exit(0)
+	}()
+
+	return apiServer.ListenAndServe(addr)
+}
+
+// openBrowser opens the given URL in the default browser.
+func openBrowser(url string) {
+	var cmd string
+	var args []string
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = "open"
+		args = []string{url}
+	case "linux":
+		cmd = "xdg-open"
+		args = []string{url}
+	case "windows":
+		cmd = "rundll32"
+		args = []string{"url.dll,FileProtocolHandler", url}
+	default:
+		return
+	}
+	_ = exec.Command(cmd, args...).Start()
 }
 
 // runVerifyEnhanced loads nodes (optionally filtered by namespace) and runs

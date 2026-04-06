@@ -16,6 +16,7 @@
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve]                         Manage vault routing table
+//	marmot ui         [--dir .marmot] [--port 3274] [--no-open]    Start graph UI server
 package main
 
 import (
@@ -101,6 +102,8 @@ func run(args []string) int {
 		return cmdReembed(cmdArgs)
 	case "route":
 		return cmdRoute(cmdArgs)
+	case "ui":
+		return cmdUI(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		usage()
@@ -110,7 +113,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, ui")
 }
 
 // ---------------------------------------------------------------------------
@@ -526,4 +529,33 @@ func cmdReembed(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// ui
+// ---------------------------------------------------------------------------
+
+func cmdUI(args []string) int {
+	fs := flag.NewFlagSet("ui", flag.ContinueOnError)
+	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	port := fs.Int("port", 3274, "HTTP server port")
+	noOpen := fs.Bool("no-open", false, "don't auto-open browser")
+	if err := fs.Parse(args); err != nil {
+		return 1
+	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	if err := runUI(*dir, *port, *noOpen); err != nil {
+		fmt.Fprintf(os.Stderr, "ui: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runUI(dir string, port int, noOpen bool) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
+	}
+	return runUIPipeline(dir, port, noOpen)
 }

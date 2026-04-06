@@ -388,29 +388,32 @@ Complete command-line interface.
 - [x] Add `marmot version` command with build-time ldflags (version, commit, date)
 - [x] Add GoReleaser cross-compilation + GitHub Actions auto-tag & release pipeline
 
-## Phase 16: HTTP API (Slim)
+## Phase 16: HTTP API (Slim) — COMPLETE (2026-04-05)
 
 Minimal HTTP interface serving the graph visualization frontend. Scoped to what the D3 frontend (Phase 19) actually needs — full REST/WebSocket deferred until a consumer demands it.
 
-- [ ] Implement `GET /api/graph/:namespace` — full graph as JSON (nodes + edges + metadata, active by default)
-  - [ ] `?include_superseded=true` query param to include superseded nodes
-- [ ] Implement `GET /api/namespaces` — list all namespaces with node counts
-- [ ] Implement `PUT /api/node/:id` — update node summary/context (inline editing from UI)
-  - [ ] Validate input (node ID format, field lengths)
-  - [ ] Re-embed updated node after save
-- [ ] Implement CORS for local dev (Vite dev server proxy)
-- [ ] Serve embedded static frontend assets via `go:embed web/dist/*`
-- [ ] Add `marmot ui` CLI subcommand — starts HTTP server, opens browser
-  - [ ] `--port` flag (default 3274)
-  - [ ] `--no-open` flag to suppress browser launch
-- [ ] Write API integration tests
+- [x] Implement `GET /api/graph/{namespace}` — full graph as JSON (nodes + edges + metadata, active by default)
+  - [x] `?include_superseded=true` query param to include superseded nodes
+- [x] Implement `GET /api/namespaces` — list all namespaces with node counts
+- [x] Implement `PUT /api/node/{id...}` — update node summary/context (inline editing from UI)
+  - [x] Validate input (node ID format, field lengths)
+  - [x] Re-embed updated node after save
+- [x] Implement CORS middleware for local dev (Vite dev server proxy)
+- [x] Serve embedded static frontend assets via `go:embed` (`web/embed.go`)
+- [x] Add `marmot ui` CLI subcommand — starts HTTP server, opens browser (`cmd/marmot/pipeline.go` runUIPipeline)
+  - [x] `--port` flag (default 3274)
+  - [x] `--no-open` flag to suppress browser launch
+- [x] Write API integration tests (20 tests in `internal/api/api_test.go`)
+- [x] Implement `GET /api/node/{namespace}/{id...}` — single node detail
+- [x] Implement `GET /api/search?q=...` — server-side semantic search
+- [x] Implement `GET /api/heat/{namespace}` — heat map data
+- [x] Implement `GET /api/bridges` — bridge listing
+- [x] Implement `GET /api/summary/{namespace}` — namespace summary
+- [x] Uses Go 1.26 ServeMux pattern routing (no external router)
+- [x] Shares Engine instance with MCP server via extracted `buildEngine()` helper
+- [x] Exported `ResolveNodeID` in `internal/mcp/engine.go` for API reuse
 
-### Deferred (add when needed)
-- `GET /api/node/:namespace/:id` — single node detail (frontend has full graph in memory)
-- `GET /api/search?q=...` — server-side search (frontend does client-side filtering)
-- `GET /api/heat/:namespace` — heat map data (included in graph response)
-- `GET /api/bridges` — bridge listing
-- `GET /api/summary/:namespace` — namespace summary
+### Deferred
 - WebSocket for live graph updates (manual refresh sufficient initially)
 
 ## Phase 17: Static Analysis Indexer — COMPLETE (2026-04-02)
@@ -446,6 +449,8 @@ Automated code-to-graph indexer (first use case enabler).
 
 ## Phase 18.5: Cross-Vault Bridges — COMPLETE (2026-04-03)
 
+Core cross-vault bridge infrastructure.
+
 - [x] Add `vault_id` field to `VaultConfig` for stable cross-vault identity
 - [x] Extend `Bridge` struct with `SourceVaultPath`, `TargetVaultPath`, `SourceVaultID`, `TargetVaultID`
 - [x] Add `IsCrossVault()` method, `QualifiedID.VaultID` for `@vault-id/node-id` format
@@ -461,57 +466,103 @@ Automated code-to-graph indexer (first use case enabler).
 - [x] Add `--bridges` flag to `marmot verify` for cross-vault bridge connectivity checks (path existence, vault_id match)
 - [x] 28 unit tests: `registry_test.go` (10), `bridged_test.go` (10), `namespace_test.go` cross-vault additions (8)
 
+### Bug fixes (2026-04-04)
+
+- [x] Fix `BridgedGraphResolver.GetNode` — remote nodes were returned with bare local IDs causing traversal mismatch; now rewrites ID to `@vault-id/node-id` form
+- [x] Deep-copy `Edges` slice in `BridgedGraphResolver.GetNode` to prevent cache corruption from shared backing array
+- [x] Fix namespace auto-prefix incorrectly prefixing cross-namespace edge targets (e.g., `backend/auth/login` → `frontend/backend/auth/login`); now checks if first path segment is a known namespace
+- [x] Skip `@`-prefixed targets in `VerifyIntegrity` dangling edge checks (cross-vault references can't be validated locally)
+- [x] Filter `@`-prefixed IDs from `RecordCoAccess` in heat map to avoid orphaned cross-vault pairs
+- [x] Wire `VaultRegistry` when cross-vault bridges or routes exist, even without explicit namespace directories
+- [x] 21 stress/integration tests: `bridged_stress_test.go` (13), `bridged_integration_test.go` (8)
+- [x] 9 cross-vault write-path tests: `crossvault_write_test.go`
+
+## Phase 18.6: Vault Routing Table + Relative Paths — COMPLETE (2026-04-05)
+
+AS-style routing between independent vaults, relative source paths, and concurrency hardening.
+
+### Global Routing Table (`~/.marmot/routes.yml`)
+
+- [x] New `internal/routes/` package — `RoutingTable` struct mapping vault_id → filesystem path
+- [x] `Load()`/`Save()` with atomic writes (tmp + rename), `LoadFrom()`/`SaveTo()` for explicit paths
+- [x] `SetOverridePath()` for test isolation — prevents test pollution of `~/.marmot/routes.yml`
+- [x] `Get`/`Set`/`Remove`/`List` methods with `sync.RWMutex` for goroutine safety
+- [x] `Update(fn func(*RoutingTable) error)` — atomic read-modify-write under single lock, eliminates race window in concurrent bridge creation
+- [x] `defaultPathLocked()` helper — `DefaultPath()` reads `overridePath` under package-level `RLock`
+- [x] `VaultRegistry` resolution priority: routing table first, bridge manifest paths fallback
+- [x] `KnownVaultIDs()` returns union of bridge and route entries
+- [x] Auto-registration: `CreateCrossVaultBridge` registers both vaults in routing table via `routes.Update()`
+- [x] 9 unit tests (`routes_test.go`), 8 stress tests (`routes_stress_test.go`), 7 route priority tests (`registry_routes_test.go`)
+
+### `marmot route` CLI Command
+
+- [x] `marmot route` — list all registered vaults with paths
+- [x] `marmot route add <id> <path>` — register or update a vault
+- [x] `marmot route rm <id>` — remove a vault registration
+- [x] `marmot route resolve <id>` — show resolved filesystem path
+
+### Relative Source Paths
+
+- [x] `source.path` written as relative (to project root) in `HandleContextWrite`; absolute paths converted on write
+- [x] `ResolveSourcePath(sourcePath, projectRoot)` resolves relative paths back to absolute on read
+- [x] Path traversal protection: `..` components that escape project root return raw relative path (fails safely on open)
+- [x] `VerifyStaleness` and `VerifyIntegrity` accept `projectRoot` parameter for resolution
+- [x] Backward compatible with existing absolute paths
+- [x] 6 relative path tests (`relative_path_test.go`), 3 MCP source path tests (`relative_source_test.go`)
+
 ---
 
-## Phase 19: Graph Visualization Frontend
+## Phase 19: Graph Visualization Frontend — COMPLETE (2026-04-05)
 
 Standalone interactive graph UI replacing Obsidian's limited graph view. Built with D3.js for maximum rendering control over node coloring, sizing, clustering, and edge styling. Embedded in Go binary via `go:embed`, served by `marmot ui` (Phase 16).
 
-**Stack:** TypeScript + Vite + D3.js (`d3-force`, `d3-zoom`, `d3-dag` for structural hierarchy)
-**Serving:** Embedded in Go binary via `go:embed web/dist/*`, accessed via `marmot ui`
-**Data:** Single fetch from `GET /api/graph/:namespace`, client-side refresh button
+**Stack:** TypeScript + Vite + D3.js (`d3-force`, `d3-zoom`)
+**Serving:** Embedded in Go binary via `go:embed all:dist` (`web/embed.go`), accessed via `marmot ui`
+**Data:** Single fetch from `GET /api/graph/{namespace}`, client-side refresh button
+**Design:** Alpine Cartographic aesthetic with Sora + IBM Plex Mono typography
 
 ### Scaffold & Data Layer
-- [ ] Initialize Vite + TypeScript project in `web/`
-- [ ] Define TypeScript types mirroring Go `Node`, `Edge`, `EdgeRelation` types
-- [ ] Implement graph data fetcher with namespace selection
-- [ ] Wire `go:embed` in serve command, add `marmot ui` subcommand (opens browser)
+- [x] Initialize Vite + TypeScript project in `web/`
+- [x] Define TypeScript types mirroring Go `Node`, `Edge`, `EdgeRelation` types (`web/src/types.ts`)
+- [x] Implement graph data fetcher with namespace selection (`web/src/api.ts`)
+- [x] Wire `go:embed` in serve command (`web/embed.go`), add `marmot ui` subcommand (`cmd/marmot/pipeline.go`)
 
 ### Core Visualization (D3)
-- [ ] Force-directed layout with `d3-force` (charge, link, collision, center)
-- [ ] Node coloring by type (function, module, class, concept, decision, reference, composite)
-- [ ] Node sizing by edge count (in-degree + out-degree)
-- [ ] Edge rendering: solid for structural, dashed for behavioral
-- [ ] Edge coloring by relation type
-- [ ] Namespace clustering via force grouping (centripetal force per namespace)
-- [ ] Labels with truncation and zoom-adaptive visibility
+- [x] Force-directed layout with `d3-force` (charge, link, collision, center) (`web/src/graph-view.ts`)
+- [x] Node coloring by type (function, module, class, concept, decision, reference, composite)
+- [x] Node sizing by edge count (in-degree + out-degree)
+- [x] Edge rendering: solid for structural, dashed for behavioral
+- [x] Edge coloring by relation type
+- [x] Namespace clustering via force grouping (centripetal force per namespace)
+- [x] Labels with truncation and zoom-adaptive visibility
 
 ### Interaction
-- [ ] Zoom/pan via `d3-zoom`
-- [ ] Click node to show detail panel (summary, context, source, edges)
-- [ ] Hover to highlight connected subgraph (dim unrelated nodes)
-- [ ] Drag nodes to reposition
-- [ ] Double-click to expand/collapse containment groups
-- [ ] Search with highlight + fly-to
+- [x] Zoom/pan via `d3-zoom`
+- [x] Click node to show detail panel (summary, context, source, edges) (`web/src/detail-panel.ts`)
+- [x] Hover to highlight connected subgraph (dim unrelated nodes)
+- [x] Drag nodes to reposition
+- [ ] Double-click to expand/collapse containment groups — deferred
+- [x] Search with highlight + fly-to (`web/src/search.ts`)
 
 ### Filtering & Views
-- [ ] Filter by node type (toggle chips)
-- [ ] Filter by edge class (structural only, behavioral only, all)
-- [ ] Hide/show superseded nodes
-- [ ] Staleness indicator (orange ring on stale nodes)
-- [ ] Heat overlay mode (node glow intensity by heat weight)
+- [x] Filter by node type (toggle chips) (`web/src/filters.ts`)
+- [x] Filter by edge class (structural only, behavioral only, all)
+- [ ] Hide/show superseded nodes — deferred
+- [ ] Staleness indicator (orange ring on stale nodes) — deferred
+- [x] Heat overlay mode (node glow intensity by heat weight) (`web/src/heat-overlay.ts`)
 
 ### Inline Editing (v1)
-- [ ] Click node detail panel → edit summary/context fields
-- [ ] Save via `PUT /api/node/:id`
-- [ ] Optimistic UI update, rollback on error
+- [x] Click node detail panel → edit summary/context fields
+- [x] Save via `PUT /api/node/{id...}`
+- [x] Optimistic UI update, rollback on error
 
 ### Polish
-- [ ] Minimap for orientation on large graphs
-- [ ] Legend panel (color = type, size = connectivity, edge style = class)
-- [ ] Keyboard shortcuts (`/` search, `Esc` close panel, arrow navigation)
-- [ ] Responsive layout (detail panel collapses on narrow viewport)
-- [ ] Write component tests
+- [x] Minimap for orientation on large graphs (`web/src/minimap.ts`)
+- [x] Legend panel (color = type, size = connectivity, edge style = class) (`web/src/legend.ts`)
+- [x] Keyboard shortcuts (`/` search, `Esc` close panel, arrow navigation) (`web/src/keyboard.ts`)
+- [x] Responsive layout (detail panel collapses on narrow viewport)
+- [x] Makefile targets: `build-ui`, `build-full`, `dev-ui`
+- [x] 12 TypeScript modules: main, graph-view, detail-panel, filters, search, keyboard, legend, minimap, heat-overlay, types, api, style.css
 
 ## Future Enhancements (Research-Informed, Deferred)
 
@@ -594,10 +645,14 @@ Post-MVP:
   Phase 9 + 10 + 11 + 12 + 13 + 15 + 17
     └─> Phase 18 (Integration Testing)
 
+  Phase 11 + 18
+    └─> Phase 18.5 (Cross-Vault Bridges)
+          └─> Phase 18.6 (Routing Table + Relative Paths)
+
   Phase 16 (Slim HTTP API)
     └─> Phase 19 (Graph Viz Frontend)
 
-  Phase 18 (when stable)
+  Phase 18.6 (when stable)
     └─> F1-F5 (Future Enhancements) [DEFERRED]
 ```
 
