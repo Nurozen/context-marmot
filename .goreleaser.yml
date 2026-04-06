@@ -5,6 +5,7 @@ project_name: marmot
 before:
   hooks:
     - go mod tidy
+    - sh -c "cd web && npm ci && npx vite build"
 
 builds:
   - id: marmot
