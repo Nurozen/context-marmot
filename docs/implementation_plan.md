@@ -11,7 +11,7 @@
 - **Embedding Index**: SQLite (Go-side KNN search)
 - **LLM Provider**: Anthropic (Haiku-class for CRUD classification + summary generation)
 - **Visualization (initial)**: Obsidian (open `.marmot/` as vault — zero integration needed)
-- **Visualization (future)**: TypeScript + Vite web UI (Phase 19), consumes REST/WebSocket API
+- **Visualization (future)**: TypeScript + Vite + D3.js web UI (Phase 19), embedded in Go binary via `go:embed`, served by `marmot ui`
 - **Protocol**: MCP (Model Context Protocol)
 - **Versioning**: Git (native, no wrapper library)
 - **On-disk format**: YAML frontmatter + Markdown + `[[wikilinks]]` (Obsidian-compatible)
@@ -388,23 +388,30 @@ Complete command-line interface.
 - [x] Add `marmot version` command with build-time ldflags (version, commit, date)
 - [x] Add GoReleaser cross-compilation + GitHub Actions auto-tag & release pipeline
 
-## Phase 16: REST / WebSocket API
+## Phase 16: HTTP API (Slim)
 
-HTTP + WebSocket interface. Enables future custom UIs without coupling to Obsidian.
+Minimal HTTP interface serving the graph visualization frontend. Scoped to what the D3 frontend (Phase 19) actually needs — full REST/WebSocket deferred until a consumer demands it.
 
-- [ ] Define REST API endpoints
-  - [ ] `GET /api/graph/:namespace` — full graph as JSON (active nodes by default)
-  - [ ] `GET /api/graph/:namespace?include_superseded=true` — include superseded
-  - [ ] `GET /api/node/:namespace/:id` — single node detail as JSON
-  - [ ] `GET /api/search?q=...&ns=...` — search nodes
-  - [ ] `GET /api/heat/:namespace` — heat map data
-  - [ ] `GET /api/namespaces` — list all namespaces
-  - [ ] `GET /api/bridges` — list all bridges
-  - [ ] `GET /api/summary/:namespace` — get namespace summary
-- [ ] Implement WebSocket endpoint for live graph updates
-- [ ] Implement CORS for local dev
-- [ ] Serve static frontend assets in production mode (when frontend exists)
+- [ ] Implement `GET /api/graph/:namespace` — full graph as JSON (nodes + edges + metadata, active by default)
+  - [ ] `?include_superseded=true` query param to include superseded nodes
+- [ ] Implement `GET /api/namespaces` — list all namespaces with node counts
+- [ ] Implement `PUT /api/node/:id` — update node summary/context (inline editing from UI)
+  - [ ] Validate input (node ID format, field lengths)
+  - [ ] Re-embed updated node after save
+- [ ] Implement CORS for local dev (Vite dev server proxy)
+- [ ] Serve embedded static frontend assets via `go:embed web/dist/*`
+- [ ] Add `marmot ui` CLI subcommand — starts HTTP server, opens browser
+  - [ ] `--port` flag (default 3274)
+  - [ ] `--no-open` flag to suppress browser launch
 - [ ] Write API integration tests
+
+### Deferred (add when needed)
+- `GET /api/node/:namespace/:id` — single node detail (frontend has full graph in memory)
+- `GET /api/search?q=...` — server-side search (frontend does client-side filtering)
+- `GET /api/heat/:namespace` — heat map data (included in graph response)
+- `GET /api/bridges` — bridge listing
+- `GET /api/summary/:namespace` — namespace summary
+- WebSocket for live graph updates (manual refresh sufficient initially)
 
 ## Phase 17: Static Analysis Indexer — COMPLETE (2026-04-02)
 
@@ -456,21 +463,54 @@ Automated code-to-graph indexer (first use case enabler).
 
 ---
 
-## Phase 19 (Deferred): Custom Visualization Frontend
+## Phase 19: Graph Visualization Frontend
 
-Interactive graph UI. Deferred until Obsidian no longer meets visualization needs.
-When built, consumes the REST/WebSocket API from Phase 16.
+Standalone interactive graph UI replacing Obsidian's limited graph view. Built with D3.js for maximum rendering control over node coloring, sizing, clustering, and edge styling. Embedded in Go binary via `go:embed`, served by `marmot ui` (Phase 16).
 
-- [ ] Initialize TypeScript + Vite project in `web/`
-- [ ] Set up Cytoscape.js (or selected graph library) with base configuration
-- [ ] Implement graph data fetching from REST API
-- [ ] Implement node rendering (color by type, size by edge count, namespace grouping)
-- [ ] Implement edge rendering (style by relation, opacity by heat weight)
-- [ ] Implement DAG layout (dagre/hierarchical) + force-directed alternative
-- [ ] Implement interactions (click, hover, expand, search, filter)
-- [ ] Implement heat map overlay toggle
-- [ ] Implement staleness indicators
-- [ ] Implement namespace switcher / multi-namespace view
+**Stack:** TypeScript + Vite + D3.js (`d3-force`, `d3-zoom`, `d3-dag` for structural hierarchy)
+**Serving:** Embedded in Go binary via `go:embed web/dist/*`, accessed via `marmot ui`
+**Data:** Single fetch from `GET /api/graph/:namespace`, client-side refresh button
+
+### Scaffold & Data Layer
+- [ ] Initialize Vite + TypeScript project in `web/`
+- [ ] Define TypeScript types mirroring Go `Node`, `Edge`, `EdgeRelation` types
+- [ ] Implement graph data fetcher with namespace selection
+- [ ] Wire `go:embed` in serve command, add `marmot ui` subcommand (opens browser)
+
+### Core Visualization (D3)
+- [ ] Force-directed layout with `d3-force` (charge, link, collision, center)
+- [ ] Node coloring by type (function, module, class, concept, decision, reference, composite)
+- [ ] Node sizing by edge count (in-degree + out-degree)
+- [ ] Edge rendering: solid for structural, dashed for behavioral
+- [ ] Edge coloring by relation type
+- [ ] Namespace clustering via force grouping (centripetal force per namespace)
+- [ ] Labels with truncation and zoom-adaptive visibility
+
+### Interaction
+- [ ] Zoom/pan via `d3-zoom`
+- [ ] Click node to show detail panel (summary, context, source, edges)
+- [ ] Hover to highlight connected subgraph (dim unrelated nodes)
+- [ ] Drag nodes to reposition
+- [ ] Double-click to expand/collapse containment groups
+- [ ] Search with highlight + fly-to
+
+### Filtering & Views
+- [ ] Filter by node type (toggle chips)
+- [ ] Filter by edge class (structural only, behavioral only, all)
+- [ ] Hide/show superseded nodes
+- [ ] Staleness indicator (orange ring on stale nodes)
+- [ ] Heat overlay mode (node glow intensity by heat weight)
+
+### Inline Editing (v1)
+- [ ] Click node detail panel → edit summary/context fields
+- [ ] Save via `PUT /api/node/:id`
+- [ ] Optimistic UI update, rollback on error
+
+### Polish
+- [ ] Minimap for orientation on large graphs
+- [ ] Legend panel (color = type, size = connectivity, edge style = class)
+- [ ] Keyboard shortcuts (`/` search, `Esc` close panel, arrow navigation)
+- [ ] Responsive layout (detail panel collapses on narrow viewport)
 - [ ] Write component tests
 
 ## Future Enhancements (Research-Informed, Deferred)
@@ -546,7 +586,7 @@ Post-MVP:
 
   Phase 11 + 12 + 13
     └─> Phase 15 (Full CLI)
-    └─> Phase 16 (REST/WS API)
+    └─> Phase 16 (Slim HTTP API)
 
   Phase M3 + M4
     └─> Phase 17 (Static Analysis Indexer)
@@ -554,8 +594,8 @@ Post-MVP:
   Phase 9 + 10 + 11 + 12 + 13 + 15 + 17
     └─> Phase 18 (Integration Testing)
 
-  Phase 16 (when needed)
-    └─> Phase 19 (Custom Viz Frontend) [DEFERRED]
+  Phase 16 (Slim HTTP API)
+    └─> Phase 19 (Graph Viz Frontend)
 
   Phase 18 (when stable)
     └─> F1-F5 (Future Enhancements) [DEFERRED]
@@ -569,9 +609,11 @@ Once MVP is validated, three streams can proceed in parallel:
 |---------------------|------------------------|-------------------|
 | Phase 8: Temporal Fields | Phase 9: CRUD Classifier | Phase 11: Namespaces |
 | Phase 10: Concurrency + Git | Phase 12: Heat Map | Phase 14: Embedding Mgmt |
-| | Phase 13: Summary + Update | Phase 16: REST/WS API |
+| | Phase 13: Summary + Update | Phase 16: Slim HTTP API |
 
 Streams converge at Phase 15 (Full CLI) and Phase 18 (Integration Testing).
 
 Visualization is handled by Obsidian from Phase M2 onward — every node file
-written is immediately visible in the vault.
+written is immediately visible in the vault. Custom D3 visualization (Phase 19)
+replaces Obsidian for advanced features: node coloring/sizing, clustering,
+edge styling, inline editing, and heat overlays.

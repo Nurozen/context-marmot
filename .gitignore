@@ -32,6 +32,8 @@ Thumbs.db
 .marmot/.obsidian/workspace.json
 .marmot/.obsidian/workspace-mobile.json
 
+.marmot/
+
 # Coverage
 coverage.out
 coverage.html
@@ -40,3 +42,7 @@ test_rig/
 .env
 /marmot-eval
 /marmot
+.marmot/functions/mcp-handle-query.md
+wiggums/
+CLAUDE.md
+.mcp.json
