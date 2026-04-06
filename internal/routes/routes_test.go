@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -128,5 +129,61 @@ func TestLoadFromEmptyPath(t *testing.T) {
 	}
 	if len(rt.Vaults) != 0 {
 		t.Fatalf("expected empty table, got %d entries", len(rt.Vaults))
+	}
+}
+
+func TestUpdate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "routes.yml")
+	SetOverridePath(path)
+	defer SetOverridePath("")
+
+	// Seed an initial entry.
+	rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
+	rt.Set("existing", "/existing/path")
+	if err := SaveTo(rt, path); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Update atomically adds a new entry.
+	err := Update(func(rt *RoutingTable) error {
+		rt.Set("new-vault", "/new/path")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	// Verify both entries exist.
+	loaded, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if p, ok := loaded.Get("existing"); !ok || p != "/existing/path" {
+		t.Errorf("existing entry lost: ok=%v p=%q", ok, p)
+	}
+	if p, ok := loaded.Get("new-vault"); !ok || p != "/new/path" {
+		t.Errorf("new entry missing: ok=%v p=%q", ok, p)
+	}
+}
+
+func TestUpdateError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "routes.yml")
+	SetOverridePath(path)
+	defer SetOverridePath("")
+
+	// Update with error should not write.
+	err := Update(func(rt *RoutingTable) error {
+		rt.Set("should-not-persist", "/nowhere")
+		return fmt.Errorf("abort")
+	})
+	if err == nil {
+		t.Fatal("expected error from Update")
+	}
+
+	// File should not exist (nothing was ever saved).
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Error("expected no file after aborted Update")
 	}
 }

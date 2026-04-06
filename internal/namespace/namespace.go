@@ -612,11 +612,11 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 	}
 
 	// Auto-register both vaults in the global routing table (best-effort).
-	if rt, rtErr := routes.Load(); rtErr == nil {
+	_ = routes.Update(func(rt *routes.RoutingTable) error {
 		rt.Set(localCfg.VaultID, absLocal)
 		rt.Set(remoteCfg.VaultID, absRemote)
-		_ = routes.Save(rt)
-	}
+		return nil
+	})
 
 	return bridge, nil
 }

@@ -130,7 +130,14 @@ func ResolveSourcePath(sourcePath, projectRoot string) string {
 	if filepath.IsAbs(sourcePath) || projectRoot == "" {
 		return sourcePath
 	}
-	return filepath.Join(projectRoot, sourcePath)
+	resolved := filepath.Join(projectRoot, sourcePath)
+	// Prevent path traversal outside project root
+	cleaned := filepath.Clean(resolved)
+	if !strings.HasPrefix(cleaned, filepath.Clean(projectRoot)+string(filepath.Separator)) && cleaned != filepath.Clean(projectRoot) {
+		// Path escapes project root - return as-is (will fail on open)
+		return sourcePath
+	}
+	return cleaned
 }
 
 // VerifyStaleness checks whether a node's source reference is still current
