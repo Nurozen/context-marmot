@@ -50,7 +50,7 @@ func (s *Server) registerRoutes() {
 			if path == "/" || path == "/index.html" {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
-				w.Write(indexHTML)
+				_, _ = w.Write(indexHTML)
 				return
 			}
 			// Check if the file exists in the embedded FS.
@@ -59,10 +59,10 @@ func (s *Server) registerRoutes() {
 				// SPA fallback: serve index.html for client-side routing.
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
-				w.Write(indexHTML)
+				_, _ = w.Write(indexHTML)
 				return
 			}
-			f.Close()
+			_ = f.Close()
 			fileServer.ServeHTTP(w, r)
 		})
 	}

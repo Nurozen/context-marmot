@@ -373,11 +373,12 @@ func TestStressConcurrentTableAccess_BugDocumented(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < ops; j++ {
 				key := fmt.Sprintf("v-%d", j%10) // shared keys to cause contention
-				if id%3 == 0 {
+				switch id % 3 {
+				case 0:
 					rt.Set(key, fmt.Sprintf("/path/%d/%d", id, j))
-				} else if id%3 == 1 {
+				case 1:
 					_, _ = rt.Get(key)
-				} else {
+				default:
 					_ = rt.List()
 				}
 			}

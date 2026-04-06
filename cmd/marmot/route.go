@@ -57,7 +57,7 @@ func routeList() int {
 	for _, id := range ids {
 		fmt.Fprintf(w, "%s\t%s\n", id, vaults[id])
 	}
-	w.Flush()
+	_ = w.Flush()
 	return 0
 }
 
