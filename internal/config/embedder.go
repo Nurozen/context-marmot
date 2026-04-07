@@ -13,7 +13,7 @@ import (
 func NewEmbedderFromVault(cfg *VaultConfig) (embedding.Embedder, error) {
 	provider := cfg.EmbeddingProvider
 	model := cfg.EmbeddingModel
-	apiKey := APIKey(provider)
+	apiKey := APIKeyWithVault(provider, cfg.VaultDir)
 
 	// If a real provider is configured but no API key is set, fall back to mock with a warning.
 	if provider != "" && provider != "mock" && apiKey == "" {

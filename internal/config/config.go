@@ -24,6 +24,7 @@ type VaultConfig struct {
 	ClassifierProvider string `yaml:"classifier_provider,omitempty"` // openai | anthropic | none
 	ClassifierModel    string `yaml:"classifier_model,omitempty"`    // model name; empty = provider default
 	TokenBudget        int    `yaml:"token_budget,omitempty"`        // default token budget for queries; 0 = use DefaultTokenBudget
+	VaultDir           string `yaml:"-"`                             // set by Load(); not serialised
 }
 
 // EffectiveTokenBudget returns the configured token budget, falling back to
@@ -39,6 +40,9 @@ func (c *VaultConfig) EffectiveTokenBudget() int {
 // Returns default config if the file doesn't exist.
 func Load(vaultDir string) (*VaultConfig, error) {
 	cfg, _, err := LoadRaw(vaultDir)
+	if cfg != nil {
+		cfg.VaultDir = vaultDir
+	}
 	return cfg, err
 }
 
