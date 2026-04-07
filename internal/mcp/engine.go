@@ -44,8 +44,8 @@ type Engine struct {
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
 }
 
-// namespaceLock returns the write mutex for the given namespace, creating it if needed.
-func (e *Engine) namespaceLock(namespace string) *sync.Mutex {
+// NamespaceLock returns the write mutex for the given namespace, creating it if needed.
+func (e *Engine) NamespaceLock(namespace string) *sync.Mutex {
 	v, _ := e.nsMu.LoadOrStore(namespace, &sync.Mutex{})
 	return v.(*sync.Mutex)
 }

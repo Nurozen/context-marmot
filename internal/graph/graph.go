@@ -97,10 +97,25 @@ func (g *Graph) UpsertNode(n *node.Node) error {
 
 // upsertNodeLocked inserts or replaces a node without acquiring the mutex.
 // Caller must hold g.mu in write mode.
+//
+// Unlike removeNodeLocked, this does NOT cascade-remove inbound edges from
+// other nodes. Those edges (defined on other nodes, pointing TO this node)
+// remain valid because the node still exists after the upsert. Only the
+// node's own outbound edges are cleared and re-indexed.
 func (g *Graph) upsertNodeLocked(n *node.Node) {
-	// If the node exists, remove it first (clears edges and activeNodes entry).
 	if _, exists := g.nodes[n.ID]; exists {
-		g.removeNodeLocked(n.ID)
+		// Clean up only the node's own outbound edges and their reverse entries.
+		for _, e := range g.outEdges[n.ID] {
+			g.inEdges[e.Target] = removeEdgeFromSlice(g.inEdges[e.Target], n.ID)
+			if len(g.inEdges[e.Target]) == 0 {
+				delete(g.inEdges, e.Target)
+			}
+		}
+		delete(g.outEdges, n.ID)
+
+		// Remove from maps (will be re-added below).
+		delete(g.nodes, n.ID)
+		delete(g.activeNodes, n.ID)
 	}
 
 	g.nodes[n.ID] = n

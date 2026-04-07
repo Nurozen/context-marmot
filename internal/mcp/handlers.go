@@ -162,7 +162,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		id = namespace + "/" + id
 	}
 
-	mu := e.namespaceLock(namespace)
+	mu := e.NamespaceLock(namespace)
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -550,7 +550,7 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	// Use the resolved (possibly prefixed) ID for all subsequent operations.
 	id = existing.ID
 
-	mu := e.namespaceLock(existing.Namespace)
+	mu := e.NamespaceLock(existing.Namespace)
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -642,7 +642,7 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 		return mcp.NewToolResultJSON(TagResult{Tag: tag, TaggedIDs: []string{}, Count: 0})
 	}
 
-	mu := e.namespaceLock(namespace)
+	mu := e.NamespaceLock(namespace)
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -689,6 +689,28 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 
 		// Update in-memory graph only after successful disk write.
 		_ = e.Graph.UpsertNode(diskNode)
+
+		// Re-embed the node so semantic search accounts for the new tag.
+		if e.Embedder != nil && e.EmbeddingStore != nil {
+			tagStr := strings.Join(diskNode.Tags, " ")
+			embedText := diskNode.Summary
+			if tagStr != "" {
+				embedText = diskNode.Summary + " " + tagStr
+			}
+			if diskNode.Context != "" {
+				ctxSnip := diskNode.Context
+				if len(ctxSnip) > 6000 {
+					ctxSnip = ctxSnip[:6000]
+				}
+				embedText = embedText + "\n\n" + ctxSnip
+			}
+			if embedText != "" {
+				if vec, embErr := e.Embedder.Embed(embedText); embErr == nil {
+					summaryHash := sha256Hex(embedText)
+					_ = e.EmbeddingStore.Upsert(diskNode.ID, vec, summaryHash, e.Embedder.Model())
+				}
+			}
+		}
 
 		taggedIDs = append(taggedIDs, diskNode.ID)
 	}

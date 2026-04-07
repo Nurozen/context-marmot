@@ -177,6 +177,10 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mu := s.engine.NamespaceLock(n.Namespace)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// Load from disk to get the full node (including body sections).
 	path := s.engine.NodeStore.NodePath(n.ID)
 	diskNode, err := s.engine.NodeStore.LoadNode(path)

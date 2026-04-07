@@ -621,6 +621,61 @@ func TestGetNeighbors_LargerGraph(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// UpsertNode must preserve inbound edges from other nodes
+// ---------------------------------------------------------------------------
+
+func TestUpsertNode_PreservesInboundEdges(t *testing.T) {
+	g := NewGraph()
+
+	// A -> B (A has an edge pointing to B).
+	a := makeNode("a", structuralEdge("b"))
+	b := makeNode("b", behavioralEdge("c"))
+	c := makeNode("c")
+
+	for _, n := range []*node.Node{a, b, c} {
+		if err := g.AddNode(n); err != nil {
+			t.Fatalf("AddNode %s: %v", n.ID, err)
+		}
+	}
+
+	// Verify initial state: 2 edges total (a->b, b->c).
+	if got := g.EdgeCount(); got != 2 {
+		t.Fatalf("initial EdgeCount = %d, want 2", got)
+	}
+
+	// Upsert B with updated summary but same edges. This simulates the API
+	// handler updating a node's metadata without changing its edges.
+	b2 := makeNode("b", behavioralEdge("c"))
+	b2.Summary = "updated summary"
+	if err := g.UpsertNode(b2); err != nil {
+		t.Fatalf("UpsertNode b: %v", err)
+	}
+
+	// The edge from A -> B must still exist in the index.
+	outA := g.GetEdges("a", Outbound)
+	if len(outA) != 1 || outA[0].Target != "b" {
+		t.Errorf("after upsert B: outEdges[a] = %v, want [{Target:b}]", outA)
+	}
+
+	// B's inbound edges should include the edge from A.
+	inB := g.GetEdges("b", Inbound)
+	found := false
+	for _, e := range inB {
+		if e.Target == "a" { // in inEdges, Target holds the source
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("after upsert B: inEdges[b] missing edge from a, got %v", inB)
+	}
+
+	// Total edge count must still be 2.
+	if got := g.EdgeCount(); got != 2 {
+		t.Errorf("after upsert B: EdgeCount = %d, want 2", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helper: write file for test
 // ---------------------------------------------------------------------------
 
