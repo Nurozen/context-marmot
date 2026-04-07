@@ -21,6 +21,7 @@ type frontmatterFields struct {
 	SupersededBy string   `yaml:"superseded_by,omitempty"`
 	Source       *Source  `yaml:"source,omitempty"`
 	Edges        []fmEdge `yaml:"edges,omitempty"`
+	Tags         []string `yaml:"tags,omitempty"`
 }
 
 // fmEdge is the YAML representation of an edge (Class is omitted).
@@ -57,6 +58,7 @@ func RenderNode(node *Node) ([]byte, error) {
 			Relation: string(e.Relation),
 		})
 	}
+	fm.Tags = node.Tags
 
 	yamlBytes, err := yaml.Marshal(fm)
 	if err != nil {

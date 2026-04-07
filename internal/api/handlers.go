@@ -166,8 +166,8 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Summary == "" && req.Context == "" {
-		writeError(w, http.StatusBadRequest, "at least one of summary or context must be provided")
+	if req.Summary == "" && req.Context == "" && len(req.Tags) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one of summary, context, or tags must be provided")
 		return
 	}
 
@@ -192,6 +192,9 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Context != "" {
 		diskNode.Context = req.Context
+	}
+	if len(req.Tags) > 0 {
+		diskNode.Tags = req.Tags
 	}
 
 	// Persist to disk.
@@ -480,6 +483,7 @@ func nodeToAPI(n *node.Node, edgeCount int) APINode {
 		Context:      n.Context,
 		EdgeCount:    edgeCount,
 		Edges:        make([]APIEdge, 0, len(n.Edges)),
+		Tags:         n.Tags,
 	}
 
 	if n.Source.Path != "" {

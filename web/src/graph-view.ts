@@ -17,6 +17,7 @@ interface SimNode extends d3.SimulationNodeDatum {
   context: string;
   edge_count: number;
   is_stale: boolean;
+  tags: string[];
   superseded_by?: string;
   radius: number;
   /** Fixed after drag */
@@ -68,7 +69,7 @@ export class GraphView {
   private edgeClassFilter: 'all' | 'structural' | 'behavioral' = 'all';
   private heatEnabled = false;
   private heatPairs: APIHeatPair[] = [];
-  private groupBy: 'none' | 'type' | 'namespace' = 'type';
+  private groupBy: 'none' | 'type' | 'namespace' | 'tag' = 'type';
 
   /* Minimap & heat overlay */
   private minimap: Minimap | null = null;
@@ -172,6 +173,7 @@ export class GraphView {
       context: n.context,
       edge_count: n.edge_count,
       is_stale: n.is_stale,
+      tags: n.tags ?? [],
       superseded_by: n.superseded_by,
       radius: nodeRadius(n.edge_count),
     }));
@@ -221,6 +223,14 @@ export class GraphView {
 
   filterByTypes(types: Set<string>): void {
     this.visibleTypes = types;
+    this.applyVisibility();
+    this.reheat(0.3);
+  }
+
+  private visibleTags: Set<string> | null = null;
+
+  filterByTags(tags: Set<string> | null): void {
+    this.visibleTags = tags;
     this.applyVisibility();
     this.reheat(0.3);
   }
@@ -535,9 +545,20 @@ export class GraphView {
   /*  Visibility helpers                                               */
   /* ---------------------------------------------------------------- */
 
+  private isNodeVisible(d: SimNode): boolean {
+    if (!this.visibleTypes.has(d.type)) return false;
+    if (this.visibleTags !== null) {
+      // If node has no tags, hide it only if there are active tag filters
+      if (d.tags.length === 0) return false;
+      // Node visible if at least one of its tags is in the active set
+      if (!d.tags.some((t) => this.visibleTags!.has(t))) return false;
+    }
+    return true;
+  }
+
   private applyVisibility(): void {
     this.nodeGroup.selectAll<SVGGElement, SimNode>('.node').attr('display', (d) =>
-      this.visibleTypes.has(d.type) ? null : 'none',
+      this.isNodeVisible(d) ? null : 'none',
     );
 
     this.linkGroup.selectAll<SVGLineElement, SimLink>('.link').attr('display', (d) => {
@@ -546,7 +567,7 @@ export class GraphView {
       const srcNode = this.nodes.find((n) => n.id === srcId);
       const tgtNode = this.nodes.find((n) => n.id === tgtId);
       if (!srcNode || !tgtNode) return 'none';
-      if (!this.visibleTypes.has(srcNode.type) || !this.visibleTypes.has(tgtNode.type)) return 'none';
+      if (!this.isNodeVisible(srcNode) || !this.isNodeVisible(tgtNode)) return 'none';
       if (this.edgeClassFilter !== 'all' && d.class !== this.edgeClassFilter) return 'none';
       return null;
     });
@@ -606,6 +627,35 @@ export class GraphView {
       return;
     }
 
+    /* Tag-based grouping: nodes may belong to multiple tags */
+    if (this.groupBy === 'tag') {
+      const allTags = [...new Set(this.nodes.flatMap((n) => n.tags))].sort();
+      if (allTags.length === 0) {
+        /* No tags at all — fall back to center pull */
+        this.simulation
+          .force('x', d3.forceX<SimNode>(cx).strength(0.04))
+          .force('y', d3.forceY<SimNode>(cy).strength(0.04));
+        return;
+      }
+      const tagCentroids = this.groupCentroids(allTags, width, height);
+      const strength = 0.15;
+
+      this.simulation
+        .force('x', d3.forceX<SimNode>((d) => {
+          if (d.tags.length === 0) return cx;
+          let sx = 0;
+          for (const t of d.tags) sx += tagCentroids.get(t)?.x ?? cx;
+          return sx / d.tags.length;
+        }).strength(strength))
+        .force('y', d3.forceY<SimNode>((d) => {
+          if (d.tags.length === 0) return cy;
+          let sy = 0;
+          for (const t of d.tags) sy += tagCentroids.get(t)?.y ?? cy;
+          return sy / d.tags.length;
+        }).strength(strength));
+      return;
+    }
+
     const keyFn = this.groupBy === 'type'
       ? (d: SimNode) => d.type
       : (d: SimNode) => d.namespace;
@@ -620,7 +670,7 @@ export class GraphView {
   }
 
   /** Change the grouping mode and reheat the simulation. */
-  setGroupBy(mode: 'none' | 'type' | 'namespace'): void {
+  setGroupBy(mode: 'none' | 'type' | 'namespace' | 'tag'): void {
     this.groupBy = mode;
     const { width, height } = this.dimensions();
     this.applyGroupForces(width, height);

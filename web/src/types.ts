@@ -12,6 +12,7 @@ export interface APINode {
   edges: APIEdge[];
   edge_count: number;
   is_stale: boolean;
+  tags?: string[];
 }
 
 export interface APISource {

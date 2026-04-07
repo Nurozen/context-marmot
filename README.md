@@ -21,7 +21,8 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Structural acyclicity** --- `contains`, `imports`, `extends`, `implements` edges enforce DAG structure; `calls`, `reads`, `writes`, `references` edges allow cycles (mutual recursion is real)
 - **Semantic search** --- embedding index for natural language queries with graph traversal expansion
 - **Token-budget compaction** --- results fit your context window, with full/compact/truncated tiers
-- **MCP server** --- 4 tools (`context_query`, `context_write`, `context_verify`, `context_delete`) over stdio
+- **MCP server** --- 5 tools (`context_query`, `context_write`, `context_tag`, `context_verify`, `context_delete`) over stdio
+- **Domain tags** --- many-to-many semantic categorization for nodes; bulk-tag via search query; graph clustering and filtering by tag
 - **Obsidian-compatible** --- every node file renders natively in Obsidian with working graph view
 - **Integrity verification** --- hash-based staleness detection, dangling edge checks, cycle detection
 - **Temporal node lifecycle** --- soft-delete and supersede nodes; active-only queries by default with `include_superseded` opt-in
@@ -122,12 +123,13 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
-Once connected, agents get four tools:
+Once connected, agents get five tools:
 
 | Tool | Description |
 |------|-------------|
 | `context_query` | Search the graph by natural language. Returns XML-compacted subgraph within token budget. |
-| `context_write` | Write or update a node. Enforces structural acyclicity. Updates embedding index. |
+| `context_write` | Write or update a node. Enforces structural acyclicity. Updates embedding index. Accepts optional `tags` for domain categorization. |
+| `context_tag` | Bulk-tag nodes by semantic search query. Finds nodes matching a query and applies the given tags. |
 | `context_verify` | Check node staleness, dangling edges, and structural integrity. |
 | `context_delete` | Soft-delete (supersede) a node. Marks it `status: superseded` with a `valid_until` timestamp. Excluded from future queries by default. |
 
@@ -162,6 +164,7 @@ Returns:
 {
   "id": "auth/refresh",
   "type": "function",
+  "tags": ["auth", "security"],
   "summary": "Refreshes an expired JWT token",
   "context": "func refreshToken(old string) (string, error) { ... }",
   "edges": [{"target": "auth/validate_token", "relation": "calls"}]
@@ -285,6 +288,9 @@ id: auth/login
 type: function
 namespace: default
 status: active
+tags:
+  - auth
+  - security
 source:
   path: src/auth/login.ts
   lines: [1, 35]
@@ -334,7 +340,7 @@ internal/
   summary/               Namespace summary generation, async scheduler, _summary.md I/O
   update/                Source change detection, staleness propagation, reindex, file watcher
   indexer/               Static analysis indexer: Go AST, TypeScript regex, generic file, ignore patterns, runner
-  mcp/                   MCP server (4 tools), engine wiring, cross-namespace edge validation
+  mcp/                   MCP server (5 tools), engine wiring, cross-namespace edge validation
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the full system design, and [docs/data-structures.md](docs/data-structures.md) for format specifications.
@@ -379,7 +385,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Embedding index with KNN search (Go-side, SQLite-backed)
 - Pluggable embedding providers (OpenAI and mock) with config-driven selection
 - Token-budget-aware graph traversal and XML compaction
-- MCP server with 4 tools over stdio
+- MCP server with 5 tools over stdio
 - CLI with init, configure, setup, index, query, verify, serve
 - Interactive configuration (provider, model, API key) with vault `.env` storage
 - Auto-setup for Claude Code, Codex, VS Code, and Cursor (MCP config generation)
@@ -396,6 +402,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Slim HTTP API (Phase 16): `/api/graph`, `/api/namespaces`, `/api/node`, `/api/search`, `/api/heat`, `/api/bridges`, `/api/summary`, and inline node updates via `PUT /api/node/{id...}`
 - Static analysis indexer (Phase 17): Go AST indexer (packages, functions, methods, types, interfaces), TypeScript regex-based indexer (classes, interfaces, functions, type aliases), generic file indexer (30+ extensions), `.gitignore` support, incremental indexing with CRUD classification, `marmot index <path>` CLI integration
 - Graph visualization frontend (Phase 19): embedded D3 web UI served by `marmot ui` with filters, search, heat overlay, minimap, legend, keyboard shortcuts, and inline summary/context editing
+- Node tags & domain clustering (Phase 20): many-to-many domain tags on nodes, `context_tag` MCP tool for bulk-tagging via semantic search, graph grouping and filtering by tag, tag badges in detail panel
 
 ### Known MVP limitations
 
@@ -404,7 +411,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), and integration testing + CI/CD (Phase 18) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), and node tags + domain clustering (Phase 20) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

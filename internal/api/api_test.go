@@ -686,6 +686,72 @@ func TestHandleNodeUpdateInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandleNodeTags(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+
+	// Verify tags appear in graph response for a node that has tags set directly.
+	taggedNode := &node.Node{
+		ID:        "util/tagged",
+		Type:      "module",
+		Namespace: "default",
+		Status:    node.StatusActive,
+		Summary:   "A utility module with tags",
+		Tags:      []string{"utility", "core"},
+	}
+	if err := engine.Graph.AddNode(taggedNode); err != nil {
+		t.Fatalf("add tagged node: %v", err)
+	}
+
+	rec := doRequest(t, handler, "GET", "/api/graph/default", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp GraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	foundTagged := false
+	for _, n := range resp.Nodes {
+		if n.ID == "util/tagged" {
+			foundTagged = true
+			if len(n.Tags) != 2 || n.Tags[0] != "utility" || n.Tags[1] != "core" {
+				t.Errorf("expected tags [utility, core], got %v", n.Tags)
+			}
+			break
+		}
+	}
+	if !foundTagged {
+		t.Error("util/tagged node not found in graph response")
+	}
+
+	// Test PUT /api/node/{id} can update tags.
+	body := `{"tags": ["auth", "security"]}`
+	recPut := doRequest(t, handler, "PUT", "/api/node/auth/login", body)
+	if recPut.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recPut.Code, recPut.Body.String())
+	}
+	var updateResp NodeUpdateResponse
+	if err := json.NewDecoder(recPut.Body).Decode(&updateResp); err != nil {
+		t.Fatalf("decode update response: %v", err)
+	}
+	if updateResp.NodeID != "auth/login" {
+		t.Errorf("expected node_id 'auth/login', got %q", updateResp.NodeID)
+	}
+	if updateResp.Status != "updated" {
+		t.Errorf("expected status 'updated', got %q", updateResp.Status)
+	}
+
+	// Verify tags were persisted to the in-memory graph.
+	n, ok := engine.Graph.GetNode("auth/login")
+	if !ok {
+		t.Fatal("auth/login not found after tag update")
+	}
+	if len(n.Tags) != 2 || n.Tags[0] != "auth" || n.Tags[1] != "security" {
+		t.Errorf("expected tags [auth, security], got %v", n.Tags)
+	}
+}
+
 func TestHandleSummaryNotFound(t *testing.T) {
 	server, _ := newTestServer(t)
 	handler := server.Handler()

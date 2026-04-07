@@ -70,6 +70,23 @@ export class DetailPanel {
     badgeRow.appendChild(statusBadge);
 
     header.appendChild(badgeRow);
+
+    // Tag badges
+    if (node.tags && node.tags.length > 0) {
+      const tagRow = document.createElement('div');
+      tagRow.className = 'tag-badge-row';
+      tagRow.style.marginBottom = '16px';
+
+      for (const tag of node.tags) {
+        const tagBadge = document.createElement('span');
+        tagBadge.className = 'tag-badge';
+        tagBadge.textContent = tag;
+        tagRow.appendChild(tagBadge);
+      }
+
+      header.appendChild(tagRow);
+    }
+
     this.content.appendChild(header);
 
     // ── Staleness warning ──

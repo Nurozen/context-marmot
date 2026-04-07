@@ -410,6 +410,47 @@ html, body {
   transform: rotate(45deg);
 }
 
+/* Tag filter chips */
+#tag-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+.tag-filter-chip {
+  display: inline-block;
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  color: var(--bg-primary);
+  background: var(--secondary);
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+  line-height: 1.4;
+}
+
+.tag-filter-chip:hover {
+  background: var(--secondary);
+  filter: brightness(1.15);
+}
+
+.tag-filter-chip.inactive {
+  color: var(--text-muted);
+  background: transparent;
+  border-color: var(--border-medium);
+}
+
+.tag-filter-chip.inactive:hover {
+  border-color: var(--secondary);
+  color: var(--text-secondary);
+  filter: none;
+}
+
 /* Edge class radio filters */
 #edge-filters {
   display: flex;
@@ -736,6 +777,24 @@ html, body {
 #detail-content .badge-status {
   background: var(--bg-tertiary);
   border: 1px solid var(--border-medium);
+}
+
+/* Tag badges in detail panel */
+#detail-content .tag-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+#detail-content .tag-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  font-size: 9px;
+  font-weight: 500;
+  color: var(--bg-primary);
+  background: var(--secondary);
+  border-radius: 999px;
+  letter-spacing: 0.02em;
 }
 
 #detail-content .stale-warning {

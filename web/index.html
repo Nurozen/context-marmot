@@ -21,6 +21,7 @@
         <select id="groupby-select" title="Group nodes by">
           <option value="none">No grouping</option>
           <option value="type" selected>Group by type</option>
+          <option value="tag">Group by tag</option>
           <option value="namespace">Group by namespace</option>
         </select>
         <label class="toggle"><input type="checkbox" id="heat-toggle" /> Heat</label>
@@ -31,6 +32,8 @@
       <aside id="filter-panel">
         <h3>Node Types</h3>
         <div id="type-filters"></div>
+        <h3>Tags</h3>
+        <div id="tag-filters"></div>
         <h3>Edge Class</h3>
         <div id="edge-filters">
           <label><input type="radio" name="edge-class" value="all" checked /> All</label>

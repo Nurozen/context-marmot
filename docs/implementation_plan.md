@@ -564,6 +564,24 @@ Standalone interactive graph UI replacing Obsidian's limited graph view. Built w
 - [x] Makefile targets: `build-ui`, `build-full`, `dev-ui`
 - [x] 12 TypeScript modules: main, graph-view, detail-panel, filters, search, keyboard, legend, minimap, heat-overlay, types, api, style.css
 
+## Phase 20: Node Tags & Domain Clustering — COMPLETE (2026-04-07)
+
+Tags provide many-to-many domain-level categorization for nodes, enabling semantic grouping beyond code-structural types (e.g., "combat", "ai", "rendering" for a game codebase).
+
+- [x] Add `tags []string` field to Node, NodeMeta, and frontmatterFields structs
+- [x] YAML serialization with `omitempty` — backward-compatible with existing nodes
+- [x] Add `tags` parameter to `context_write` MCP tool schema
+- [x] Parse and persist tags in HandleContextWrite (create and update paths)
+- [x] Include tags in embedding text for better semantic search
+- [x] New `context_tag` MCP tool — bulk-tag nodes via semantic search query
+- [x] REST API: tags in APINode, NodeUpdateRequest, nodeToAPI, handleNodeUpdate
+- [x] API test for tag creation and update
+- [x] Frontend: tags field in TypeScript types and SimNode
+- [x] Graph grouping: "Group by tag" with weighted centroid pull (multi-tag nodes bridge between islands)
+- [x] Detail panel: tag badges with sage-green pill styling
+- [x] Filter sidebar: clickable tag filter chips
+- [x] Updated transport test for 5 MCP tools
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.

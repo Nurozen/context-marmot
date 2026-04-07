@@ -32,6 +32,14 @@ async function init(): Promise<void> {
   filters = new Filters(() => {
     graphView?.filterByTypes(filters.getActiveTypes());
     graphView?.filterByEdgeClass(filters.getEdgeClass());
+    const activeTags = filters.getActiveTags();
+    // Only apply tag filter if there are tags in the graph
+    const allTags = currentData?.nodes.flatMap((n) => n.tags ?? []) ?? [];
+    if (allTags.length > 0) {
+      graphView?.filterByTags(activeTags);
+    } else {
+      graphView?.filterByTags(null);
+    }
   });
 
   search = new Search((nodeId: string) => {
@@ -84,7 +92,7 @@ async function init(): Promise<void> {
   /* ── Group-by selector ────────────────────────────────────────── */
   const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
   groupBySelect.addEventListener('change', () => {
-    graphView?.setGroupBy(groupBySelect.value as 'none' | 'type' | 'namespace');
+    graphView?.setGroupBy(groupBySelect.value as 'none' | 'type' | 'namespace' | 'tag');
   });
 
   /* ── Superseded toggle reloads graph ──────────────────────────── */
@@ -146,6 +154,10 @@ async function loadGraph(): Promise<void> {
     /* Update filter chips with types actually present in the data */
     const typesInGraph = [...new Set(currentData.nodes.map((n) => n.type))];
     filters.updateAvailableTypes(typesInGraph);
+
+    /* Update tag filter chips */
+    const tagsInGraph = [...new Set(currentData.nodes.flatMap((n) => n.tags ?? []))].sort();
+    filters.updateAvailableTags(tagsInGraph);
 
     /* Render graph */
     graphView?.update(currentData);

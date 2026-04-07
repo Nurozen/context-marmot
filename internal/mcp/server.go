@@ -109,6 +109,10 @@ When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vaul
 		mcp.WithString("context",
 			mcp.Description("Full context: code snippets, documentation, decision rationale, examples, gotchas, or anything that helps understand this node deeply. Use markdown formatting. Be thorough — this is what gets returned when the node is a top search result"),
 		),
+		mcp.WithArray("tags",
+			mcp.Description("Optional domain tags for categorization (e.g., 'combat', 'auth', 'critical')"),
+			mcp.WithStringItems(),
+		),
 		mcp.WithArray("edges",
 			mcp.Description("Relationships to other nodes. Structural edges (contains, imports, extends, implements) must not form cycles. Behavioral edges (calls, reads, writes, references, associated) may cycle. Always connect to related nodes you know exist"),
 			mcp.Items(map[string]any{
@@ -188,10 +192,34 @@ Always await the response from context_write before calling context_delete — d
 		),
 	)
 
+	// context_tag tool
+	tagTool := mcp.NewTool("context_tag",
+		mcp.WithDescription(`Bulk-tag nodes by semantic search query.
+
+WHEN TO USE: When you want to add a domain tag (e.g., "combat", "auth", "rendering") to all nodes matching a semantic query. This is faster than updating nodes one by one.
+
+HOW IT WORKS: The query is embedded and matched against node summaries. The tag is added to each matching node and persisted to disk.`),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Natural language query to find nodes to tag"),
+		),
+		mcp.WithString("tag",
+			mcp.Required(),
+			mcp.Description("The tag to add to matching nodes (e.g., 'combat', 'auth', 'critical')"),
+		),
+		mcp.WithString("namespace",
+			mcp.Description("Target namespace (defaults to 'default')"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of nodes to tag (defaults to 10)"),
+		),
+	)
+
 	s.mcpServer.AddTool(queryTool, s.engine.HandleContextQuery)
 	s.mcpServer.AddTool(writeTool, s.engine.HandleContextWrite)
 	s.mcpServer.AddTool(verifyTool, s.engine.HandleContextVerify)
 	s.mcpServer.AddTool(deleteTool, s.engine.HandleContextDelete)
+	s.mcpServer.AddTool(tagTool, s.engine.HandleContextTag)
 }
 
 // ListenStdio starts the MCP server on stdin/stdout. It blocks until the

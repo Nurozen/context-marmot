@@ -80,7 +80,8 @@ type Node struct {
 	ValidUntil  string `yaml:"valid_until,omitempty"`   // RFC3339 timestamp, set on soft-delete/supersede
 	SupersededBy string `yaml:"superseded_by,omitempty"` // node ID of the node that replaces this one
 	Source      Source `yaml:"source,omitempty"`
-	Edges     []Edge `yaml:"edges,omitempty"`
+	Edges     []Edge   `yaml:"edges,omitempty"`
+	Tags      []string `yaml:"tags,omitempty"`
 
 	// Body sections (not in YAML frontmatter).
 	Summary string `yaml:"-"`
@@ -99,7 +100,8 @@ type NodeMeta struct {
 	ID        string `yaml:"id"`
 	Type      string `yaml:"type"`
 	Namespace string `yaml:"namespace"`
-	Status    string `yaml:"status"`
+	Status    string   `yaml:"status"`
+	Tags      []string `yaml:"tags,omitempty"`
 	// FilePath is the on-disk path discovered during ListNodes. It may differ
 	// from NodePath(ID) when the frontmatter ID doesn't match the file location.
 	FilePath string `yaml:"-"`

@@ -169,6 +169,18 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	summary := req.GetString("summary", "")
 	nodeCtx := req.GetString("context", "")
 
+	// Parse tags.
+	var tags []string
+	if rawTags, ok := args["tags"]; ok {
+		tagBytes, err := json.Marshal(rawTags)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+		if err := json.Unmarshal(tagBytes, &tags); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+	}
+
 	// Parse edges.
 	var edges []node.Edge
 	if rawEdges, ok := args["edges"]; ok {
@@ -246,6 +258,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		Status:    node.StatusActive,
 		Source:    source,
 		Edges:     edges,
+		Tags:      tags,
 		Summary:   summary,
 		Context:   nodeCtx,
 	}
@@ -280,8 +293,13 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	// Determine whether this is a create or update before any mutation.
-	_, nodeExists := e.Graph.GetNode(id)
+	existingNode, nodeExists := e.Graph.GetNode(id)
 	isNew := !nodeExists
+
+	// For updates: if no new tags provided, keep existing tags.
+	if !isNew && len(tags) == 0 && len(existingNode.Tags) > 0 {
+		n.Tags = existingNode.Tags
+	}
 
 	// Set ValidFrom on first write (new node only).
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -345,13 +363,17 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	// Update embedding index.
+	tagStr := strings.Join(n.Tags, " ")
 	embedText := summary
+	if tagStr != "" {
+		embedText = summary + " " + tagStr
+	}
 	if nodeCtx != "" {
 		ctxSnip := nodeCtx
 		if len(ctxSnip) > 6000 {
 			ctxSnip = ctxSnip[:6000]
 		}
-		embedText = summary + "\n\n" + ctxSnip
+		embedText = embedText + "\n\n" + ctxSnip
 	}
 	if embedText != "" {
 		vec, err := e.Embedder.Embed(embedText)
@@ -569,6 +591,91 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 		NodeID:       id,
 		Status:       node.StatusSuperseded,
 		SupersededBy: supersededBy,
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+// ---------------------------------------------------------------------------
+// context_tag
+// ---------------------------------------------------------------------------
+
+// TagResult is the JSON response from context_tag.
+type TagResult struct {
+	Tag      string   `json:"tag"`
+	TaggedIDs []string `json:"tagged_ids"`
+	Count    int      `json:"count"`
+}
+
+// HandleContextTag bulk-tags nodes matching a semantic search query.
+func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query := req.GetString("query", "")
+	if query == "" {
+		return mcp.NewToolResultError("query parameter is required"), nil
+	}
+	tag := req.GetString("tag", "")
+	if tag == "" {
+		return mcp.NewToolResultError("tag parameter is required"), nil
+	}
+	namespace := req.GetString("namespace", "default")
+	limit := req.GetInt("limit", 10)
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+
+	// Embed the query.
+	queryVec, err := e.Embedder.Embed(query)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("embed query: %v", err)), nil
+	}
+
+	// Search for matching nodes.
+	results, err := e.EmbeddingStore.SearchActive(queryVec, limit, e.Embedder.Model())
+	if err != nil {
+		return mcp.NewToolResultJSON(TagResult{Tag: tag, TaggedIDs: []string{}, Count: 0})
+	}
+
+	mu := e.namespaceLock(namespace)
+	mu.Lock()
+	defer mu.Unlock()
+
+	var taggedIDs []string
+	for _, r := range results {
+		n, ok := e.Graph.GetNode(r.NodeID)
+		if !ok {
+			continue
+		}
+
+		// Check if tag already exists on the node.
+		hasTag := false
+		for _, t := range n.Tags {
+			if t == tag {
+				hasTag = true
+				break
+			}
+		}
+		if hasTag {
+			taggedIDs = append(taggedIDs, n.ID)
+			continue
+		}
+
+		// Add the tag.
+		n.Tags = append(n.Tags, tag)
+
+		// Persist to disk.
+		if err := e.NodeStore.SaveNode(n); err != nil {
+			continue
+		}
+
+		// Update in-memory graph.
+		_ = e.Graph.UpsertNode(n)
+
+		taggedIDs = append(taggedIDs, n.ID)
+	}
+
+	result := TagResult{
+		Tag:       tag,
+		TaggedIDs: taggedIDs,
+		Count:     len(taggedIDs),
 	}
 	return mcp.NewToolResultJSON(result)
 }
