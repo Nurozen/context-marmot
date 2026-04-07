@@ -27,6 +27,7 @@ func NewServer(engine *mcpserver.Engine, assets fs.FS) *Server {
 
 // registerRoutes wires all API endpoints using Go 1.22+ pattern routing.
 func (s *Server) registerRoutes() {
+	s.mux.HandleFunc("GET /api/graph/_all", s.handleGraphAll)
 	s.mux.HandleFunc("GET /api/graph/{namespace}", s.handleGraph)
 	s.mux.HandleFunc("GET /api/node/{namespace}/{id...}", s.handleNode)
 	s.mux.HandleFunc("PUT /api/node/{id...}", s.handleNodeUpdate)

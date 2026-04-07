@@ -33,17 +33,18 @@ type APIEdge struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	Relation string `json:"relation"`
-	Class    string `json:"class"` // "structural" or "behavioral"
+	Class    string `json:"class"` // "structural", "behavioral", or "bridge"
 }
 
-// GraphResponse is returned by the GET /api/graph/{namespace} endpoint.
+// GraphResponse is returned by the GET /api/graph/{namespace} and /api/graph/_all endpoints.
 type GraphResponse struct {
-	Namespace string        `json:"namespace"`
-	Nodes     []APINode     `json:"nodes"`
-	Edges     []APIEdge     `json:"edges"`
-	NodeCount int           `json:"node_count"`
-	EdgeCount int           `json:"edge_count"`
-	HeatPairs []APIHeatPair `json:"heat_pairs,omitempty"`
+	Namespace  string        `json:"namespace"`
+	Nodes      []APINode     `json:"nodes"`
+	Edges      []APIEdge     `json:"edges"`
+	NodeCount  int           `json:"node_count"`
+	EdgeCount  int           `json:"edge_count"`
+	HeatPairs  []APIHeatPair `json:"heat_pairs,omitempty"`
+	Namespaces []string      `json:"namespaces,omitempty"` // populated only for _all view
 }
 
 // APIHeatPair represents a co-access frequency pair.

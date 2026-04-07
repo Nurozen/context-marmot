@@ -1267,3 +1267,50 @@ textarea:focus-visible {
 #minimap {
   animation: fadeSlideIn 400ms var(--ease-out) 500ms both;
 }
+
+/* ── Bridge arcs — marmot tunnels ────────────────────────────── */
+#graph-svg .bridge-arc {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-opacity: 0.25;
+  stroke-dasharray: 12 6;
+  stroke-linecap: round;
+  transition: stroke-opacity 300ms ease;
+}
+
+#graph-svg .bridge-arc:hover {
+  stroke-opacity: 0.7;
+  stroke-width: 3;
+}
+
+#graph-svg .bridge-arc.dimmed {
+  stroke-opacity: 0.05;
+}
+
+#graph-svg .bridge-arc.highlighted {
+  stroke-opacity: 0.7;
+  stroke-width: 3;
+}
+
+/* ── Bridge node indicator ───────────────────────────────────── */
+#graph-svg .node.bridge-node circle {
+  stroke: var(--secondary);
+  stroke-width: 2.5;
+  stroke-dasharray: none;
+}
+
+/* ── Namespace watermark labels ──────────────────────────────── */
+#graph-svg .ns-label {
+  font-family: var(--font-sans);
+  font-size: 28px;
+  font-weight: 700;
+  fill: var(--text-muted);
+  opacity: 0.08;
+  text-anchor: middle;
+  dominant-baseline: central;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  pointer-events: none;
+  user-select: none;
+}

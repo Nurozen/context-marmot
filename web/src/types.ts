@@ -25,7 +25,7 @@ export interface APIEdge {
   source: string;
   target: string;
   relation: string;
-  class: 'structural' | 'behavioral';
+  class: 'structural' | 'behavioral' | 'bridge';
 }
 
 export interface GraphResponse {
@@ -35,6 +35,7 @@ export interface GraphResponse {
   node_count: number;
   edge_count: number;
   heat_pairs?: APIHeatPair[];
+  namespaces?: string[];
 }
 
 export interface APIHeatPair {

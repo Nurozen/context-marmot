@@ -114,6 +114,120 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleGraphAll returns the full graph across ALL namespaces, including
+// cross-namespace bridge edges discovered via NSManager.
+//
+// Query params:
+//
+//	include_superseded=true  include superseded nodes (default: active only)
+//	check_stale=true         compute source staleness per node (expensive)
+func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
+	includeSuperseded := r.URL.Query().Get("include_superseded") == "true"
+	checkStale := r.URL.Query().Get("check_stale") == "true"
+
+	var allNodes []*node.Node
+	if includeSuperseded {
+		allNodes = s.engine.Graph.AllNodes()
+	} else {
+		allNodes = s.engine.Graph.AllActiveNodes()
+	}
+
+	projectRoot := filepath.Dir(s.engine.MarmotDir)
+
+	// Collect unique namespaces from nodes.
+	nsSet := make(map[string]bool)
+	for _, n := range allNodes {
+		ns := n.Namespace
+		if ns == "" {
+			ns = "default"
+		}
+		nsSet[ns] = true
+	}
+	namespaces := make([]string, 0, len(nsSet))
+	for ns := range nsSet {
+		namespaces = append(namespaces, ns)
+	}
+
+	// If NSManager is available, also include namespaces from the manager.
+	if s.engine.NSManager != nil {
+		for name := range s.engine.NSManager.Namespaces {
+			if !nsSet[name] {
+				nsSet[name] = true
+				namespaces = append(namespaces, name)
+			}
+		}
+	}
+
+	resp := GraphResponse{
+		Namespace:  "_all",
+		Nodes:      make([]APINode, 0, len(allNodes)),
+		Edges:      make([]APIEdge, 0),
+		Namespaces: namespaces,
+	}
+
+	for _, n := range allNodes {
+		outEdges := s.engine.Graph.GetEdges(n.ID, graph.Outbound)
+		inEdges := s.engine.Graph.GetEdges(n.ID, graph.Inbound)
+
+		apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
+
+		if checkStale && n.Source.Path != "" {
+			status, err := verify.VerifyStaleness(n, projectRoot)
+			if err == nil && status.IsStale {
+				apiNode.IsStale = true
+			}
+		}
+
+		resp.Nodes = append(resp.Nodes, apiNode)
+
+		// Collect flat outbound edges (intra-namespace edges).
+		for _, e := range outEdges {
+			resp.Edges = append(resp.Edges, APIEdge{
+				Source:   n.ID,
+				Target:   e.Target,
+				Relation: string(e.Relation),
+				Class:    string(e.Class),
+			})
+		}
+	}
+
+	// Discover and add cross-namespace bridge edges.
+	if s.engine.NSManager != nil {
+		crossEdges, err := s.engine.NSManager.DiscoverCrossNamespaceEdges()
+		if err == nil {
+			for _, ce := range crossEdges {
+				sourceID := ce.SourceNamespace + "/" + ce.SourceNodeID
+				targetID := ce.TargetNamespace + "/" + ce.TargetNodeID
+				resp.Edges = append(resp.Edges, APIEdge{
+					Source:   sourceID,
+					Target:   targetID,
+					Relation: ce.Relation,
+					Class:    "bridge",
+				})
+			}
+		}
+	}
+
+	resp.NodeCount = len(resp.Nodes)
+	resp.EdgeCount = len(resp.Edges)
+
+	// Include heat pairs if available.
+	if s.engine.HeatMap != nil {
+		s.engine.HeatMap.RecordCoAccess(nil, 0) // no-op, just to ensure lock safety
+		for _, p := range s.engine.HeatMap.Pairs {
+			resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
+				A:      p.A,
+				B:      p.B,
+				Weight: p.Weight,
+				Hits:   p.Hits,
+				Last:   p.Last,
+			})
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleNode returns a single node by namespace and ID.
 func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 	namespace := r.PathValue("namespace")

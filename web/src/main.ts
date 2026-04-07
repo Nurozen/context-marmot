@@ -1,4 +1,4 @@
-import { fetchGraph, fetchNamespaces } from './api';
+import { fetchGraph, fetchGraphAll, fetchNamespaces } from './api';
 import { GraphView } from './graph-view';
 import { renderLegend } from './legend';
 import { DetailPanel } from './detail-panel';
@@ -109,6 +109,12 @@ async function init(): Promise<void> {
       opt.textContent = `${ns.name} (${ns.node_count})`;
       select.appendChild(opt);
     });
+    if (namespaces.length > 1) {
+      const allOpt = document.createElement('option');
+      allOpt.value = '_all';
+      allOpt.textContent = `All namespaces (${namespaces.reduce((s, n) => s + n.node_count, 0)})`;
+      select.prepend(allOpt);
+    }
     if (namespaces.length > 0) {
       currentNamespace = namespaces[0].name;
       select.value = currentNamespace;
@@ -142,7 +148,11 @@ async function loadGraph(): Promise<void> {
   const includeSuperseded =
     (document.getElementById('superseded-toggle') as HTMLInputElement)?.checked || false;
   try {
-    currentData = await fetchGraph(currentNamespace, includeSuperseded);
+    if (currentNamespace === '_all') {
+      currentData = await fetchGraphAll(includeSuperseded);
+    } else {
+      currentData = await fetchGraph(currentNamespace, includeSuperseded);
+    }
     console.log(
       'Graph loaded:',
       currentData.node_count,
@@ -158,6 +168,13 @@ async function loadGraph(): Promise<void> {
     /* Update tag filter chips */
     const tagsInGraph = [...new Set(currentData.nodes.flatMap((n) => n.tags ?? []))].sort();
     filters.updateAvailableTags(tagsInGraph);
+
+    /* Auto-select namespace grouping for the all-namespaces view */
+    if (currentNamespace === '_all') {
+      const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
+      groupBySelect.value = 'namespace';
+      graphView?.setGroupBy('namespace');
+    }
 
     /* Render graph */
     graphView?.update(currentData);

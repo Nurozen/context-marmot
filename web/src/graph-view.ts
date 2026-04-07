@@ -27,7 +27,7 @@ interface SimNode extends d3.SimulationNodeDatum {
 
 interface SimLink extends d3.SimulationLinkDatum<SimNode> {
   relation: string;
-  class: 'structural' | 'behavioral';
+  class: 'structural' | 'behavioral' | 'bridge';
 }
 
 /* ------------------------------------------------------------------ */
@@ -53,7 +53,9 @@ export class GraphView {
   private container: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private defs: d3.Selection<SVGDefsElement, unknown, HTMLElement, unknown>;
 
+  private nsLabelGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private linkGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+  private bridgeGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private heatGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private nodeGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 
@@ -66,7 +68,11 @@ export class GraphView {
   private currentTransform: d3.ZoomTransform = d3.zoomIdentity;
   private zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown>;
   private visibleTypes: Set<string> = new Set();
-  private edgeClassFilter: 'all' | 'structural' | 'behavioral' = 'all';
+  private edgeClassFilter: 'all' | 'structural' | 'behavioral' | 'bridge' = 'all';
+  private bridgeNodeIds: Set<string> = new Set();
+  private activeNamespaces: string[] = [];
+  private bridgeLinks: SimLink[] = [];
+  private normalLinks: SimLink[] = [];
   private heatEnabled = false;
   private heatPairs: APIHeatPair[] = [];
   private groupBy: 'none' | 'type' | 'namespace' | 'tag' = 'type';
@@ -98,7 +104,9 @@ export class GraphView {
 
     /* Main transform group */
     this.container = this.svg.append('g').attr('class', 'graph-layer');
+    this.nsLabelGroup = this.container.append('g').attr('class', 'ns-labels');
     this.linkGroup = this.container.append('g').attr('class', 'links');
+    this.bridgeGroup = this.container.append('g').attr('class', 'bridge-arcs');
     this.heatGroup = this.container.append('g').attr('class', 'heat-links');
     this.nodeGroup = this.container.append('g').attr('class', 'nodes');
 
@@ -189,6 +197,22 @@ export class GraphView {
         class: e.class,
       }));
 
+    /* Split links into normal and bridge */
+    this.normalLinks = this.links.filter((l) => l.class !== 'bridge');
+    this.bridgeLinks = this.links.filter((l) => l.class === 'bridge');
+
+    /* Compute set of node IDs participating in bridge edges */
+    this.bridgeNodeIds = new Set<string>();
+    for (const bl of this.bridgeLinks) {
+      const srcId = typeof bl.source === 'object' ? (bl.source as SimNode).id : (bl.source as string);
+      const tgtId = typeof bl.target === 'object' ? (bl.target as SimNode).id : (bl.target as string);
+      this.bridgeNodeIds.add(srcId);
+      this.bridgeNodeIds.add(tgtId);
+    }
+
+    /* Store active namespaces */
+    this.activeNamespaces = data.namespaces ?? [];
+
     /* Populate visible types */
     this.visibleTypes = new Set(data.nodes.map((n) => n.type));
 
@@ -212,13 +236,20 @@ export class GraphView {
       .force('center', d3.forceCenter(width / 2, height / 2).strength(0.5))
       .force('collide', d3.forceCollide<SimNode>().radius((d) => d.radius + 2));
 
+    /* Auto-group by namespace when multi-namespace view */
+    if (this.activeNamespaces.length > 1) {
+      this.groupBy = 'namespace';
+    }
+
     this.applyGroupForces(width, height);
 
     this.simulation.alpha(1).restart();
 
     this.renderLinks();
+    this.renderBridgeArcs();
     this.renderHeatLinks();
     this.renderNodes();
+    this.renderNsLabels();
   }
 
   filterByTypes(types: Set<string>): void {
@@ -235,7 +266,7 @@ export class GraphView {
     this.reheat(0.3);
   }
 
-  filterByEdgeClass(cls: 'all' | 'structural' | 'behavioral'): void {
+  filterByEdgeClass(cls: 'all' | 'structural' | 'behavioral' | 'bridge'): void {
     this.edgeClassFilter = cls;
     this.applyVisibility();
   }
@@ -289,7 +320,7 @@ export class GraphView {
   private renderLinks(): void {
     const linkSel = this.linkGroup
       .selectAll<SVGLineElement, SimLink>('.link')
-      .data(this.links, (d) => `${(d.source as SimNode).id ?? d.source}-${(d.target as SimNode).id ?? d.target}-${d.relation}`);
+      .data(this.normalLinks, (d) => `${(d.source as SimNode).id ?? d.source}-${(d.target as SimNode).id ?? d.target}-${d.relation}`);
 
     linkSel.exit().remove();
 
@@ -336,6 +367,107 @@ export class GraphView {
     enter.merge(heatSel).classed('visible', true);
   }
 
+  /** Compute a quadratic Bezier path string for a bridge arc that curves upward. */
+  private bridgeArcPath(d: SimLink): string {
+    const src = d.source as SimNode;
+    const tgt = d.target as SimNode;
+    const x1 = src.x ?? 0;
+    const y1 = src.y ?? 0;
+    const x2 = tgt.x ?? 0;
+    const y2 = tgt.y ?? 0;
+
+    /* Midpoint */
+    const mx = (x1 + x2) / 2;
+    const my = (y1 + y2) / 2;
+
+    /* Distance between endpoints */
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+
+    /* Perpendicular offset (40% of distance, arcing upward) */
+    const offset = dist * 0.4;
+    /* Normal vector perpendicular to the line */
+    const nx = -dy / dist;
+    const ny = dx / dist;
+
+    /* Control point — offset in the direction that curves "upward" (negative y) */
+    const cpx = mx + nx * offset;
+    const cpy = my + ny * offset;
+
+    return `M ${x1},${y1} Q ${cpx},${cpy} ${x2},${y2}`;
+  }
+
+  private renderBridgeArcs(): void {
+    const arcSel = this.bridgeGroup
+      .selectAll<SVGPathElement, SimLink>('.bridge-arc')
+      .data(this.bridgeLinks, (d) => {
+        const srcId = typeof d.source === 'object' ? (d.source as SimNode).id : (d.source as string);
+        const tgtId = typeof d.target === 'object' ? (d.target as SimNode).id : (d.target as string);
+        return `${srcId}-${tgtId}-${d.relation}`;
+      });
+
+    arcSel.exit().remove();
+
+    const enter = arcSel
+      .enter()
+      .append('path')
+      .attr('class', 'bridge-arc')
+      .attr('d', (d) => this.bridgeArcPath(d));
+
+    enter.merge(arcSel).attr('d', (d) => this.bridgeArcPath(d));
+  }
+
+  private renderNsLabels(): void {
+    if (this.activeNamespaces.length <= 1) {
+      this.nsLabelGroup.selectAll('.ns-label').remove();
+      return;
+    }
+
+    const labelSel = this.nsLabelGroup
+      .selectAll<SVGTextElement, string>('.ns-label')
+      .data(this.activeNamespaces, (d) => d);
+
+    labelSel.exit().remove();
+
+    labelSel
+      .enter()
+      .append('text')
+      .attr('class', 'ns-label')
+      .text((d) => d);
+    /* Positions are set during tick() via updateNsLabelPositions */
+  }
+
+  /** Recompute centroid positions of namespace labels based on current node positions. */
+  private updateNsLabelPositions(): void {
+    if (this.activeNamespaces.length <= 1) return;
+
+    /* Compute centroid per namespace */
+    const nsCentroids = new Map<string, { sx: number; sy: number; count: number }>();
+    for (const n of this.nodes) {
+      if (n.x == null || n.y == null) continue;
+      let entry = nsCentroids.get(n.namespace);
+      if (!entry) {
+        entry = { sx: 0, sy: 0, count: 0 };
+        nsCentroids.set(n.namespace, entry);
+      }
+      entry.sx += n.x;
+      entry.sy += n.y;
+      entry.count += 1;
+    }
+
+    this.nsLabelGroup
+      .selectAll<SVGTextElement, string>('.ns-label')
+      .attr('x', (d) => {
+        const c = nsCentroids.get(d);
+        return c && c.count > 0 ? c.sx / c.count : 0;
+      })
+      .attr('y', (d) => {
+        const c = nsCentroids.get(d);
+        return c && c.count > 0 ? c.sy / c.count : 0;
+      });
+  }
+
   private renderNodes(): void {
     const nodeSel = this.nodeGroup
       .selectAll<SVGGElement, SimNode>('.node')
@@ -347,6 +479,7 @@ export class GraphView {
       let cls = 'node';
       if (d.is_stale) cls += ' stale';
       if (d.superseded_by) cls += ' superseded';
+      if (this.bridgeNodeIds.has(d.id)) cls += ' bridge-node';
       return cls;
     });
 
@@ -447,11 +580,22 @@ export class GraphView {
         .classed('dimmed', !isConnected)
         .classed('highlighted', isConnected);
     });
+
+    /* Bridge arcs */
+    this.bridgeGroup.selectAll<SVGPathElement, SimLink>('.bridge-arc').each(function (l) {
+      const srcId = typeof l.source === 'object' ? (l.source as SimNode).id : (l.source as string);
+      const tgtId = typeof l.target === 'object' ? (l.target as SimNode).id : (l.target as string);
+      const isConnected = srcId === d.id || tgtId === d.id;
+      d3.select(this)
+        .classed('dimmed', !isConnected)
+        .classed('highlighted', isConnected);
+    });
   }
 
   private clearHighlight(): void {
     this.nodeGroup.selectAll('.node').classed('dimmed', false);
     this.linkGroup.selectAll('.link').classed('dimmed', false).classed('highlighted', false);
+    this.bridgeGroup.selectAll('.bridge-arc').classed('dimmed', false).classed('highlighted', false);
   }
 
   /* ---------------------------------------------------------------- */
@@ -509,6 +653,11 @@ export class GraphView {
       .attr('x2', (d) => ((d.target as SimNode).x ?? 0))
       .attr('y2', (d) => ((d.target as SimNode).y ?? 0));
 
+    /* Bridge arcs — recompute Bezier paths */
+    this.bridgeGroup
+      .selectAll<SVGPathElement, SimLink>('.bridge-arc')
+      .attr('d', (d) => this.bridgeArcPath(d));
+
     /* Heat links */
     if (this.heatEnabled) {
       const nodeMap = new Map<string, SimNode>();
@@ -521,6 +670,9 @@ export class GraphView {
         .attr('x2', (d) => nodeMap.get(d.b)?.x ?? 0)
         .attr('y2', (d) => nodeMap.get(d.b)?.y ?? 0);
     }
+
+    /* Namespace watermark labels */
+    this.updateNsLabelPositions();
 
     /* Nodes */
     this.nodeGroup
@@ -577,6 +729,18 @@ export class GraphView {
     );
 
     this.linkGroup.selectAll<SVGLineElement, SimLink>('.link').attr('display', (d) => {
+      const srcId = typeof d.source === 'object' ? (d.source as SimNode).id : (d.source as string);
+      const tgtId = typeof d.target === 'object' ? (d.target as SimNode).id : (d.target as string);
+      const srcNode = this.nodes.find((n) => n.id === srcId);
+      const tgtNode = this.nodes.find((n) => n.id === tgtId);
+      if (!srcNode || !tgtNode) return 'none';
+      if (!this.isNodeVisible(srcNode) || !this.isNodeVisible(tgtNode)) return 'none';
+      if (this.edgeClassFilter !== 'all' && d.class !== this.edgeClassFilter) return 'none';
+      return null;
+    });
+
+    /* Bridge arcs visibility */
+    this.bridgeGroup.selectAll<SVGPathElement, SimLink>('.bridge-arc').attr('display', (d) => {
       const srcId = typeof d.source === 'object' ? (d.source as SimNode).id : (d.source as string);
       const tgtId = typeof d.target === 'object' ? (d.target as SimNode).id : (d.target as string);
       const srcNode = this.nodes.find((n) => n.id === srcId);

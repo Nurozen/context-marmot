@@ -1,4 +1,4 @@
-import type { GraphResponse, NamespaceInfo, SearchResult, SummaryInfo } from './types';
+import type { BridgeInfo, GraphResponse, NamespaceInfo, SearchResult, SummaryInfo } from './types';
 
 export async function fetchGraph(
   namespace: string,
@@ -36,6 +36,23 @@ export async function fetchSummary(namespace: string): Promise<SummaryInfo> {
   const res = await fetch(`/api/summary/${encodeURIComponent(namespace)}`);
   if (!res.ok) throw new Error(`Failed to fetch summary: ${res.statusText}`);
   return res.json();
+}
+
+export async function fetchGraphAll(includeSuperseded = false): Promise<GraphResponse> {
+  const params = new URLSearchParams();
+  if (includeSuperseded) params.set('include_superseded', 'true');
+  const qs = params.toString();
+  const url = `/api/graph/_all${qs ? '?' + qs : ''}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`fetchGraphAll: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchBridges(): Promise<BridgeInfo[]> {
+  const res = await fetch('/api/bridges');
+  if (!res.ok) throw new Error(`fetchBridges: ${res.status}`);
+  const data = await res.json();
+  return data.bridges ?? [];
 }
 
 export async function updateNode(
