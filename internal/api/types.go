@@ -18,7 +18,7 @@ type APINode struct {
 	Edges        []APIEdge  `json:"edges"`
 	EdgeCount    int        `json:"edge_count"` // total in+out degree
 	IsStale      bool       `json:"is_stale"`
-	Tags         []string   `json:"tags,omitempty"`
+	Tags         []string   `json:"tags"`
 }
 
 // APISource locates the original source code that a node was derived from.
@@ -104,9 +104,9 @@ type SummaryResponse struct {
 
 // NodeUpdateRequest is the JSON body for PUT /api/node/{id...}.
 type NodeUpdateRequest struct {
-	Summary string   `json:"summary,omitempty"`
-	Context string   `json:"context,omitempty"`
-	Tags    []string `json:"tags,omitempty"`
+	Summary string    `json:"summary,omitempty"`
+	Context string    `json:"context,omitempty"`
+	Tags    *[]string `json:"tags,omitempty"`
 }
 
 // NodeUpdateResponse is returned by PUT /api/node/{id...}.

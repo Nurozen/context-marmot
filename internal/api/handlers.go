@@ -166,7 +166,7 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Summary == "" && req.Context == "" && len(req.Tags) == 0 {
+	if req.Summary == "" && req.Context == "" && req.Tags == nil {
 		writeError(w, http.StatusBadRequest, "at least one of summary, context, or tags must be provided")
 		return
 	}
@@ -193,8 +193,8 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Context != "" {
 		diskNode.Context = req.Context
 	}
-	if len(req.Tags) > 0 {
-		diskNode.Tags = req.Tags
+	if req.Tags != nil {
+		diskNode.Tags = *req.Tags
 	}
 
 	// Persist to disk.
@@ -471,6 +471,10 @@ func matchNamespace(nodeNS, requested string) bool {
 
 // nodeToAPI converts a domain node to its API representation.
 func nodeToAPI(n *node.Node, edgeCount int) APINode {
+	tags := n.Tags
+	if tags == nil {
+		tags = []string{}
+	}
 	apiNode := APINode{
 		ID:           n.ID,
 		Type:         n.Type,
@@ -483,7 +487,7 @@ func nodeToAPI(n *node.Node, edgeCount int) APINode {
 		Context:      n.Context,
 		EdgeCount:    edgeCount,
 		Edges:        make([]APIEdge, 0, len(n.Edges)),
-		Tags:         n.Tags,
+		Tags:         tags,
 	}
 
 	if n.Source.Path != "" {

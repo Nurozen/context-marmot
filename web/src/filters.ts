@@ -81,11 +81,23 @@ export class Filters {
     this.renderTagChips(tags);
   }
 
-  getActiveTags(): Set<string> {
+  getActiveTags(): Set<string> | null {
+    // If no tags are known, return null (no filtering)
+    if (this.tagFilters.size === 0) return null;
+
     const active = new Set<string>();
+    let allActive = true;
     for (const [tag, enabled] of this.tagFilters) {
-      if (enabled) active.add(tag);
+      if (enabled) {
+        active.add(tag);
+      } else {
+        allActive = false;
+      }
     }
+
+    // If every tag is checked, treat as "no tag filter" so untagged nodes remain visible
+    if (allActive) return null;
+
     return active;
   }
 

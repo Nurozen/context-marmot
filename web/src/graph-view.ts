@@ -459,11 +459,26 @@ export class GraphView {
   /* ---------------------------------------------------------------- */
 
   private showTooltip(event: MouseEvent, d: SimNode): void {
-    this.tooltip.html(
-      `<div class="tt-title">${shortLabel(d.id)}</div>` +
-        `<div class="tt-type">${d.type} &middot; ${d.edge_count} edges</div>` +
-        `<div class="tt-summary">${d.summary || d.id}</div>`,
-    );
+    const el = this.tooltip.node();
+    if (!el) return;
+
+    el.textContent = '';
+
+    const title = document.createElement('div');
+    title.className = 'tt-title';
+    title.textContent = shortLabel(d.id);
+    el.appendChild(title);
+
+    const typeInfo = document.createElement('div');
+    typeInfo.className = 'tt-type';
+    typeInfo.textContent = `${d.type} \u00B7 ${d.edge_count} edges`;
+    el.appendChild(typeInfo);
+
+    const summary = document.createElement('div');
+    summary.className = 'tt-summary';
+    summary.textContent = d.summary || d.id;
+    el.appendChild(summary);
+
     this.tooltip.classed('visible', true);
     this.moveTooltip(event);
   }

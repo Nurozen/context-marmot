@@ -176,8 +176,16 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
 		}
-		if err := json.Unmarshal(tagBytes, &tags); err != nil {
+		var rawTagSlice []string
+		if err := json.Unmarshal(tagBytes, &rawTagSlice); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+		// Filter out empty/whitespace-only tags.
+		for _, t := range rawTagSlice {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				tags = append(tags, t)
+			}
 		}
 	}
 
@@ -612,7 +620,7 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 	if query == "" {
 		return mcp.NewToolResultError("query parameter is required"), nil
 	}
-	tag := req.GetString("tag", "")
+	tag := strings.TrimSpace(req.GetString("tag", ""))
 	if tag == "" {
 		return mcp.NewToolResultError("tag parameter is required"), nil
 	}
@@ -645,6 +653,11 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 			continue
 		}
 
+		// Filter to requested namespace.
+		if !matchNamespace(n.Namespace, namespace) {
+			continue
+		}
+
 		// Check if tag already exists on the node.
 		hasTag := false
 		for _, t := range n.Tags {
@@ -658,18 +671,26 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 			continue
 		}
 
-		// Add the tag.
-		n.Tags = append(n.Tags, tag)
-
-		// Persist to disk.
-		if err := e.NodeStore.SaveNode(n); err != nil {
+		// Load from disk to get the full node (including body sections)
+		// and avoid mutating the shared in-memory graph pointer directly.
+		path := e.NodeStore.NodePath(n.ID)
+		diskNode, err := e.NodeStore.LoadNode(path)
+		if err != nil {
 			continue
 		}
 
-		// Update in-memory graph.
-		_ = e.Graph.UpsertNode(n)
+		// Add the tag to the disk-loaded copy.
+		diskNode.Tags = append(diskNode.Tags, tag)
 
-		taggedIDs = append(taggedIDs, n.ID)
+		// Persist to disk first — if this fails, in-memory state stays clean.
+		if err := e.NodeStore.SaveNode(diskNode); err != nil {
+			continue
+		}
+
+		// Update in-memory graph only after successful disk write.
+		_ = e.Graph.UpsertNode(diskNode)
+
+		taggedIDs = append(taggedIDs, diskNode.ID)
 	}
 
 	result := TagResult{
@@ -678,6 +699,21 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 		Count:     len(taggedIDs),
 	}
 	return mcp.NewToolResultJSON(result)
+}
+
+// matchNamespace returns true if the node namespace matches the requested one.
+// Treats empty namespace and "default" as equivalent.
+func matchNamespace(nodeNS, requested string) bool {
+	if nodeNS == requested {
+		return true
+	}
+	if requested == "default" && nodeNS == "" {
+		return true
+	}
+	if requested == "" && nodeNS == "default" {
+		return true
+	}
+	return false
 }
 
 // sha256Hex returns the hex-encoded SHA-256 hash of s.
