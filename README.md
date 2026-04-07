@@ -403,6 +403,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Static analysis indexer (Phase 17): Go AST indexer (packages, functions, methods, types, interfaces), TypeScript regex-based indexer (classes, interfaces, functions, type aliases), generic file indexer (30+ extensions), `.gitignore` support, incremental indexing with CRUD classification, `marmot index <path>` CLI integration
 - Graph visualization frontend (Phase 19): embedded D3 web UI served by `marmot ui` with filters, search, heat overlay, minimap, legend, keyboard shortcuts, and inline summary/context editing
 - Node tags & domain clustering (Phase 20): many-to-many domain tags on nodes, `context_tag` MCP tool for bulk-tagging via semantic search, graph grouping and filtering by tag, tag badges in detail panel
+- Multi-namespace graph & bridge visualization (Phase 21): "All Namespaces" view shows cross-namespace bridges as curved Bezier arcs ("marmot tunnels"); each namespace forms a distinct island with watermark labels; bridge node indicators and hover highlighting
 
 ### Known MVP limitations
 
@@ -411,7 +412,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), and node tags + domain clustering (Phase 20) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), node tags + domain clustering (Phase 20), and multi-namespace bridge visualization (Phase 21) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

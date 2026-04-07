@@ -582,6 +582,22 @@ Tags provide many-to-many domain-level categorization for nodes, enabling semant
 - [x] Filter sidebar: clickable tag filter chips
 - [x] Updated transport test for 5 MCP tools
 
+## Phase 21: Multi-Namespace Graph & Bridge Visualization — COMPLETE (2026-04-07)
+
+Multi-namespace view shows all namespaces as distant islands on the same canvas, with cross-namespace bridge edges rendered as curved Bezier arcs ("marmot tunnels").
+
+- [x] New `GET /api/graph/_all` endpoint — returns nodes from all namespaces plus bridge edges
+- [x] `GraphResponse.Namespaces` field for multi-namespace metadata
+- [x] Bridge edges discovered via `DiscoverCrossNamespaceEdges()`, class: "bridge"
+- [x] "All namespaces" option in namespace selector (when 2+ namespaces exist)
+- [x] Bridge arcs: quadratic Bezier curves with 40% perpendicular offset, amber dashed stroke
+- [x] Bridge node indicator: sage-green ring on nodes participating in bridge edges
+- [x] Namespace watermark labels: 28px uppercase text at island centroids, 8% opacity
+- [x] Auto-switches to namespace grouping in all-namespaces view
+- [x] Edge class filter supports 'bridge' value
+- [x] Bridge arc hover highlighting with neighbor dimming
+- [x] `fetchGraphAll()` and `fetchBridges()` API functions in frontend
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.
