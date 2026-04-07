@@ -81,6 +81,12 @@ async function init(): Promise<void> {
     graphView?.setHeatOverlay(heatToggle.checked, currentData?.heat_pairs);
   });
 
+  /* ── Group-by selector ────────────────────────────────────────── */
+  const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
+  groupBySelect.addEventListener('change', () => {
+    graphView?.setGroupBy(groupBySelect.value as 'none' | 'type' | 'namespace');
+  });
+
   /* ── Superseded toggle reloads graph ──────────────────────────── */
   document.getElementById('superseded-toggle')?.addEventListener('change', () => {
     void loadGraph();

@@ -68,6 +68,7 @@ export class GraphView {
   private edgeClassFilter: 'all' | 'structural' | 'behavioral' = 'all';
   private heatEnabled = false;
   private heatPairs: APIHeatPair[] = [];
+  private groupBy: 'none' | 'type' | 'namespace' = 'type';
 
   /* Minimap & heat overlay */
   private minimap: Minimap | null = null;
@@ -192,9 +193,6 @@ export class GraphView {
     /* Heat pairs */
     this.heatPairs = data.heat_pairs ?? [];
 
-    /* Namespace centroids for clustering */
-    const nsCentroids = this.namespaceCentroids(width, height);
-
     /* Dynamic charge based on node count */
     const charge = this.nodes.length > 200 ? -150 : this.nodes.length > 80 ? -200 : -300;
 
@@ -210,17 +208,11 @@ export class GraphView {
       )
       .force('charge', d3.forceManyBody<SimNode>().strength(charge))
       .force('center', d3.forceCenter(width / 2, height / 2).strength(0.5))
-      .force('collide', d3.forceCollide<SimNode>().radius((d) => d.radius + 2))
-      .force(
-        'x',
-        d3.forceX<SimNode>((d) => nsCentroids.get(d.namespace)?.x ?? width / 2).strength(0.08),
-      )
-      .force(
-        'y',
-        d3.forceY<SimNode>((d) => nsCentroids.get(d.namespace)?.y ?? height / 2).strength(0.08),
-      )
-      .alpha(1)
-      .restart();
+      .force('collide', d3.forceCollide<SimNode>().radius((d) => d.radius + 2));
+
+    this.applyGroupForces(width, height);
+
+    this.simulation.alpha(1).restart();
 
     this.renderLinks();
     this.renderHeatLinks();
@@ -577,28 +569,62 @@ export class GraphView {
     return { width: el.clientWidth || 800, height: el.clientHeight || 600 };
   }
 
-  private namespaceCentroids(
+  /** Compute centroid positions for a set of group keys arranged in a circle. */
+  private groupCentroids(
+    keys: string[],
     width: number,
     height: number,
   ): Map<string, { x: number; y: number }> {
-    const namespaces = [...new Set(this.nodes.map((n) => n.namespace))];
     const map = new Map<string, { x: number; y: number }>();
     const cx = width / 2;
     const cy = height / 2;
-    const r = Math.min(width, height) * 0.25;
+    const r = Math.min(width, height) * 0.28;
 
-    namespaces.forEach((ns, i) => {
-      if (namespaces.length === 1) {
-        map.set(ns, { x: cx, y: cy });
+    keys.forEach((key, i) => {
+      if (keys.length === 1) {
+        map.set(key, { x: cx, y: cy });
       } else {
-        const angle = (2 * Math.PI * i) / namespaces.length;
-        map.set(ns, {
+        const angle = (2 * Math.PI * i) / keys.length - Math.PI / 2;
+        map.set(key, {
           x: cx + r * Math.cos(angle),
           y: cy + r * Math.sin(angle),
         });
       }
     });
     return map;
+  }
+
+  /** Apply forceX/forceY based on the current groupBy setting. */
+  private applyGroupForces(width: number, height: number): void {
+    const cx = width / 2;
+    const cy = height / 2;
+
+    if (this.groupBy === 'none') {
+      this.simulation
+        .force('x', d3.forceX<SimNode>(cx).strength(0.04))
+        .force('y', d3.forceY<SimNode>(cy).strength(0.04));
+      return;
+    }
+
+    const keyFn = this.groupBy === 'type'
+      ? (d: SimNode) => d.type
+      : (d: SimNode) => d.namespace;
+
+    const keys = [...new Set(this.nodes.map(keyFn))].sort();
+    const centroids = this.groupCentroids(keys, width, height);
+    const strength = this.groupBy === 'type' ? 0.15 : 0.08;
+
+    this.simulation
+      .force('x', d3.forceX<SimNode>((d) => centroids.get(keyFn(d))?.x ?? cx).strength(strength))
+      .force('y', d3.forceY<SimNode>((d) => centroids.get(keyFn(d))?.y ?? cy).strength(strength));
+  }
+
+  /** Change the grouping mode and reheat the simulation. */
+  setGroupBy(mode: 'none' | 'type' | 'namespace'): void {
+    this.groupBy = mode;
+    const { width, height } = this.dimensions();
+    this.applyGroupForces(width, height);
+    this.reheat(0.8);
   }
 
   private reheat(alpha: number): void {

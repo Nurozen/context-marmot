@@ -18,6 +18,11 @@
         <input type="text" id="search-input" placeholder="Search nodes… (press /)" />
       </div>
       <div class="toolbar-right">
+        <select id="groupby-select" title="Group nodes by">
+          <option value="none">No grouping</option>
+          <option value="type" selected>Group by type</option>
+          <option value="namespace">Group by namespace</option>
+        </select>
         <label class="toggle"><input type="checkbox" id="heat-toggle" /> Heat</label>
         <label class="toggle"><input type="checkbox" id="superseded-toggle" /> Superseded</label>
       </div>

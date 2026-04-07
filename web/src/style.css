@@ -164,7 +164,8 @@ html, body {
 }
 
 /* ── Form Controls (shared) ───────────────────────────────────── */
-#namespace-select {
+#namespace-select,
+#groupby-select {
   height: 30px;
   padding: 0 10px;
   font-size: 11px;
@@ -185,11 +186,13 @@ html, body {
   padding-right: 26px;
 }
 
-#namespace-select:hover {
+#namespace-select:hover,
+#groupby-select:hover {
   border-color: rgba(255, 255, 255, 0.15);
 }
 
-#namespace-select:focus {
+#namespace-select:focus,
+#groupby-select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
