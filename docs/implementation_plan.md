@@ -11,7 +11,7 @@
 - **Embedding Index**: SQLite (Go-side KNN search)
 - **LLM Provider**: Anthropic (Haiku-class for CRUD classification + summary generation)
 - **Visualization (initial)**: Obsidian (open `.marmot/` as vault — zero integration needed)
-- **Visualization (future)**: TypeScript + Vite + D3.js web UI (Phase 19), embedded in Go binary via `go:embed`, served by `marmot ui`
+- **Visualization**: TypeScript + Vite + D3.js web UI (Phase 19), embedded in Go binary via `go:embed`, served by `marmot ui`
 - **Protocol**: MCP (Model Context Protocol)
 - **Versioning**: Git (native, no wrapper library)
 - **On-disk format**: YAML frontmatter + Markdown + `[[wikilinks]]` (Obsidian-compatible)

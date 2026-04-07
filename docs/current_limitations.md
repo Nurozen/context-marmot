@@ -92,25 +92,33 @@ Users manage `.marmot/` in git the same way they manage any other directory — 
 
 **Resolution:** Phase 17 (Static Analysis Indexer). Implements Go and TypeScript AST parsers that produce nodes with correct types and edge classifications. Includes a generic file-level indexer for unsupported languages. Supports incremental indexing (only re-index changed files) and integrates with the CRUD classifier for deduplication.
 
-### No REST/WebSocket API
+### ~~No REST/WebSocket API~~ --- Resolved in Phase 16
 
-**What:** The only programmatic interfaces are MCP (stdio transport) and the CLI. There is no HTTP API.
+HTTP API is implemented via `marmot ui`:
+- `GET /api/graph/{namespace}`
+- `GET /api/namespaces`
+- `GET /api/node/{namespace}/{id...}`
+- `PUT /api/node/{id...}`
+- `GET /api/search?q=...`
+- `GET /api/heat/{namespace}`
+- `GET /api/bridges`
+- `GET /api/summary/{namespace}`
 
-**Why:** Intentional MVP scoping. MCP is the primary agent interface and sufficient for validating the core hypothesis.
+WebSocket live updates remain deferred.
 
-**Impact:** Custom UIs, dashboards, or non-MCP integrations cannot consume graph data programmatically. The only visualization option is opening the `.marmot/` vault in Obsidian.
+**Impact:** Custom UIs and dashboards can now consume graph data programmatically over HTTP.
 
-**Resolution:** Phase 16 (REST / WebSocket API). Adds HTTP endpoints for graph queries, node detail, search, heat map data, namespace listing, and bridge listing. WebSocket endpoint for live graph update push. CORS support for local development.
+**Status:** Complete (2026-04-05). CORS support for local development is included.
 
-### No custom web UI
+### ~~No custom web UI~~ --- Resolved in Phase 19
 
-**What:** Graph visualization is Obsidian-only. There is no dedicated ContextMarmot web interface.
+Graph visualization now includes a dedicated web frontend (TypeScript + Vite + D3), embedded in the Go binary and served by `marmot ui`.
 
-**Why:** Intentional deferral. Obsidian provides graph visualization, backlinks, and search for free by opening `.marmot/` as a vault. A custom UI is unnecessary until Obsidian no longer meets visualization needs.
+Implemented capabilities include force-directed graph layout, node/edge filtering, search + fly-to, heat overlay, minimap, legend, keyboard shortcuts, and inline summary/context editing.
 
-**Impact:** Users must have Obsidian installed for visual graph exploration. There is no agent-specific view, no heat map overlay, and no interactive traversal UI. Obsidian's graph view does not distinguish between structural and behavioral edges or show relevance scores.
+Deferred items: containment collapse/expand, superseded-node toggle, staleness ring indicators.
 
-**Resolution:** Phase 19 (Custom Visualization Frontend, deferred). TypeScript + Vite application using Cytoscape.js, consuming the REST/WebSocket API from Phase 16. Includes node coloring by type, edge styling by relation, heat map overlay, staleness indicators, and namespace switching.
+**Status:** Complete (2026-04-05).
 
 ---
 

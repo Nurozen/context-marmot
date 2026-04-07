@@ -89,7 +89,8 @@ consumers are swappable frontends that read it in different ways.
 | Consumer | How it reads | When to use |
 |----------|-------------|-------------|
 | **Obsidian** | Opens `.marmot/` as a vault. Sees wikilinks, renders graph view, backlinks, search. Zero integration. | Default. Free visualization from day one. |
-| **Custom UI** | Hits REST/WebSocket API served by `marmot serve`. Gets structured JSON. | When you outgrow Obsidian or need agent-specific views. |
+| **Web UI (`marmot ui`)** | Built-in D3 frontend served from embedded static assets; reads graph via `/api/*` JSON endpoints. | Interactive graph exploration, filtering, heat overlay, and inline edits. |
+| **Custom UI** | Hits HTTP API served by `marmot ui`. Gets structured JSON. | When you need a bespoke frontend or integration surface. |
 | **Agents (MCP)** | Calls `context_query` / `context_write` / `context_verify`. Gets XML-structured compacted output. | Primary programmatic interface. |
 | **CLI** | Runs `marmot` commands. Gets text output. | Scripting, CI/CD, manual operations. |
 
@@ -313,8 +314,8 @@ each embedding to prevent cross-model similarity comparisons.
 
 ## Directory Layout
 
-The `.marmot/` directory IS an Obsidian-compatible vault. Opening it in Obsidian
-gives you graph visualization, backlinks, and search for free.
+The `.marmot/` directory IS an Obsidian-compatible vault. You can inspect it either
+in Obsidian or through the built-in web UI (`marmot ui`).
 
 ```
 .marmot/                              # Obsidian-compatible vault root
@@ -365,7 +366,7 @@ gives you graph visualization, backlinks, and search for free.
 | Component | Responsibility |
 |-----------|---------------|
 | **MCP Server** | Tool interface for agents. Exposes `context_query`, `context_write`, `context_verify`. Routes requests, logs co-access. Manages namespace write locks. |
-| **REST/WS API** | HTTP + WebSocket interface for custom UIs. Serves graph data as JSON. Pushes live updates via WebSocket. |
+| **HTTP API** | HTTP interface for the web UI and custom frontends. Serves graph data as JSON. |
 | **LLM Provider** | Abstracted interface for LLM calls. Used by CRUD Classifier (semantic classification) and Summary Engine (synthesis). Falls back gracefully when unavailable. |
 | **CRUD Classifier** | On write: embeds incoming node, retrieves similar candidates from embedding index, then uses LLM to classify as ADD/UPDATE/SUPERSEDE/NOOP. Falls back to embedding distance if LLM unavailable. |
 | **Semantic Search** | Embeds queries, performs vector similarity search against embedding index (decay-agnostic). Returns ranked candidate node IDs as traversal entry points. |
@@ -403,7 +404,7 @@ weights instantly.
 | Alternative | What it does | Gap ContextMarmot fills |
 |-------------|-------------|------------------------|
 | **CLAUDE.md / memory files** | Flat text, no relationships, no traversal, no cross-project linking | Structured graph with typed edges, semantic search, compaction |
-| **Neo4j + Obsidian plugin** | Heavyweight graph DB, not human-editable, requires running server | File-based, human-readable, zero-dependency visualization via Obsidian |
+| **Neo4j + Obsidian plugin** | Heavyweight graph DB, not human-editable, requires running server | File-based, human-readable, built-in `marmot ui` plus Obsidian compatibility |
 | **Cursor / Cody codebase indexing** | Code-specific, single-project, no persistent relationships, no agent write-back | Multi-project, persistent typed relationships, agents write knowledge back |
 | **Simple context.xml per project** | Static, manually authored, no graph structure, no search | Dynamic, auto-indexed, graph traversal, semantic entry points |
 | **Mem0** | Conversational memory (facts about users/sessions), not code-structural | Code-aware (call graphs, modules, types), multi-project, file-backed |

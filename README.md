@@ -13,7 +13,7 @@
 Agent  -->  MCP Server  -->  Embed + Search + Traverse + Compact  -->  XML context
 ```
 
-Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikilinks]]`. Open the vault in Obsidian for instant graph visualization, or query it programmatically.
+Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikilinks]]`. Open the vault in Obsidian or use the built-in web UI for graph visualization.
 
 ## Features
 
@@ -39,6 +39,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 ### Prerequisites
 
 - Go 1.21+ (`brew install go` or [go.dev/dl](https://go.dev/dl/))
+- Node.js 20.19+ (or 22.12+) only if building/running the web UI (`marmot ui`)
 - (Optional) An [OpenAI API key](https://platform.openai.com/api-keys) for semantic search. Without one, the mock embedder provides lexical-overlap search.
 
 ### Build
@@ -50,6 +51,12 @@ make build
 ```
 
 This produces `bin/marmot`.
+
+If you also want the embedded web UI:
+
+```bash
+make build-full
+```
 
 ### Try the demo
 
@@ -67,8 +74,13 @@ bash seed.sh
 # Verify integrity
 ../../bin/marmot verify --dir .marmot
 
+# Launch graph UI
+../../bin/marmot ui --dir .marmot --no-open
+
 # Open in Obsidian (optional --- open testdata/demo/.marmot as a vault)
 ```
+
+Then open [http://localhost:3274](http://localhost:3274).
 
 ### Use in your own project
 
@@ -261,6 +273,7 @@ If the configured classifier provider's API key is not found at serve time, Cont
 | `marmot bridge <ns-a> <ns-b> [--relations ...] [--dir .marmot]` | Create bridge manifest between two namespaces |
 | `marmot summarize [--namespace ...] [--dir .marmot]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
+| `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start HTTP server for the embedded graph visualization UI |
 
 ## Node Format
 
@@ -380,7 +393,9 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Summary engine (Phase 13): `_summary.md` per namespace via LLM synthesis, async regeneration scheduler with delta threshold + periodic interval, graceful degradation
 - Update engine (Phase 13): source hash change detection, reverse-edge staleness propagation, automatic reindexing, fsnotify file watcher, batch update mode
 - Full CLI (Phase 15): `status`, `watch`, `bridge`, `summarize`, `reembed` commands; enhanced `verify` with namespace filter and staleness checks
+- Slim HTTP API (Phase 16): `/api/graph`, `/api/namespaces`, `/api/node`, `/api/search`, `/api/heat`, `/api/bridges`, `/api/summary`, and inline node updates via `PUT /api/node/{id...}`
 - Static analysis indexer (Phase 17): Go AST indexer (packages, functions, methods, types, interfaces), TypeScript regex-based indexer (classes, interfaces, functions, type aliases), generic file indexer (30+ extensions), `.gitignore` support, incremental indexing with CRUD classification, `marmot index <path>` CLI integration
+- Graph visualization frontend (Phase 19): embedded D3 web UI served by `marmot ui` with filters, search, heat overlay, minimap, legend, keyboard shortcuts, and inline summary/context editing
 
 ### Known MVP limitations
 
