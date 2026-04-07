@@ -1300,6 +1300,13 @@ textarea:focus-visible {
   stroke-dasharray: none;
 }
 
+/* Selected state must override bridge-node styling */
+#graph-svg .node.bridge-node.selected circle {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  filter: drop-shadow(0 0 8px var(--accent-glow));
+}
+
 /* ── Namespace watermark labels ──────────────────────────────── */
 #graph-svg .ns-label {
   font-family: var(--font-sans);

@@ -54,6 +54,12 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		Edges:     make([]APIEdge, 0),
 	}
 
+	// Build a set of node IDs in this namespace for filtering edges.
+	nsNodeIDs := make(map[string]bool, len(filtered))
+	for _, n := range filtered {
+		nsNodeIDs[n.ID] = true
+	}
+
 	for _, n := range filtered {
 		outEdges := s.engine.Graph.GetEdges(n.ID, graph.Outbound)
 		inEdges := s.engine.Graph.GetEdges(n.ID, graph.Inbound)
@@ -69,8 +75,12 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 
 		resp.Nodes = append(resp.Nodes, apiNode)
 
-		// Collect flat outbound edges for the response.
+		// Collect outbound edges, skipping cross-namespace edges whose
+		// targets don't resolve to a node in this namespace view.
 		for _, e := range outEdges {
+			if !nsNodeIDs[e.Target] {
+				continue
+			}
 			resp.Edges = append(resp.Edges, APIEdge{
 				Source:   n.ID,
 				Target:   e.Target,
@@ -85,21 +95,13 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 
 	// Include heat pairs if available.
 	if s.engine.HeatMap != nil {
-		nodeIDs := make([]string, len(filtered))
-		for i, n := range filtered {
-			nodeIDs[i] = n.ID
+		nodeIDs := make(map[string]bool, len(filtered))
+		for _, n := range filtered {
+			nodeIDs[n.ID] = true
 		}
-		s.engine.HeatMap.RecordCoAccess(nil, 0) // no-op, just to ensure lock safety
-		// Gather all pairs that involve nodes in this namespace.
-		for _, p := range s.engine.HeatMap.Pairs {
-			inNS := false
-			for _, id := range nodeIDs {
-				if p.A == id || p.B == id {
-					inNS = true
-					break
-				}
-			}
-			if inNS {
+		// Use AllPairs() for thread-safe access to the pairs slice.
+		for _, p := range s.engine.HeatMap.AllPairs() {
+			if nodeIDs[p.A] || nodeIDs[p.B] {
 				resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
 					A:      p.A,
 					B:      p.B,
@@ -165,6 +167,12 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 		Namespaces: namespaces,
 	}
 
+	// Build a set of known node IDs for resolving cross-namespace edge targets.
+	nodeIDSet := make(map[string]bool, len(allNodes))
+	for _, n := range allNodes {
+		nodeIDSet[n.ID] = true
+	}
+
 	for _, n := range allNodes {
 		outEdges := s.engine.Graph.GetEdges(n.ID, graph.Outbound)
 		inEdges := s.engine.Graph.GetEdges(n.ID, graph.Inbound)
@@ -180,31 +188,28 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 
 		resp.Nodes = append(resp.Nodes, apiNode)
 
-		// Collect flat outbound edges (intra-namespace edges).
+		// Collect outbound edges, classifying cross-namespace ones as "bridge".
 		for _, e := range outEdges {
+			target := e.Target
+			edgeClass := string(e.Class)
+
+			// Detect cross-namespace edges: target uses "namespace/nodeID" format.
+			// If the raw target doesn't match a known node but stripping the
+			// namespace prefix does, reclassify as a bridge edge with the bare ID.
+			if !nodeIDSet[target] && nsSet != nil {
+				parts := strings.SplitN(target, "/", 2)
+				if len(parts) == 2 && nsSet[parts[0]] && nodeIDSet[parts[1]] {
+					target = parts[1]
+					edgeClass = "bridge"
+				}
+			}
+
 			resp.Edges = append(resp.Edges, APIEdge{
 				Source:   n.ID,
-				Target:   e.Target,
+				Target:   target,
 				Relation: string(e.Relation),
-				Class:    string(e.Class),
+				Class:    edgeClass,
 			})
-		}
-	}
-
-	// Discover and add cross-namespace bridge edges.
-	if s.engine.NSManager != nil {
-		crossEdges, err := s.engine.NSManager.DiscoverCrossNamespaceEdges()
-		if err == nil {
-			for _, ce := range crossEdges {
-				sourceID := ce.SourceNamespace + "/" + ce.SourceNodeID
-				targetID := ce.TargetNamespace + "/" + ce.TargetNodeID
-				resp.Edges = append(resp.Edges, APIEdge{
-					Source:   sourceID,
-					Target:   targetID,
-					Relation: ce.Relation,
-					Class:    "bridge",
-				})
-			}
 		}
 	}
 
@@ -213,8 +218,8 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 
 	// Include heat pairs if available.
 	if s.engine.HeatMap != nil {
-		s.engine.HeatMap.RecordCoAccess(nil, 0) // no-op, just to ensure lock safety
-		for _, p := range s.engine.HeatMap.Pairs {
+		// Use AllPairs() for thread-safe access to the pairs slice.
+		for _, p := range s.engine.HeatMap.AllPairs() {
 			resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
 				A:      p.A,
 				B:      p.B,
@@ -443,7 +448,7 @@ func (s *Server) handleHeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var pairs []APIHeatPair
-	for _, p := range s.engine.HeatMap.Pairs {
+	for _, p := range s.engine.HeatMap.AllPairs() {
 		if nsIDs[p.A] || nsIDs[p.B] {
 			pairs = append(pairs, APIHeatPair{
 				A:      p.A,

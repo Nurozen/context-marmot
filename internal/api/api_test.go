@@ -14,6 +14,7 @@ import (
 
 	"github.com/nurozen/context-marmot/internal/embedding"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
+	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
@@ -839,6 +840,130 @@ func TestGraphNonExistentNamespace(t *testing.T) {
 	}
 	if resp.EdgeCount != 0 {
 		t.Errorf("expected 0 edges for nonexistent namespace, got %d", resp.EdgeCount)
+	}
+}
+
+func TestHandleGraphAllBridgeEdges(t *testing.T) {
+	// Build a minimal engine with two namespaces: alpha and beta.
+	dir := t.TempDir()
+	marmotDir := filepath.Join(dir, ".marmot")
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	configContent := "---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(configContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	embedder := embedding.NewMockEmbedder("mock-test")
+	engine, err := mcpserver.NewEngine(marmotDir, embedder)
+	if err != nil {
+		t.Fatalf("create engine: %v", err)
+	}
+	t.Cleanup(func() { engine.Close() })
+
+	// Add a node in namespace "alpha" with a cross-namespace edge to "beta/some-node".
+	alphaNode := &node.Node{
+		ID:        "caller",
+		Type:      "function",
+		Namespace: "alpha",
+		Status:    node.StatusActive,
+		Summary:   "Calls into the beta namespace",
+		Edges: []node.Edge{
+			{Target: "beta/some-node", Relation: node.References, Class: node.Behavioral},
+		},
+	}
+	if err := engine.Graph.AddNode(alphaNode); err != nil {
+		t.Fatalf("add alpha node: %v", err)
+	}
+
+	// Add a node in namespace "beta" that is the bridge target.
+	betaNode := &node.Node{
+		ID:        "some-node",
+		Type:      "module",
+		Namespace: "beta",
+		Status:    node.StatusActive,
+		Summary:   "Target node in beta namespace",
+	}
+	if err := engine.Graph.AddNode(betaNode); err != nil {
+		t.Fatalf("add beta node: %v", err)
+	}
+
+	// Wire up a namespace manager so handleGraphAll sees both namespaces.
+	engine.NSManager = &namespace.Manager{
+		VaultDir:   marmotDir,
+		Namespaces: map[string]*namespace.Namespace{
+			"alpha": {Name: "alpha"},
+			"beta":  {Name: "beta"},
+		},
+		Bridges: map[string]*namespace.Bridge{},
+	}
+
+	server := NewServer(engine, nil)
+	handler := server.Handler()
+
+	rec := doRequest(t, handler, "GET", "/api/graph/_all", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp GraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// 1. Verify nodes from both namespaces are present.
+	if resp.NodeCount != 2 {
+		t.Fatalf("expected 2 nodes, got %d", resp.NodeCount)
+	}
+	nodeIDs := make(map[string]bool, len(resp.Nodes))
+	nsFound := make(map[string]bool)
+	for _, n := range resp.Nodes {
+		nodeIDs[n.ID] = true
+		nsFound[n.Namespace] = true
+	}
+	if !nsFound["alpha"] || !nsFound["beta"] {
+		t.Errorf("expected nodes from both alpha and beta namespaces, got namespaces: %v", nsFound)
+	}
+
+	// 2. Verify at least one edge with class "bridge".
+	bridgeCount := 0
+	for _, e := range resp.Edges {
+		if e.Class == "bridge" {
+			bridgeCount++
+		}
+	}
+	if bridgeCount == 0 {
+		t.Errorf("expected at least one bridge edge, got 0; edges: %+v", resp.Edges)
+	}
+
+	// 3. Verify all edge targets resolve to existing node IDs in the response.
+	for _, e := range resp.Edges {
+		if !nodeIDs[e.Target] {
+			t.Errorf("edge %s -> %s: target %q not found in response node IDs %v",
+				e.Source, e.Target, e.Target, nodeIDs)
+		}
+	}
+
+	// 4. Verify the bridge edge specifically: caller -> some-node (references, bridge).
+	foundBridge := false
+	for _, e := range resp.Edges {
+		if e.Source == "caller" && e.Target == "some-node" && e.Class == "bridge" && e.Relation == "references" {
+			foundBridge = true
+			break
+		}
+	}
+	if !foundBridge {
+		t.Errorf("expected bridge edge caller -> some-node (references), got edges: %+v", resp.Edges)
+	}
+
+	// 5. Verify namespaces list in response includes both.
+	nsInResp := make(map[string]bool)
+	for _, ns := range resp.Namespaces {
+		nsInResp[ns] = true
+	}
+	if !nsInResp["alpha"] || !nsInResp["beta"] {
+		t.Errorf("expected namespaces [alpha, beta] in response, got %v", resp.Namespaces)
 	}
 }
 

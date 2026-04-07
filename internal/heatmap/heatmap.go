@@ -185,6 +185,16 @@ func (h *HeatMap) PairCount() int {
 	return len(h.Pairs)
 }
 
+// AllPairs returns a snapshot copy of all tracked pairs. This is safe for
+// concurrent use — callers get an independent slice that won't be mutated.
+func (h *HeatMap) AllPairs() []Pair {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]Pair, len(h.Pairs))
+	copy(out, h.Pairs)
+	return out
+}
+
 // --- File I/O ---
 
 // Load reads a heat map file from _heat/<namespace>.md under the given vault dir.

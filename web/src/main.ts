@@ -169,15 +169,14 @@ async function loadGraph(): Promise<void> {
     const tagsInGraph = [...new Set(currentData.nodes.flatMap((n) => n.tags ?? []))].sort();
     filters.updateAvailableTags(tagsInGraph);
 
-    /* Auto-select namespace grouping for the all-namespaces view */
+    /* Render graph (update() auto-sets groupBy='namespace' for multi-ns data) */
+    graphView?.update(currentData);
+
+    /* Sync the group-by dropdown UI for the all-namespaces view */
     if (currentNamespace === '_all') {
       const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
       groupBySelect.value = 'namespace';
-      graphView?.setGroupBy('namespace');
     }
-
-    /* Render graph */
-    graphView?.update(currentData);
   } catch (err) {
     console.error('Failed to load graph:', err);
   }
