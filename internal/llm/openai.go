@@ -15,10 +15,10 @@ var _ Summarizer = (*OpenAIProvider)(nil)
 
 const (
 	openaiLLMDefaultModel = "gpt-5.1-codex-mini"
-	openaiChatEndpoint    = "https://api.openai.com/v1/chat/completions"
+	openaiResponsesURL    = "https://api.openai.com/v1/responses"
 )
 
-// OpenAIProvider classifies nodes using the OpenAI Chat Completions API.
+// OpenAIProvider classifies/summarises nodes using the OpenAI Responses API.
 type OpenAIProvider struct {
 	apiKey string
 	model  string
@@ -39,144 +39,142 @@ func (p *OpenAIProvider) Model() string {
 	return p.model
 }
 
-// openaiChatMessage is a single message in the OpenAI chat request.
-type openaiChatMessage struct {
+// ── Responses API types ─────────────────────────────────────
+
+// openaiInputMessage is a single message in the Responses API input array.
+type openaiInputMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// openaiChatRequest is the request body for the OpenAI Chat Completions API.
-type openaiChatRequest struct {
-	Model     string              `json:"model"`
-	MaxTokens int                 `json:"max_tokens"`
-	Messages  []openaiChatMessage `json:"messages"`
+// openaiResponsesRequest is the request body for the OpenAI Responses API.
+type openaiResponsesRequest struct {
+	Model     string               `json:"model"`
+	MaxTokens int                  `json:"max_output_tokens,omitempty"`
+	Input     []openaiInputMessage `json:"input"`
 }
 
-// openaiChatChoice is a single choice in the OpenAI chat response.
-type openaiChatChoice struct {
-	Message openaiChatMessage `json:"message"`
+// openaiContentPart is a single part in an output message's content array.
+type openaiContentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text,omitempty"`
 }
 
-// openaiChatResponse is the response from the OpenAI Chat Completions API.
-type openaiChatResponse struct {
-	Choices []openaiChatChoice `json:"choices"`
-	Error   *openaiChatError   `json:"error,omitempty"`
+// openaiOutputItem is a single item in the Responses API output array.
+type openaiOutputItem struct {
+	Type    string              `json:"type"`
+	Content []openaiContentPart `json:"content,omitempty"`
 }
 
-// openaiChatError is an error from the OpenAI API.
-type openaiChatError struct {
+// openaiResponsesResponse is the response from the OpenAI Responses API.
+type openaiResponsesResponse struct {
+	Output []openaiOutputItem `json:"output,omitempty"`
+	Error  *openaiAPIError    `json:"error,omitempty"`
+}
+
+// openaiAPIError is an error from the OpenAI API.
+type openaiAPIError struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 }
 
-// Classify sends a classification request to the OpenAI Chat Completions API.
+// extractText walks the Responses API output and returns the first text block.
+func (r *openaiResponsesResponse) extractText() string {
+	for _, item := range r.Output {
+		if item.Type != "message" {
+			continue
+		}
+		for _, part := range item.Content {
+			if part.Type == "output_text" && part.Text != "" {
+				return part.Text
+			}
+		}
+	}
+	return ""
+}
+
+// ── Public methods ──────────────────────────────────────────
+
+// Classify sends a classification request to the OpenAI Responses API.
 func (p *OpenAIProvider) Classify(ctx context.Context, req ClassifyRequest) (ClassifyResult, error) {
 	userMsg := buildUserMessage(req)
 
-	apiReq := openaiChatRequest{
+	apiReq := openaiResponsesRequest{
 		Model:     p.model,
 		MaxTokens: 512,
-		Messages: []openaiChatMessage{
+		Input: []openaiInputMessage{
 			{Role: "system", Content: anthropicSystemPrompt},
 			{Role: "user", Content: userMsg},
 		},
 	}
 
-	bodyBytes, err := json.Marshal(apiReq)
+	text, err := p.doRequest(ctx, apiReq, "classify")
 	if err != nil {
-		return fallbackResult(), fmt.Errorf("openai: marshal request: %w", err)
+		return fallbackResult(), err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiChatEndpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fallbackResult(), fmt.Errorf("openai: create request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return fallbackResult(), fmt.Errorf("openai: network error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fallbackResult(), fmt.Errorf("openai: read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var apiResp openaiChatResponse
-		if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
-			return fallbackResult(), fmt.Errorf("openai: API error (%d): %s", resp.StatusCode, apiResp.Error.Message)
-		}
-		return fallbackResult(), fmt.Errorf("openai: unexpected status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var apiResp openaiChatResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return fallbackResult(), fmt.Errorf("openai: unmarshal response: %w", err)
-	}
-
-	if len(apiResp.Choices) == 0 {
-		return fallbackResult(), fmt.Errorf("openai: empty choices in response")
-	}
-
-	return parseClassifyJSON(apiResp.Choices[0].Message.Content), nil
+	return parseClassifyJSON(text), nil
 }
 
-// Summarize generates a namespace summary using the OpenAI Chat Completions API.
+// Summarize generates a namespace summary using the OpenAI Responses API.
 func (p *OpenAIProvider) Summarize(ctx context.Context, req SummarizeRequest) (string, error) {
 	userMsg := buildSummarizeUserMessage(req)
 
-	apiReq := openaiChatRequest{
+	apiReq := openaiResponsesRequest{
 		Model:     p.model,
 		MaxTokens: 1024,
-		Messages: []openaiChatMessage{
+		Input: []openaiInputMessage{
 			{Role: "system", Content: summarizeSystemPrompt},
 			{Role: "user", Content: userMsg},
 		},
 	}
 
+	return p.doRequest(ctx, apiReq, "summarize")
+}
+
+// ── HTTP helper ─────────────────────────────────────────────
+
+func (p *OpenAIProvider) doRequest(ctx context.Context, apiReq openaiResponsesRequest, label string) (string, error) {
 	bodyBytes, err := json.Marshal(apiReq)
 	if err != nil {
-		return "", fmt.Errorf("openai: marshal summarize request: %w", err)
+		return "", fmt.Errorf("openai: marshal %s request: %w", label, err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiChatEndpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiResponsesURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return "", fmt.Errorf("openai: create summarize request: %w", err)
+		return "", fmt.Errorf("openai: create %s request: %w", label, err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return "", fmt.Errorf("openai: summarize network error: %w", err)
+		return "", fmt.Errorf("openai: %s network error: %w", label, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("openai: read summarize response: %w", err)
+		return "", fmt.Errorf("openai: read %s response: %w", label, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var apiResp openaiChatResponse
+		var apiResp openaiResponsesResponse
 		if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
-			return "", fmt.Errorf("openai: summarize API error (%d): %s", resp.StatusCode, apiResp.Error.Message)
+			return "", fmt.Errorf("openai: %s API error (%d): %s", label, resp.StatusCode, apiResp.Error.Message)
 		}
-		return "", fmt.Errorf("openai: summarize unexpected status %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("openai: %s unexpected status %d: %s", label, resp.StatusCode, string(respBody))
 	}
 
-	var apiResp openaiChatResponse
+	var apiResp openaiResponsesResponse
 	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return "", fmt.Errorf("openai: unmarshal summarize response: %w", err)
+		return "", fmt.Errorf("openai: unmarshal %s response: %w", label, err)
 	}
 
-	if len(apiResp.Choices) == 0 {
-		return "", fmt.Errorf("openai: empty choices in summarize response")
+	text := apiResp.extractText()
+	if text == "" {
+		return "", fmt.Errorf("openai: empty output in %s response", label)
 	}
 
-	return apiResp.Choices[0].Message.Content, nil
+	return text, nil
 }
