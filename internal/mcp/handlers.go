@@ -109,6 +109,8 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 		}
 		if len(resultIDs) >= 2 {
 			e.HeatMap.RecordCoAccess(resultIDs, heatmap.DefaultLearningRate)
+			// Persist heat data to disk so it survives restarts.
+			_ = heatmap.Save(e.MarmotDir, e.HeatMap)
 		}
 	}
 
