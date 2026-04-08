@@ -169,10 +169,14 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 		Namespaces: namespaces,
 	}
 
-	// Build a set of known node IDs for resolving cross-namespace edge targets.
+	// Build lookup maps for bridge detection:
+	// nodeIDSet: quick existence check for edge targets
+	// nodeNSMap: maps node ID → namespace for cross-namespace detection
 	nodeIDSet := make(map[string]bool, len(allNodes))
+	nodeNSMap := make(map[string]string, len(allNodes))
 	for _, n := range allNodes {
 		nodeIDSet[n.ID] = true
+		nodeNSMap[n.ID] = n.Namespace
 	}
 
 	for _, n := range allNodes {
@@ -195,9 +199,18 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 			target := e.Target
 			edgeClass := string(e.Class)
 
-			// Detect cross-namespace edges: target uses "namespace/nodeID" format.
-			// If the raw target doesn't match a known node but stripping the
-			// namespace prefix does, reclassify as a bridge edge with the bare ID.
+			// Bridge detection strategy 1: target already exists as a known
+			// node but is in a different namespace from the source node.
+			if nodeIDSet[target] && nsSet != nil {
+				targetNS := nodeNSMap[target]
+				if targetNS != "" && targetNS != n.Namespace {
+					edgeClass = "bridge"
+				}
+			}
+
+			// Bridge detection strategy 2: target uses "namespace/nodeID"
+			// format and doesn't match a known node — strip the prefix and
+			// reclassify.
 			if !nodeIDSet[target] && nsSet != nil {
 				parts := strings.SplitN(target, "/", 2)
 				if len(parts) == 2 && nsSet[parts[0]] && nodeIDSet[parts[1]] {
