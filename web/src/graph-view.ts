@@ -222,7 +222,8 @@ export class GraphView {
     /* Dynamic charge based on node count */
     const charge = this.nodes.length > 200 ? -150 : this.nodes.length > 80 ? -200 : -300;
 
-    /* Reconfigure simulation */
+    /* Reconfigure simulation — forceCenter is managed by applyGroupForces()
+       so that it gets removed when island grouping is active. */
     this.simulation
       .nodes(this.nodes)
       .force(
@@ -233,7 +234,6 @@ export class GraphView {
           .distance(80),
       )
       .force('charge', d3.forceManyBody<SimNode>().strength(charge))
-      .force('center', d3.forceCenter(width / 2, height / 2).strength(0.5))
       .force('collide', d3.forceCollide<SimNode>().radius((d) => d.radius + 2));
 
     /* Auto-group by namespace when multi-namespace view */
@@ -799,6 +799,15 @@ export class GraphView {
     const cx = width / 2;
     const cy = height / 2;
 
+    /* Remove forceCenter when grouping is active — it competes with island
+       forces and collapses groups toward the middle. Replace with a gentle
+       forceX/forceY toward center for the 'none' case only. */
+    if (this.groupBy !== 'none') {
+      this.simulation.force('center', null);
+    } else {
+      this.simulation.force('center', d3.forceCenter(cx, cy).strength(0.5));
+    }
+
     if (this.groupBy === 'none') {
       this.simulation
         .force('x', d3.forceX<SimNode>(cx).strength(0.04))
@@ -806,32 +815,50 @@ export class GraphView {
       return;
     }
 
-    /* Tag-based grouping: nodes may belong to multiple tags */
+    /* Tag-based grouping: nodes may belong to multiple tags.
+       Instead of averaging all tag centroids (which dilutes multi-tag nodes
+       toward the center), pull toward the "primary" tag — the tag with the
+       fewest members, making it the most distinctive affiliation. Untagged
+       nodes get a gentle center pull. */
     if (this.groupBy === 'tag') {
       const allTags = [...new Set(this.nodes.flatMap((n) => n.tags))].sort();
       if (allTags.length === 0) {
-        /* No tags at all — fall back to center pull */
         this.simulation
           .force('x', d3.forceX<SimNode>(cx).strength(0.04))
           .force('y', d3.forceY<SimNode>(cy).strength(0.04));
         return;
       }
+
+      /* Count members per tag to determine "primary" (rarest) tag per node */
+      const tagCount = new Map<string, number>();
+      for (const n of this.nodes) {
+        for (const t of n.tags) tagCount.set(t, (tagCount.get(t) ?? 0) + 1);
+      }
+
+      /* Assign each node a primary tag (the one with the fewest members) */
+      const primaryTag = (d: SimNode): string | null => {
+        if (d.tags.length === 0) return null;
+        let best = d.tags[0];
+        let bestCount = tagCount.get(best) ?? Infinity;
+        for (let i = 1; i < d.tags.length; i++) {
+          const c = tagCount.get(d.tags[i]) ?? Infinity;
+          if (c < bestCount) { best = d.tags[i]; bestCount = c; }
+        }
+        return best;
+      };
+
       const tagCentroids = this.groupCentroids(allTags, width, height);
-      const strength = 0.15;
+      const strength = 0.18;
 
       this.simulation
         .force('x', d3.forceX<SimNode>((d) => {
-          if (d.tags.length === 0) return cx;
-          let sx = 0;
-          for (const t of d.tags) sx += tagCentroids.get(t)?.x ?? cx;
-          return sx / d.tags.length;
-        }).strength(strength))
+          const pt = primaryTag(d);
+          return pt ? (tagCentroids.get(pt)?.x ?? cx) : cx;
+        }).strength((d) => d.tags.length > 0 ? strength : 0.02))
         .force('y', d3.forceY<SimNode>((d) => {
-          if (d.tags.length === 0) return cy;
-          let sy = 0;
-          for (const t of d.tags) sy += tagCentroids.get(t)?.y ?? cy;
-          return sy / d.tags.length;
-        }).strength(strength));
+          const pt = primaryTag(d);
+          return pt ? (tagCentroids.get(pt)?.y ?? cy) : cy;
+        }).strength((d) => d.tags.length > 0 ? strength : 0.02));
       return;
     }
 
