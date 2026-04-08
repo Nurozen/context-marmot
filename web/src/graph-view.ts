@@ -368,11 +368,20 @@ export class GraphView {
     const nodeMap = new Map<string, SimNode>();
     this.nodes.forEach((n) => nodeMap.set(n.id, n));
 
-    const heatData = this.heatPairs.filter(
+    /* Filter to pairs where both nodes are visible */
+    let heatData = this.heatPairs.filter(
       (p) => nodeMap.has(p.a) && nodeMap.has(p.b),
     );
 
-    const maxW = d3.max(heatData, (d) => d.weight) ?? 1;
+    /* Sort by weight descending and take only the top pairs.
+       Show at most 50 links, or the top 40% — whichever is smaller. */
+    heatData.sort((a, b) => b.weight - a.weight);
+    const maxLinks = Math.min(50, Math.ceil(heatData.length * 0.4));
+    heatData = heatData.slice(0, maxLinks);
+
+    const maxW = heatData[0]?.weight ?? 1;
+    const minW = heatData[heatData.length - 1]?.weight ?? 0;
+    const range = maxW - minW || 1;
 
     const heatSel = this.heatGroup
       .selectAll<SVGLineElement, APIHeatPair>('.heat-link')
@@ -384,9 +393,13 @@ export class GraphView {
       .enter()
       .append('line')
       .attr('class', 'heat-link visible')
-      .attr('stroke-width', (d) => 1.5 + (d.weight / maxW) * 4);
+      .attr('stroke-width', (d) => 1.5 + ((d.weight - minW) / range) * 4)
+      .attr('stroke-opacity', (d) => 0.08 + ((d.weight - minW) / range) * 0.45);
 
-    enter.merge(heatSel).classed('visible', true);
+    enter.merge(heatSel)
+      .classed('visible', true)
+      .attr('stroke-width', (d) => 1.5 + ((d.weight - minW) / range) * 4)
+      .attr('stroke-opacity', (d) => 0.08 + ((d.weight - minW) / range) * 0.45);
   }
 
   /** Compute a quadratic Bezier path string for a bridge arc that curves upward. */

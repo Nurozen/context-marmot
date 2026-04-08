@@ -334,7 +334,7 @@ func buildEngine(dir string) (*engineResult, error) {
 	}
 
 	// Wire update engine.
-	updateEng := update.NewEngine(engine.NodeStore, engine.Graph, engine.EmbeddingStore, engine.Embedder)
+	updateEng := update.NewEngine(engine.NodeStore, engine.GetGraph(), engine.EmbeddingStore, engine.Embedder)
 	if sumScheduler != nil {
 		updateEng.WithOnChange(func(count int) {
 			if metas, err := engine.NodeStore.ListNodes(); err == nil {

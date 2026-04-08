@@ -1,6 +1,6 @@
 import { NODE_COLORS, DEFAULT_NODE_COLOR } from './types';
 
-type EdgeClass = 'all' | 'structural' | 'behavioral';
+type EdgeClass = 'all' | 'structural' | 'behavioral' | 'bridge';
 
 /**
  * Filter controls that wire to the graph view.

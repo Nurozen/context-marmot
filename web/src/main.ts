@@ -145,6 +145,10 @@ async function init(): Promise<void> {
     console.log('[live-reload] graph changed on disk, refreshing…');
     void loadGraph();
   });
+  evtSource.addEventListener('open', () => {
+    // On reconnect, reload graph in case changes were missed
+    void loadGraph();
+  });
   evtSource.onerror = () => {
     console.warn('[live-reload] SSE connection lost, will auto-reconnect');
   };

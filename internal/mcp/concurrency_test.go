@@ -45,12 +45,12 @@ func TestConcurrentWrites_SameNamespace(t *testing.T) {
 	// All 20 nodes must exist in the graph.
 	for i := 0; i < n; i++ {
 		id := fmt.Sprintf("test/node%d", i)
-		if _, ok := eng.Graph.GetNode(id); !ok {
+		if _, ok := eng.GetGraph().GetNode(id); !ok {
 			t.Errorf("node %s not found in graph after concurrent writes", id)
 		}
 	}
-	if eng.Graph.NodeCount() != n {
-		t.Errorf("expected %d nodes in graph, got %d", n, eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != n {
+		t.Errorf("expected %d nodes in graph, got %d", n, eng.GetGraph().NodeCount())
 	}
 }
 
@@ -99,7 +99,7 @@ func TestConcurrentWrites_DifferentNamespaces(t *testing.T) {
 	for i := 0; i < perNS; i++ {
 		for _, ns := range []string{"ns-a", "ns-b"} {
 			id := fmt.Sprintf("%s/node%d", ns, i)
-			if _, ok := eng.Graph.GetNode(id); !ok {
+			if _, ok := eng.GetGraph().GetNode(id); !ok {
 				t.Errorf("node %s not found in graph after concurrent writes", id)
 			} else {
 				total++
@@ -256,7 +256,7 @@ func TestConcurrentDeleteAndWrite(t *testing.T) {
 	// All 5 "other" nodes must have been written successfully.
 	for i := 0; i < writers; i++ {
 		id := fmt.Sprintf("test/other-%d", i)
-		if _, ok := eng.Graph.GetNode(id); !ok {
+		if _, ok := eng.GetGraph().GetNode(id); !ok {
 			t.Errorf("writer node %s not found in graph", id)
 		}
 	}

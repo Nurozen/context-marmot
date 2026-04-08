@@ -195,7 +195,7 @@ func TestSWEQABenchmark(t *testing.T) {
 				}
 			}
 
-			totalNodes := eng.Graph.NodeCount()
+			totalNodes := eng.GetGraph().NodeCount()
 			t.Logf("[%s] Seeded %d nodes. Running %d questions...", repo, totalNodes, len(repoQs))
 
 			// Benchmark each question.
@@ -215,7 +215,7 @@ func TestSWEQABenchmark(t *testing.T) {
 
 				// --- Vanilla approach: read ALL nodes ---
 				// Simulate reading every .md file in the vault.
-				allNodes := eng.Graph.AllNodes()
+				allNodes := eng.GetGraph().AllNodes()
 				vanillaTotal := 0
 				for _, n := range allNodes {
 					vanillaTotal += tokensApprox(n.Summary + n.Context)

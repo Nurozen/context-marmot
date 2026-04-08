@@ -144,7 +144,7 @@ func seedVault(questions []EvalQuestion, repo string, workDir string) (string, e
 		}
 	}
 
-	fmt.Printf("  [seed] %s: %d nodes seeded\n", repo, eng.Graph.NodeCount())
+	fmt.Printf("  [seed] %s: %d nodes seeded\n", repo, eng.GetGraph().NodeCount())
 	return vaultDir, nil
 }
 

@@ -103,7 +103,7 @@ func (s *Server) reloadGraph(vaultDir string) {
 		fmt.Fprintf(os.Stderr, "live-reload: failed to reload graph: %v\n", err)
 		return
 	}
-	s.engine.Graph = newGraph
+	s.engine.SetGraph(newGraph)
 	fmt.Fprintf(os.Stderr, "live-reload: graph reloaded (%d nodes)\n", len(newGraph.AllNodes()))
 	s.NotifyChange()
 }

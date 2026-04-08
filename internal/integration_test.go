@@ -182,8 +182,8 @@ func TestFullWriteQueryVerifyLifecycle(t *testing.T) {
 	}
 
 	// Verify graph has 5 nodes.
-	if eng.Graph.NodeCount() != 5 {
-		t.Fatalf("expected 5 nodes, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 5 {
+		t.Fatalf("expected 5 nodes, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Query for each function by description and verify it appears in results.
@@ -258,8 +258,8 @@ func TestStructuralCycleRejection(t *testing.T) {
 	}
 
 	// Verify B was NOT added to the graph (only A should be present).
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node in graph after rejection, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node in graph after rejection, got %d", eng.GetGraph().NodeCount())
 	}
 }
 
@@ -301,8 +301,8 @@ func TestBehavioralCycleAcceptance(t *testing.T) {
 	}
 
 	// Both nodes should exist.
-	if eng.Graph.NodeCount() != 2 {
-		t.Fatalf("expected 2 nodes, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 2 {
+		t.Fatalf("expected 2 nodes, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Query for A and verify both A and B appear (they are connected).
@@ -444,12 +444,12 @@ func TestNodeUpdateOverwrite(t *testing.T) {
 	}
 
 	// Should still be exactly 1 node.
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node after update, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node after update, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Verify content was updated in-memory.
-	n, ok := eng.Graph.GetNode("item/x")
+	n, ok := eng.GetGraph().GetNode("item/x")
 	if !ok {
 		t.Fatal("node not found after update")
 	}
@@ -542,8 +542,8 @@ func TestPersistenceAcrossEngineRestarts(t *testing.T) {
 			},
 		})
 
-		if eng.Graph.NodeCount() != 2 {
-			t.Fatalf("phase 1: expected 2 nodes, got %d", eng.Graph.NodeCount())
+		if eng.GetGraph().NodeCount() != 2 {
+			t.Fatalf("phase 1: expected 2 nodes, got %d", eng.GetGraph().NodeCount())
 		}
 
 		if err := eng.Close(); err != nil {
@@ -557,13 +557,13 @@ func TestPersistenceAcrossEngineRestarts(t *testing.T) {
 		defer eng.Close()
 
 		// Graph should have reloaded both nodes from disk.
-		if eng.Graph.NodeCount() != 2 {
-			t.Fatalf("phase 2: expected 2 nodes after restart, got %d", eng.Graph.NodeCount())
+		if eng.GetGraph().NodeCount() != 2 {
+			t.Fatalf("phase 2: expected 2 nodes after restart, got %d", eng.GetGraph().NodeCount())
 		}
 
 		// Verify specific node existence.
 		for _, id := range []string{"persist/alpha", "persist/beta"} {
-			n, ok := eng.Graph.GetNode(id)
+			n, ok := eng.GetGraph().GetNode(id)
 			if !ok {
 				t.Errorf("node %q not found after restart", id)
 				continue
@@ -574,7 +574,7 @@ func TestPersistenceAcrossEngineRestarts(t *testing.T) {
 		}
 
 		// Verify edges survived restart.
-		beta, _ := eng.Graph.GetNode("persist/beta")
+		beta, _ := eng.GetGraph().GetNode("persist/beta")
 		hasEdge := false
 		for _, e := range beta.Edges {
 			if e.Target == "persist/alpha" {
@@ -763,10 +763,10 @@ func Login() *User {
 	defer eng.Close()
 
 	// Engine should have loaded indexed nodes.
-	if eng.Graph.NodeCount() == 0 {
+	if eng.GetGraph().NodeCount() == 0 {
 		t.Fatal("engine graph has 0 nodes after indexer run")
 	}
-	t.Logf("engine graph has %d nodes", eng.Graph.NodeCount())
+	t.Logf("engine graph has %d nodes", eng.GetGraph().NodeCount())
 
 	// Query for user authentication login.
 	xml := queryNodes(t, eng, map[string]any{
@@ -893,11 +893,11 @@ func Pong(n int) int {
 	}
 	defer eng.Close()
 
-	t.Logf("graph has %d nodes, %d edges", eng.Graph.NodeCount(), eng.Graph.EdgeCount())
+	t.Logf("graph has %d nodes, %d edges", eng.GetGraph().NodeCount(), eng.GetGraph().EdgeCount())
 
 	// Look for Ping and Pong function entities in the graph.
 	// The Go indexer creates IDs like "file1/Ping" and "file2/Pong" for functions.
-	allNodes := eng.Graph.AllNodes()
+	allNodes := eng.GetGraph().AllNodes()
 	var pingID, pongID string
 	for _, n := range allNodes {
 		// Match function nodes by checking the ID ends with /Ping or /Pong.
@@ -928,8 +928,8 @@ func Pong(n int) int {
 	// so Ping (in file1.go) calling Pong() creates an edge to "file1/Pong"
 	// (same-file prefix), even though Pong lives at "file2/Pong". We check
 	// for a "calls" edge whose target ends with "/Pong" or "/Ping".
-	pingNode, _ := eng.Graph.GetNode(pingID)
-	pongNode, _ := eng.Graph.GetNode(pongID)
+	pingNode, _ := eng.GetGraph().GetNode(pingID)
+	pongNode, _ := eng.GetGraph().GetNode(pongID)
 
 	pingCallsPong := false
 	for _, e := range pingNode.Edges {
@@ -1007,7 +1007,7 @@ func TestCRUDLifecycleADDUpdateSupersede(t *testing.T) {
 	}
 
 	// Verify node exists and is active.
-	v1Node, ok := eng.Graph.GetNode("api/v1/users")
+	v1Node, ok := eng.GetGraph().GetNode("api/v1/users")
 	if !ok {
 		t.Fatal("api/v1/users not found in graph after ADD")
 	}
@@ -1035,15 +1035,15 @@ func TestCRUDLifecycleADDUpdateSupersede(t *testing.T) {
 	}
 
 	// Verify node still exists at same ID, content updated, status active.
-	v1Updated, ok := eng.Graph.GetNode("api/v1/users")
+	v1Updated, ok := eng.GetGraph().GetNode("api/v1/users")
 	if !ok {
 		t.Fatal("api/v1/users not found after UPDATE")
 	}
 	if v1Updated.Status != node.StatusActive {
 		t.Errorf("expected active status after update, got %q", v1Updated.Status)
 	}
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node after update, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node after update, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Step 3: SUPERSEDE — write "api/v2/users" that supersedes v1.
@@ -1070,14 +1070,14 @@ func TestCRUDLifecycleADDUpdateSupersede(t *testing.T) {
 		t.Fatalf("save superseded v1: %v", err)
 	}
 	// Update in-memory graph.
-	if err := eng.Graph.UpsertNode(v1Loaded); err != nil {
+	if err := eng.GetGraph().UpsertNode(v1Loaded); err != nil {
 		t.Fatalf("upsert superseded v1: %v", err)
 	}
 	// Update embedding status.
 	_ = eng.EmbeddingStore.UpdateStatus("api/v1/users", node.StatusSuperseded)
 
 	// Verify v1 status=superseded, superseded_by=api/v2/users.
-	v1Final, ok := eng.Graph.GetNode("api/v1/users")
+	v1Final, ok := eng.GetGraph().GetNode("api/v1/users")
 	if !ok {
 		t.Fatal("api/v1/users not found after supersede")
 	}
@@ -1457,12 +1457,12 @@ func TestMultiNamespaceWithBridges(t *testing.T) {
 	})
 
 	// Verify graph has all 4 nodes.
-	if eng.Graph.NodeCount() != 4 {
-		t.Fatalf("expected 4 nodes, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 4 {
+		t.Fatalf("expected 4 nodes, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Verify cross-namespace edges exist in the graph.
-	clientNode, ok := eng.Graph.GetNode("frontend/api/client")
+	clientNode, ok := eng.GetGraph().GetNode("frontend/api/client")
 	if !ok {
 		t.Fatal("frontend/api/client not found")
 	}
@@ -1477,7 +1477,7 @@ func TestMultiNamespaceWithBridges(t *testing.T) {
 		t.Errorf("expected frontend/api/client to have calls edge to backend/auth/login, edges: %+v", clientNode.Edges)
 	}
 
-	typesNode, ok := eng.Graph.GetNode("frontend/api/types")
+	typesNode, ok := eng.GetGraph().GetNode("frontend/api/types")
 	if !ok {
 		t.Fatal("frontend/api/types not found")
 	}
@@ -1598,7 +1598,7 @@ func TestSummaryGenerationAfterIndexing(t *testing.T) {
 	sumEngine := summary.NewEngine(mock)
 
 	// Gather all active nodes from graph for summary generation.
-	allNodes := eng.Graph.AllActiveNodes()
+	allNodes := eng.GetGraph().AllActiveNodes()
 	if len(allNodes) != 5 {
 		t.Fatalf("expected 5 active nodes, got %d", len(allNodes))
 	}
@@ -1675,7 +1675,7 @@ func TestSummaryGenerationAfterIndexing(t *testing.T) {
 		t.Error("expected wikilinks in summary content")
 	}
 	for _, link := range wikilinks {
-		if _, ok := eng.Graph.GetNode(link); !ok {
+		if _, ok := eng.GetGraph().GetNode(link); !ok {
 			t.Errorf("wikilink [[%s]] in summary does not reference an existing node", link)
 		}
 	}
@@ -1760,7 +1760,7 @@ func TestConcurrentAgentsWriting(t *testing.T) {
 	}
 
 	// Verify total node count == 100.
-	totalNodes := eng.Graph.NodeCount()
+	totalNodes := eng.GetGraph().NodeCount()
 	if totalNodes != numAgents*nodesPerAgent {
 		t.Fatalf("expected %d nodes, got %d", numAgents*nodesPerAgent, totalNodes)
 	}
@@ -1768,7 +1768,7 @@ func TestConcurrentAgentsWriting(t *testing.T) {
 	// Verify integrity — query for a node from each agent.
 	for i := 0; i < numAgents; i++ {
 		id := fmt.Sprintf("concurrent/agent%d/node0", i)
-		n, ok := eng.Graph.GetNode(id)
+		n, ok := eng.GetGraph().GetNode(id)
 		if !ok {
 			t.Errorf("node %q not found in graph after concurrent writes", id)
 			continue
@@ -1805,7 +1805,7 @@ func TestConcurrentAgentsWriting(t *testing.T) {
 	// Verify edges survived concurrent writes: spot-check a few agents.
 	for i := 0; i < numAgents; i++ {
 		lastID := fmt.Sprintf("concurrent/agent%d/node%d", i, nodesPerAgent-1)
-		lastNode, ok := eng.Graph.GetNode(lastID)
+		lastNode, ok := eng.GetGraph().GetNode(lastID)
 		if !ok {
 			t.Errorf("node %q not found for edge check", lastID)
 			continue
@@ -1941,10 +1941,10 @@ func FormatGreeting(prefix, name string) string {
 	}
 	defer eng.Close()
 
-	if eng.Graph.NodeCount() == 0 {
+	if eng.GetGraph().NodeCount() == 0 {
 		t.Fatal("engine graph has 0 nodes after indexer run")
 	}
-	t.Logf("engine graph has %d nodes", eng.Graph.NodeCount())
+	t.Logf("engine graph has %d nodes", eng.GetGraph().NodeCount())
 
 	// Query for functions by description -> verify they appear in results.
 	xmlFuncs := queryNodes(t, eng, map[string]any{
@@ -2079,10 +2079,10 @@ func IsOdd(n int) bool {
 	}
 	defer eng.Close()
 
-	t.Logf("graph has %d nodes", eng.Graph.NodeCount())
+	t.Logf("graph has %d nodes", eng.GetGraph().NodeCount())
 
 	// Find IsEven and IsOdd nodes.
-	allNodes := eng.Graph.AllNodes()
+	allNodes := eng.GetGraph().AllNodes()
 	var isEvenID, isOddID string
 	for _, n := range allNodes {
 		if strings.HasSuffix(n.ID, "/IsEven") {
@@ -2107,7 +2107,7 @@ func IsOdd(n int) bool {
 	t.Logf("found IsEven=%s, IsOdd=%s", isEvenID, isOddID)
 
 	// Verify IsEven has a "calls" edge to IsOdd.
-	isEvenNode, _ := eng.Graph.GetNode(isEvenID)
+	isEvenNode, _ := eng.GetGraph().GetNode(isEvenID)
 	evenCallsOdd := false
 	for _, e := range isEvenNode.Edges {
 		if e.Relation == "calls" && strings.HasSuffix(e.Target, "/IsOdd") {
@@ -2120,7 +2120,7 @@ func IsOdd(n int) bool {
 	}
 
 	// Verify IsOdd has a "calls" edge to IsEven.
-	isOddNode, _ := eng.Graph.GetNode(isOddID)
+	isOddNode, _ := eng.GetGraph().GetNode(isOddID)
 	oddCallsEven := false
 	for _, e := range isOddNode.Edges {
 		if e.Relation == "calls" && strings.HasSuffix(e.Target, "/IsEven") {
@@ -2243,8 +2243,8 @@ func TestE2E_MultiNamespaceBridges(t *testing.T) {
 	}
 
 	// Verify all 4 nodes exist.
-	if eng.Graph.NodeCount() != 4 {
-		t.Errorf("expected 4 nodes, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 4 {
+		t.Errorf("expected 4 nodes, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Query from frontend perspective -> verify backend nodes appear via traversal.
@@ -2328,7 +2328,7 @@ func TestE2E_CRUDLifecycleTemporalChain(t *testing.T) {
 	}
 
 	// Verify node exists and is active.
-	n1, ok := eng.Graph.GetNode("svc/payments")
+	n1, ok := eng.GetGraph().GetNode("svc/payments")
 	if !ok {
 		t.Fatal("svc/payments not found after ADD")
 	}
@@ -2359,7 +2359,7 @@ func TestE2E_CRUDLifecycleTemporalChain(t *testing.T) {
 	}
 
 	// Verify content updated, status still active.
-	n2, ok := eng.Graph.GetNode("svc/payments")
+	n2, ok := eng.GetGraph().GetNode("svc/payments")
 	if !ok {
 		t.Fatal("svc/payments not found after UPDATE")
 	}
@@ -2391,7 +2391,7 @@ func TestE2E_CRUDLifecycleTemporalChain(t *testing.T) {
 	}
 
 	// Verify old node is now status=superseded with superseded_by and valid_until.
-	oldNode, ok := eng.Graph.GetNode("svc/payments")
+	oldNode, ok := eng.GetGraph().GetNode("svc/payments")
 	if !ok {
 		t.Fatal("svc/payments not found after SUPERSEDE")
 	}
@@ -2406,7 +2406,7 @@ func TestE2E_CRUDLifecycleTemporalChain(t *testing.T) {
 	}
 
 	// Verify new node is status=active.
-	newNode, ok := eng.Graph.GetNode("svc/payments-v2")
+	newNode, ok := eng.GetGraph().GetNode("svc/payments-v2")
 	if !ok {
 		t.Fatal("svc/payments-v2 not found after SUPERSEDE")
 	}
@@ -2532,8 +2532,8 @@ func TestE2E_SummaryGenerationWikilinks(t *testing.T) {
 			t.Fatalf("write %s failed: %s", nd["id"], text(t, res))
 		}
 	}
-	if eng.Graph.NodeCount() != 5 {
-		t.Fatalf("expected 5 nodes, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 5 {
+		t.Fatalf("expected 5 nodes, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// 2. Create summary engine with a mock LLM summarizer that returns wikilinks.
@@ -2543,7 +2543,7 @@ func TestE2E_SummaryGenerationWikilinks(t *testing.T) {
 	sumEngine := summary.NewEngine(mockLLM)
 
 	// 3. Generate summary.
-	allNodes := eng.Graph.AllNodes()
+	allNodes := eng.GetGraph().AllNodes()
 	result, err := sumEngine.GenerateSummary(context.Background(), "default", allNodes)
 	if err != nil {
 		t.Fatalf("GenerateSummary: %v", err)
@@ -2574,7 +2574,7 @@ func TestE2E_SummaryGenerationWikilinks(t *testing.T) {
 		}
 		// Verify the linked node actually exists in the graph.
 		nodeID := strings.TrimPrefix(strings.TrimSuffix(wl, "]]"), "[[")
-		if _, ok := eng.Graph.GetNode(nodeID); !ok {
+		if _, ok := eng.GetGraph().GetNode(nodeID); !ok {
 			t.Errorf("wikilink %s references non-existent node", wl)
 		}
 	}
@@ -2662,14 +2662,14 @@ func TestE2E_ConcurrentWritesSameNamespace(t *testing.T) {
 	}
 
 	// Verify all 20 nodes exist.
-	if eng.Graph.NodeCount() != numWorkers {
-		t.Fatalf("expected %d nodes, got %d", numWorkers, eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != numWorkers {
+		t.Fatalf("expected %d nodes, got %d", numWorkers, eng.GetGraph().NodeCount())
 	}
 
 	// Each worker writes 2 edges, so total should be 20 * 2 = 40.
 	expectedEdges := numWorkers * 2
-	if eng.Graph.EdgeCount() != expectedEdges {
-		t.Errorf("expected %d edges, got %d", expectedEdges, eng.Graph.EdgeCount())
+	if eng.GetGraph().EdgeCount() != expectedEdges {
+		t.Errorf("expected %d edges, got %d", expectedEdges, eng.GetGraph().EdgeCount())
 	}
 
 	// Run integrity verification.
@@ -2683,7 +2683,7 @@ func TestE2E_ConcurrentWritesSameNamespace(t *testing.T) {
 	// Verify each node individually.
 	for i := 0; i < numWorkers; i++ {
 		id := fmt.Sprintf("concurrent/worker-%d", i)
-		n, ok := eng.Graph.GetNode(id)
+		n, ok := eng.GetGraph().GetNode(id)
 		if !ok {
 			t.Errorf("node %s not found", id)
 			continue
@@ -3001,7 +3001,7 @@ func TestE2E_FuzzInvalidEdges(t *testing.T) {
 	if res1.IsError {
 		t.Fatalf("write with invalid relation failed: %s", text(t, res1))
 	}
-	n1, ok := eng.Graph.GetNode("fuzz/invalid-relation")
+	n1, ok := eng.GetGraph().GetNode("fuzz/invalid-relation")
 	if !ok {
 		t.Fatal("fuzz/invalid-relation not found")
 	}
@@ -3042,7 +3042,7 @@ func TestE2E_FuzzInvalidEdges(t *testing.T) {
 	if res3.IsError {
 		t.Fatalf("write with 100 edges failed: %s", text(t, res3))
 	}
-	n3, ok := eng.Graph.GetNode("fuzz/many-edges")
+	n3, ok := eng.GetGraph().GetNode("fuzz/many-edges")
 	if !ok {
 		t.Fatal("fuzz/many-edges not found")
 	}

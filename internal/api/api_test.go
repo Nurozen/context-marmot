@@ -104,7 +104,7 @@ func setupTestEngine(t *testing.T) *mcpserver.Engine {
 // that search tests have data to query against.
 func seedEmbeddings(t *testing.T, engine *mcpserver.Engine) {
 	t.Helper()
-	for _, n := range engine.Graph.AllActiveNodes() {
+	for _, n := range engine.GetGraph().AllActiveNodes() {
 		text := n.Summary
 		if text == "" {
 			text = n.ID
@@ -231,7 +231,7 @@ func TestHandleGraphIncludeSuperseded(t *testing.T) {
 		SupersededBy: "auth/login",
 		Summary:      "Legacy authentication handler (deprecated)",
 	}
-	if err := engine.Graph.AddNode(supersededNode); err != nil {
+	if err := engine.GetGraph().AddNode(supersededNode); err != nil {
 		t.Fatalf("add superseded node: %v", err)
 	}
 
@@ -513,7 +513,7 @@ func TestHandleNodeUpdate(t *testing.T) {
 	}
 
 	// Re-fetch the node to verify the summary was updated.
-	n, ok := engine.Graph.GetNode("auth/login")
+	n, ok := engine.GetGraph().GetNode("auth/login")
 	if !ok {
 		t.Fatal("auth/login not found in graph after update")
 	}
@@ -668,7 +668,7 @@ func TestHandleNodeUpdateContext(t *testing.T) {
 	}
 
 	// Verify context was updated in the graph.
-	n, ok := engine.Graph.GetNode("auth/token")
+	n, ok := engine.GetGraph().GetNode("auth/token")
 	if !ok {
 		t.Fatal("auth/token not found after update")
 	}
@@ -700,7 +700,7 @@ func TestHandleNodeTags(t *testing.T) {
 		Summary:   "A utility module with tags",
 		Tags:      []string{"utility", "core"},
 	}
-	if err := engine.Graph.AddNode(taggedNode); err != nil {
+	if err := engine.GetGraph().AddNode(taggedNode); err != nil {
 		t.Fatalf("add tagged node: %v", err)
 	}
 
@@ -744,7 +744,7 @@ func TestHandleNodeTags(t *testing.T) {
 	}
 
 	// Verify tags were persisted to the in-memory graph.
-	n, ok := engine.Graph.GetNode("auth/login")
+	n, ok := engine.GetGraph().GetNode("auth/login")
 	if !ok {
 		t.Fatal("auth/login not found after tag update")
 	}
@@ -873,7 +873,7 @@ func TestHandleGraphAllBridgeEdges(t *testing.T) {
 			{Target: "beta/some-node", Relation: node.References, Class: node.Behavioral},
 		},
 	}
-	if err := engine.Graph.AddNode(alphaNode); err != nil {
+	if err := engine.GetGraph().AddNode(alphaNode); err != nil {
 		t.Fatalf("add alpha node: %v", err)
 	}
 
@@ -885,7 +885,7 @@ func TestHandleGraphAllBridgeEdges(t *testing.T) {
 		Status:    node.StatusActive,
 		Summary:   "Target node in beta namespace",
 	}
-	if err := engine.Graph.AddNode(betaNode); err != nil {
+	if err := engine.GetGraph().AddNode(betaNode); err != nil {
 		t.Fatalf("add beta node: %v", err)
 	}
 

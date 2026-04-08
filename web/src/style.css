@@ -961,11 +961,11 @@ html, body {
   stroke-opacity: 0;
   fill: none;
   stroke-linecap: round;
-  transition: stroke-opacity 400ms ease;
+  transition: stroke-opacity 0.3s ease-out;
 }
 
 #graph-svg .heat-link.visible {
-  stroke-opacity: 0.5;
+  /* Opacity is set per-element based on weight — see renderHeatLinks() */
 }
 
 /* Stale node indicator */

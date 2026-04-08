@@ -30,13 +30,14 @@ func newClassifyTestEngine(t *testing.T) *Engine {
 	g := graph.NewGraph()
 	ns := node.NewStore(dir)
 
-	return &Engine{
+	eng := &Engine{
 		NodeStore:      ns,
-		Graph:          g,
 		EmbeddingStore: embStore,
 		Embedder:       emb,
 		MarmotDir:      dir,
 	}
+	eng.SetGraph(g)
+	return eng
 }
 
 // writeNodeDirect writes a node directly (no classifier) using the same summary
@@ -111,7 +112,7 @@ func TestContextWrite_Classify_ADD(t *testing.T) {
 	}
 
 	// Node must exist in graph.
-	if _, ok := eng.Graph.GetNode("classify/add-node"); !ok {
+	if _, ok := eng.GetGraph().GetNode("classify/add-node"); !ok {
 		t.Error("node not found in graph after ADD write")
 	}
 }
@@ -171,8 +172,8 @@ func TestContextWrite_Classify_UPDATE(t *testing.T) {
 	}
 
 	// Graph should still have exactly 1 node.
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node in graph, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node in graph, got %d", eng.GetGraph().NodeCount())
 	}
 }
 
@@ -245,7 +246,7 @@ func TestContextWrite_Classify_SUPERSEDE(t *testing.T) {
 	}
 
 	// New node should exist in graph.
-	if _, ok := eng.Graph.GetNode("classify/new"); !ok {
+	if _, ok := eng.GetGraph().GetNode("classify/new"); !ok {
 		t.Error("new node not found in graph after SUPERSEDE write")
 	}
 }
@@ -308,12 +309,12 @@ func TestContextWrite_Classify_NOOP(t *testing.T) {
 	}
 
 	// The noop-attempt node should NOT have been written to the graph.
-	if _, ok := eng.Graph.GetNode("classify/noop-attempt"); ok {
+	if _, ok := eng.GetGraph().GetNode("classify/noop-attempt"); ok {
 		t.Error("noop-attempt node should not exist in graph after NOOP")
 	}
 
 	// Graph should still have exactly 1 node (the original "existing").
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node in graph after NOOP, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node in graph after NOOP, got %d", eng.GetGraph().NodeCount())
 	}
 }

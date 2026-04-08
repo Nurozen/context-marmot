@@ -303,7 +303,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	// Determine whether this is a create or update before any mutation.
-	existingNode, nodeExists := e.Graph.GetNode(id)
+	existingNode, nodeExists := e.GetGraph().GetNode(id)
 	isNew := !nodeExists
 
 	// For updates: if no new tags provided, keep existing tags.
@@ -319,12 +319,12 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 
 	// Run CRUD classification if classifier is available.
 	if e.Classifier != nil {
-		classResult, classErr := e.Classifier.Classify(ctx, n, e.Graph)
+		classResult, classErr := e.Classifier.Classify(ctx, n, e.GetGraph())
 		if classErr == nil {
 			switch classResult.Action {
 			case "NOOP":
 				// Content is essentially identical to existing node — skip write.
-				existing, ok := e.Graph.GetNode(classResult.TargetNodeID)
+				existing, ok := e.GetGraph().GetNode(classResult.TargetNodeID)
 				if ok {
 					result := WriteResult{
 						NodeID: existing.ID,
@@ -339,7 +339,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 				if classResult.TargetNodeID != "" && classResult.TargetNodeID != id {
 					_ = e.NodeStore.SoftDeleteNode(classResult.TargetNodeID, id)
 					if reloaded, loadErr := e.NodeStore.LoadNode(e.NodeStore.NodePath(classResult.TargetNodeID)); loadErr == nil {
-						_ = e.Graph.UpsertNode(reloaded)
+						_ = e.GetGraph().UpsertNode(reloaded)
 					}
 					_ = e.EmbeddingStore.UpdateStatus(classResult.TargetNodeID, node.StatusSuperseded)
 				}
@@ -354,7 +354,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	// conditions with concurrent requests.
 	for _, edge := range edges {
 		if edge.Class == node.Structural {
-			if e.Graph.WouldCreateCycle(id, edge.Target) {
+			if e.GetGraph().WouldCreateCycle(id, edge.Target) {
 				return mcp.NewToolResultError(fmt.Sprintf(
 					"structural cycle detected: edge %s -> %s would create a cycle",
 					id, edge.Target)), nil
@@ -363,7 +363,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	// Upsert node into graph.
-	if err := e.Graph.UpsertNode(n); err != nil {
+	if err := e.GetGraph().UpsertNode(n); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("graph upsert: %v", err)), nil
 	}
 
@@ -462,7 +462,7 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 	var nodes []*node.Node
 	if len(nodeIDs) == 0 {
 		// Verify all nodes in the graph.
-		nodes = e.Graph.AllNodes()
+		nodes = e.GetGraph().AllNodes()
 	} else {
 		for _, id := range nodeIDs {
 			if n, ok := e.ResolveNodeID(id); ok {
@@ -557,7 +557,7 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	defer mu.Unlock()
 
 	// Re-fetch inside the lock so concurrent deletes see the updated status.
-	current, ok := e.Graph.GetNode(id)
+	current, ok := e.GetGraph().GetNode(id)
 	if !ok || current.Status == node.StatusSuperseded {
 		return mcp.NewToolResultError(fmt.Sprintf("node %q not found", id)), nil
 	}
@@ -580,7 +580,7 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("reload node: %v", err)), nil
 	}
-	if err := e.Graph.UpsertNode(updated); err != nil {
+	if err := e.GetGraph().UpsertNode(updated); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("graph upsert: %v", err)), nil
 	}
 
@@ -650,7 +650,7 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 
 	var taggedIDs []string
 	for _, r := range results {
-		n, ok := e.Graph.GetNode(r.NodeID)
+		n, ok := e.GetGraph().GetNode(r.NodeID)
 		if !ok {
 			continue
 		}
@@ -690,7 +690,7 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 		}
 
 		// Update in-memory graph only after successful disk write.
-		_ = e.Graph.UpsertNode(diskNode)
+		_ = e.GetGraph().UpsertNode(diskNode)
 
 		// Re-embed the node so semantic search accounts for the new tag.
 		if e.Embedder != nil && e.EmbeddingStore != nil {

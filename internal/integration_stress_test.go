@@ -44,8 +44,8 @@ func TestStress_WriteDeleteVerifyActive(t *testing.T) {
 		}
 	}
 
-	if eng.Graph.NodeCount() != total {
-		t.Fatalf("expected %d nodes after writes, got %d", total, eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != total {
+		t.Fatalf("expected %d nodes after writes, got %d", total, eng.GetGraph().NodeCount())
 	}
 
 	// Delete the first 50 nodes via HandleContextDelete.
@@ -65,12 +65,12 @@ func TestStress_WriteDeleteVerifyActive(t *testing.T) {
 	}
 
 	// Verify: graph still has all 100 nodes (soft-delete doesn't remove).
-	if eng.Graph.NodeCount() != total {
-		t.Errorf("expected %d total nodes after soft-delete, got %d", total, eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != total {
+		t.Errorf("expected %d total nodes after soft-delete, got %d", total, eng.GetGraph().NodeCount())
 	}
 
 	// Verify: exactly 50 nodes are active.
-	activeNodes := eng.Graph.AllActiveNodes()
+	activeNodes := eng.GetGraph().AllActiveNodes()
 	if len(activeNodes) != deleteCount {
 		t.Fatalf("expected %d active nodes, got %d", deleteCount, len(activeNodes))
 	}
@@ -78,7 +78,7 @@ func TestStress_WriteDeleteVerifyActive(t *testing.T) {
 	// Verify: deleted nodes have status=superseded and superseded_by set.
 	for i := 0; i < deleteCount; i++ {
 		id := fmt.Sprintf("stress/node-%03d", i)
-		n, ok := eng.Graph.GetNode(id)
+		n, ok := eng.GetGraph().GetNode(id)
 		if !ok {
 			t.Errorf("node %s not found in graph", id)
 			continue
@@ -125,7 +125,7 @@ func TestStress_WriteDeleteVerifyActive(t *testing.T) {
 	eng2 := newEngine(t, dir)
 	defer eng2.Close()
 
-	activeAfterReload := eng2.Graph.AllActiveNodes()
+	activeAfterReload := eng2.GetGraph().AllActiveNodes()
 	if len(activeAfterReload) != deleteCount {
 		t.Errorf("after engine restart: expected %d active nodes, got %d", deleteCount, len(activeAfterReload))
 	}
@@ -247,7 +247,7 @@ func Farewell(name string) string { return "Goodbye, " + name }
 	}
 	defer eng.Close()
 
-	allNodes := eng.Graph.AllNodes()
+	allNodes := eng.GetGraph().AllNodes()
 	idSet := make(map[string]bool, len(allNodes))
 	for _, n := range allNodes {
 		if idSet[n.ID] {
@@ -289,8 +289,8 @@ func TestStress_QueryDepthBehavior(t *testing.T) {
 		}
 	}
 
-	if eng.Graph.NodeCount() != len(chain) {
-		t.Fatalf("expected %d nodes, got %d", len(chain), eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != len(chain) {
+		t.Fatalf("expected %d nodes, got %d", len(chain), eng.GetGraph().NodeCount())
 	}
 
 	// Query with depth=0 -- should return only entry nodes (no traversal).
@@ -414,7 +414,7 @@ func TestStress_ManualEditReload(t *testing.T) {
 	defer eng2.Close()
 
 	// Verify the node was reloaded with edited content.
-	n, ok := eng2.Graph.GetNode("editable/target")
+	n, ok := eng2.GetGraph().GetNode("editable/target")
 	if !ok {
 		t.Fatal("editable/target not found after reload")
 	}
@@ -472,8 +472,8 @@ func TestStress_EngineRestartCorruptConfig(t *testing.T) {
 			t.Fatalf("write failed: %s", text(t, res))
 		}
 
-		if eng.Graph.NodeCount() < 1 {
-			t.Errorf("expected at least 1 node, got %d", eng.Graph.NodeCount())
+		if eng.GetGraph().NodeCount() < 1 {
+			t.Errorf("expected at least 1 node, got %d", eng.GetGraph().NodeCount())
 		}
 
 		// Verify the node is queryable.
@@ -514,8 +514,8 @@ func TestStress_EngineRestartCorruptConfig(t *testing.T) {
 		eng := newEngine(t, dir)
 		defer eng.Close()
 
-		if eng.Graph.NodeCount() < 1 {
-			t.Errorf("expected at least 1 node despite corrupt config, got %d", eng.Graph.NodeCount())
+		if eng.GetGraph().NodeCount() < 1 {
+			t.Errorf("expected at least 1 node despite corrupt config, got %d", eng.GetGraph().NodeCount())
 		}
 	})
 
@@ -547,8 +547,8 @@ func TestStress_EngineRestartCorruptConfig(t *testing.T) {
 		eng := newEngine(t, dir)
 		defer eng.Close()
 
-		if eng.Graph.NodeCount() < 1 {
-			t.Errorf("expected at least 1 node despite bad YAML config, got %d", eng.Graph.NodeCount())
+		if eng.GetGraph().NodeCount() < 1 {
+			t.Errorf("expected at least 1 node despite bad YAML config, got %d", eng.GetGraph().NodeCount())
 		}
 	})
 
@@ -581,7 +581,7 @@ func TestStress_EngineRestartCorruptConfig(t *testing.T) {
 		defer eng2.Close()
 
 		// Node should still be present.
-		n, ok := eng2.Graph.GetNode("volatile/node")
+		n, ok := eng2.GetGraph().GetNode("volatile/node")
 		if !ok {
 			t.Error("volatile/node not found after config deletion and restart")
 		} else if n.Summary == "" {

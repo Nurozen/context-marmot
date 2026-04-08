@@ -38,7 +38,7 @@ func TestCrossVaultEdgePreservation(t *testing.T) {
 	}
 
 	// Verify the node was stored with the @-prefixed target preserved.
-	n, ok := eng.Graph.GetNode("api/gateway")
+	n, ok := eng.GetGraph().GetNode("api/gateway")
 	if !ok {
 		t.Fatal("node api/gateway not found in graph")
 	}
@@ -84,7 +84,7 @@ func TestCrossVaultEdgeNamespaceAutoPrefix(t *testing.T) {
 	}
 
 	// The node ID itself should be namespace-prefixed.
-	n, ok := eng.Graph.GetNode("backend/svc/handler")
+	n, ok := eng.GetGraph().GetNode("backend/svc/handler")
 	if !ok {
 		t.Fatal("node backend/svc/handler not found in graph")
 	}
@@ -143,7 +143,7 @@ func TestCrossVaultEdgeCycleDetectionNoFalsePositive(t *testing.T) {
 	}
 
 	// Verify it was written.
-	n, ok := eng.Graph.GetNode("arch/root")
+	n, ok := eng.GetGraph().GetNode("arch/root")
 	if !ok {
 		t.Fatal("node arch/root not found in graph")
 	}
@@ -320,7 +320,7 @@ func TestCrossVaultEdgeMultipleVaults(t *testing.T) {
 		t.Fatalf("write returned error: %s", resultText(t, res))
 	}
 
-	n, ok := eng.Graph.GetNode("hub/orchestrator")
+	n, ok := eng.GetGraph().GetNode("hub/orchestrator")
 	if !ok {
 		t.Fatal("node hub/orchestrator not found")
 	}

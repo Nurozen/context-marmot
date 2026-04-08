@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/classifier"
@@ -28,7 +29,7 @@ import (
 // single dependency injected into every MCP tool handler.
 type Engine struct {
 	NodeStore      *node.Store
-	Graph          *graph.Graph
+	graph          atomic.Pointer[graph.Graph]
 	EmbeddingStore *embedding.Store
 	Embedder       embedding.Embedder
 	Classifier       *classifier.Classifier // optional; nil = no CRUD classification
@@ -42,6 +43,16 @@ type Engine struct {
 	MarmotDir    string
 	LocalVaultID string // cached from config; avoids repeated disk reads in handlers
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
+}
+
+// SetGraph atomically replaces the in-memory graph.
+func (e *Engine) SetGraph(g *graph.Graph) {
+	e.graph.Store(g)
+}
+
+// GetGraph returns the current in-memory graph.
+func (e *Engine) GetGraph() *graph.Graph {
+	return e.graph.Load()
 }
 
 // NamespaceLock returns the write mutex for the given namespace, creating it if needed.
@@ -124,13 +135,14 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		return nil, fmt.Errorf("engine: open embedding store: %w", err)
 	}
 
-	return &Engine{
+	eng := &Engine{
 		NodeStore:      ns,
-		Graph:          g,
 		EmbeddingStore: es,
 		Embedder:       embedder,
 		MarmotDir:      marmotDir,
-	}, nil
+	}
+	eng.SetGraph(g)
+	return eng, nil
 }
 
 // WithHeatMap attaches a heat map to the engine for traversal priority.
@@ -185,11 +197,11 @@ func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
 func (e *Engine) graphResolver() traversal.GraphResolver {
 	if e.VaultRegistry != nil {
 		return &traversal.BridgedGraphResolver{
-			Local:  e.Graph,
+			Local:  e.GetGraph(),
 			Vaults: e.VaultRegistry,
 		}
 	}
-	return e.Graph
+	return e.GetGraph()
 }
 
 // ResolveNodeID looks up a node by ID in the graph. If not found and a
@@ -197,13 +209,14 @@ func (e *Engine) graphResolver() traversal.GraphResolver {
 // (e.g. "render/api-client" → "hl-warde/render/api-client"). This handles
 // the common case where LLMs omit the namespace prefix from node IDs.
 func (e *Engine) ResolveNodeID(id string) (*node.Node, bool) {
-	if n, ok := e.Graph.GetNode(id); ok {
+	g := e.GetGraph()
+	if n, ok := g.GetNode(id); ok {
 		return n, true
 	}
 	if e.NSManager != nil {
 		for nsName := range e.NSManager.Namespaces {
 			prefixed := nsName + "/" + id
-			if n, ok := e.Graph.GetNode(prefixed); ok {
+			if n, ok := g.GetNode(prefixed); ok {
 				return n, true
 			}
 		}

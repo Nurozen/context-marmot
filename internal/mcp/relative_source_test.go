@@ -51,7 +51,7 @@ func TestRelativeSourcePath_InsideProjectRoot(t *testing.T) {
 	}
 
 	// Check that the node in the graph has a RELATIVE source path.
-	n, ok := eng.Graph.GetNode("test/relsrc")
+	n, ok := eng.GetGraph().GetNode("test/relsrc")
 	if !ok {
 		t.Fatal("node not found in graph")
 	}
@@ -105,7 +105,7 @@ func TestRelativeSourcePath_OutsideProjectRoot(t *testing.T) {
 	}
 
 	// Check that the node kept the absolute path (filepath.Rel would produce ".." prefix).
-	n, ok := eng.Graph.GetNode("test/extsrc")
+	n, ok := eng.GetGraph().GetNode("test/extsrc")
 	if !ok {
 		t.Fatal("node not found in graph")
 	}
@@ -142,7 +142,7 @@ func TestRelativeSourcePath_AlreadyRelative(t *testing.T) {
 		t.Fatalf("write error: %s", resultText(t, res))
 	}
 
-	n, ok := eng.Graph.GetNode("test/alreadyrel")
+	n, ok := eng.GetGraph().GetNode("test/alreadyrel")
 	if !ok {
 		t.Fatal("node not found in graph")
 	}

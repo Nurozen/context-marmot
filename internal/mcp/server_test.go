@@ -50,14 +50,14 @@ func TestEngineCreation(t *testing.T) {
 	if eng.NodeStore == nil {
 		t.Error("NodeStore is nil")
 	}
-	if eng.Graph == nil {
+	if eng.GetGraph() == nil {
 		t.Error("Graph is nil")
 	}
 	if eng.EmbeddingStore == nil {
 		t.Error("EmbeddingStore is nil")
 	}
-	if eng.Graph.NodeCount() != 0 {
-		t.Errorf("expected empty graph, got %d nodes", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 0 {
+		t.Errorf("expected empty graph, got %d nodes", eng.GetGraph().NodeCount())
 	}
 }
 
@@ -99,8 +99,8 @@ func TestWriteQueryRoundtrip(t *testing.T) {
 	}
 
 	// Verify node is in graph.
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node in graph, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node in graph, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Query for the node.
@@ -382,12 +382,12 @@ func TestWriteUpdatesExistingNode(t *testing.T) {
 	}
 
 	// Verify the graph still has exactly 1 node.
-	if eng.Graph.NodeCount() != 1 {
-		t.Errorf("expected 1 node after update, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 1 {
+		t.Errorf("expected 1 node after update, got %d", eng.GetGraph().NodeCount())
 	}
 
 	// Verify the node content was updated.
-	n, ok := eng.Graph.GetNode("test/update")
+	n, ok := eng.GetGraph().GetNode("test/update")
 	if !ok {
 		t.Fatal("node not found after update")
 	}
@@ -476,7 +476,7 @@ func TestWriteWithSource(t *testing.T) {
 		t.Fatalf("write failed")
 	}
 
-	n, ok := eng.Graph.GetNode("src/func")
+	n, ok := eng.GetGraph().GetNode("src/func")
 	if !ok {
 		t.Fatal("node not found")
 	}
@@ -603,8 +603,8 @@ func TestBehavioralCycleAllowed(t *testing.T) {
 		}
 	}
 
-	if eng.Graph.NodeCount() != 2 {
-		t.Errorf("expected 2 nodes, got %d", eng.Graph.NodeCount())
+	if eng.GetGraph().NodeCount() != 2 {
+		t.Errorf("expected 2 nodes, got %d", eng.GetGraph().NodeCount())
 	}
 }
 
@@ -629,7 +629,7 @@ func TestEdgeRelationsInGraph(t *testing.T) {
 		t.Fatalf("write failed: %s", resultText(t, res))
 	}
 
-	n, ok := eng.Graph.GetNode("edge/source")
+	n, ok := eng.GetGraph().GetNode("edge/source")
 	if !ok {
 		t.Fatal("node not found")
 	}

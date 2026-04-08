@@ -34,9 +34,9 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 
 	var allNodes []*node.Node
 	if includeSuperseded {
-		allNodes = s.engine.Graph.AllNodes()
+		allNodes = s.engine.GetGraph().AllNodes()
 	} else {
-		allNodes = s.engine.Graph.AllActiveNodes()
+		allNodes = s.engine.GetGraph().AllActiveNodes()
 	}
 
 	// Filter to the requested namespace.
@@ -62,8 +62,8 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, n := range filtered {
-		outEdges := s.engine.Graph.GetEdges(n.ID, graph.Outbound)
-		inEdges := s.engine.Graph.GetEdges(n.ID, graph.Inbound)
+		outEdges := s.engine.GetGraph().GetEdges(n.ID, graph.Outbound)
+		inEdges := s.engine.GetGraph().GetEdges(n.ID, graph.Inbound)
 
 		apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
 
@@ -102,6 +102,7 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		}
 		// Use AllPairs() for thread-safe access to the pairs slice.
 		for _, p := range s.engine.HeatMap.AllPairs() {
+			if p.Weight < 0.06 { continue } // skip pairs at decay floor
 			if nodeIDs[p.A] || nodeIDs[p.B] {
 				resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
 					A:      p.A,
@@ -130,9 +131,9 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 
 	var allNodes []*node.Node
 	if includeSuperseded {
-		allNodes = s.engine.Graph.AllNodes()
+		allNodes = s.engine.GetGraph().AllNodes()
 	} else {
-		allNodes = s.engine.Graph.AllActiveNodes()
+		allNodes = s.engine.GetGraph().AllActiveNodes()
 	}
 
 	projectRoot := filepath.Dir(s.engine.MarmotDir)
@@ -175,8 +176,8 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, n := range allNodes {
-		outEdges := s.engine.Graph.GetEdges(n.ID, graph.Outbound)
-		inEdges := s.engine.Graph.GetEdges(n.ID, graph.Inbound)
+		outEdges := s.engine.GetGraph().GetEdges(n.ID, graph.Outbound)
+		inEdges := s.engine.GetGraph().GetEdges(n.ID, graph.Inbound)
 
 		apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
 
@@ -221,6 +222,7 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 	if s.engine.HeatMap != nil {
 		// Use AllPairs() for thread-safe access to the pairs slice.
 		for _, p := range s.engine.HeatMap.AllPairs() {
+			if p.Weight < 0.06 { continue } // skip pairs at decay floor
 			resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
 				A:      p.A,
 				B:      p.B,
@@ -256,8 +258,8 @@ func (s *Server) handleNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	outEdges := s.engine.Graph.GetEdges(n.ID, graph.Outbound)
-	inEdges := s.engine.Graph.GetEdges(n.ID, graph.Inbound)
+	outEdges := s.engine.GetGraph().GetEdges(n.ID, graph.Outbound)
+	inEdges := s.engine.GetGraph().GetEdges(n.ID, graph.Inbound)
 	apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
 
 	// Check staleness.
@@ -328,7 +330,7 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update in-memory graph.
-	if err := s.engine.Graph.UpsertNode(diskNode); err != nil {
+	if err := s.engine.GetGraph().UpsertNode(diskNode); err != nil {
 		writeError(w, http.StatusInternalServerError, "graph upsert: "+err.Error())
 		return
 	}
@@ -404,7 +406,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	resp := SearchResponse{Results: make([]SearchResult, 0, len(results))}
 	for _, sr := range results {
-		n, ok := s.engine.Graph.GetNode(sr.NodeID)
+		n, ok := s.engine.GetGraph().GetNode(sr.NodeID)
 		if !ok {
 			continue
 		}
@@ -440,7 +442,7 @@ func (s *Server) handleHeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Collect all active node IDs in this namespace to filter pairs.
-	allNodes := s.engine.Graph.AllActiveNodes()
+	allNodes := s.engine.GetGraph().AllActiveNodes()
 	nsIDs := make(map[string]bool)
 	for _, n := range allNodes {
 		if matchNamespace(n.Namespace, namespace) {
@@ -450,6 +452,7 @@ func (s *Server) handleHeat(w http.ResponseWriter, r *http.Request) {
 
 	var pairs []APIHeatPair
 	for _, p := range s.engine.HeatMap.AllPairs() {
+		if p.Weight < 0.06 { continue } // skip pairs at decay floor
 		if nsIDs[p.A] || nsIDs[p.B] {
 			pairs = append(pairs, APIHeatPair{
 				A:      p.A,
@@ -475,7 +478,7 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 
 	if s.engine.NSManager == nil {
 		// Single-namespace mode: count all active nodes under "default".
-		count := len(s.engine.Graph.AllActiveNodes())
+		count := len(s.engine.GetGraph().AllActiveNodes())
 		hasSummary := false
 		if _, err := summary.ReadSummary(s.engine.MarmotDir, "default"); err == nil {
 			hasSummary = true
@@ -491,7 +494,7 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 
 	// Count nodes per namespace from the graph.
 	nsCounts := make(map[string]int)
-	for _, n := range s.engine.Graph.AllActiveNodes() {
+	for _, n := range s.engine.GetGraph().AllActiveNodes() {
 		ns := n.Namespace
 		if ns == "" {
 			ns = "default"
@@ -588,9 +591,7 @@ func matchNamespace(nodeNS, requested string) bool {
 	if requested == "" && nodeNS == "default" {
 		return true
 	}
-	// Also match if the node ID is prefixed with the namespace (e.g., namespace
-	// stored in the node ID itself for multi-namespace vaults).
-	return strings.HasPrefix(nodeNS, requested)
+	return false
 }
 
 // handleVersion returns the current graph version counter.
