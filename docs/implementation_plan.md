@@ -598,6 +598,25 @@ Multi-namespace view shows all namespaces as distant islands on the same canvas,
 - [x] Bridge arc hover highlighting with neighbor dimming
 - [x] `fetchGraphAll()` and `fetchBridges()` API functions in frontend
 
+## Phase 22: Folder Grouping with Contour Hulls — COMPLETE (2026-04-07)
+
+"Group by folder" mode clusters nodes into topographic contour islands based on their directory prefix, rendered as organic Catmull-Rom hulls with an alpine cartographic color palette.
+
+- [x] Add 'folder' mode to groupBy system
+- [x] Extract folder prefix from node IDs (e.g. `packages/node` → `packages`)
+- [x] Implement folder-based force island layout (forceX/forceY at 0.18 strength)
+- [x] Render topographic contour hulls (convex hull with Catmull-Rom curves)
+- [x] Support 1-node circles, 2-node capsules, 3+ node organic hulls
+- [x] Alpine cartographic color palette (8 warm territory fills)
+- [x] Folder name labels at hull centroids (IBM Plex Mono, uppercase, faded)
+- [x] Hull updates on every simulation tick for fluid animation
+- [x] Hull respects type/tag visibility filters
+- [x] Fixed forceCenter competition with all groupBy modes
+- [x] Fixed tag grouping dilution (primary tag strategy)
+- [x] Fixed heat map persistence (`heatmap.Save()` after `RecordCoAccess`)
+- [x] Add 'Group by folder' option to toolbar dropdown
+- [x] CSS styles for `folder-hull` and `folder-label` elements
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.
@@ -685,6 +704,9 @@ Post-MVP:
 
   Phase 16 (Slim HTTP API)
     └─> Phase 19 (Graph Viz Frontend)
+          └─> Phase 20 (Tags & Clustering)
+          └─> Phase 21 (Multi-Namespace Bridges)
+          └─> Phase 22 (Folder Grouping + Contour Hulls)
 
   Phase 18.6 (when stable)
     └─> F1-F5 (Future Enhancements) [DEFERRED]

@@ -92,7 +92,7 @@ async function init(): Promise<void> {
   /* ── Group-by selector ────────────────────────────────────────── */
   const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
   groupBySelect.addEventListener('change', () => {
-    graphView?.setGroupBy(groupBySelect.value as 'none' | 'type' | 'namespace' | 'tag');
+    graphView?.setGroupBy(groupBySelect.value as 'none' | 'type' | 'namespace' | 'tag' | 'folder');
   });
 
   /* ── Superseded toggle reloads graph ──────────────────────────── */

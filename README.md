@@ -33,6 +33,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Update engine** --- detects source file changes via hash comparison, propagates staleness through reverse edges, reindexes affected nodes; file watcher mode for continuous operation
 - **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
 - **Static analysis indexer** --- `marmot index <path>` parses Go (full AST), TypeScript (regex-based), and 30+ other languages into graph nodes with typed edges; incremental mode skips unchanged files; respects `.gitignore`
+- **Folder grouping** --- nodes cluster into topographic contour islands by their directory prefix (e.g. `packages/`, `core/`, `arch/`) with organic hulls and alpine cartographic styling
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
 ## Quick Start
@@ -404,6 +405,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 - Graph visualization frontend (Phase 19): embedded D3 web UI served by `marmot ui` with filters, search, heat overlay, minimap, legend, keyboard shortcuts, and inline summary/context editing
 - Node tags & domain clustering (Phase 20): many-to-many domain tags on nodes, `context_tag` MCP tool for bulk-tagging via semantic search, graph grouping and filtering by tag, tag badges in detail panel
 - Multi-namespace graph & bridge visualization (Phase 21): "All Namespaces" view shows cross-namespace bridges as curved Bezier arcs ("marmot tunnels"); each namespace forms a distinct island with watermark labels; bridge node indicators and hover highlighting
+- Folder grouping with contour hulls (Phase 22): "Group by folder" clusters nodes into topographic contour islands by directory prefix (e.g. `packages/`, `core/`, `arch/`) with organic Catmull-Rom hulls, alpine cartographic palette, and fluid tick-driven animation
 
 ### Known MVP limitations
 
@@ -412,7 +414,7 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), node tags + domain clustering (Phase 20), and multi-namespace bridge visualization (Phase 21) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), node tags + domain clustering (Phase 20), multi-namespace bridge visualization (Phase 21), and folder grouping with contour hulls (Phase 22) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
 
 ## License
 

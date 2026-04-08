@@ -54,6 +54,7 @@ export class GraphView {
   private defs: d3.Selection<SVGDefsElement, unknown, HTMLElement, unknown>;
 
   private nsLabelGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+  private folderHullGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private linkGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private bridgeGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
   private heatGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
@@ -75,7 +76,7 @@ export class GraphView {
   private normalLinks: SimLink[] = [];
   private heatEnabled = false;
   private heatPairs: APIHeatPair[] = [];
-  private groupBy: 'none' | 'type' | 'namespace' | 'tag' = 'type';
+  private groupBy: 'none' | 'type' | 'namespace' | 'tag' | 'folder' = 'type';
 
   /* Minimap & heat overlay */
   private minimap: Minimap | null = null;
@@ -105,6 +106,7 @@ export class GraphView {
     /* Main transform group */
     this.container = this.svg.append('g').attr('class', 'graph-layer');
     this.nsLabelGroup = this.container.append('g').attr('class', 'ns-labels');
+    this.folderHullGroup = this.container.append('g').attr('class', 'folder-hulls');
     this.linkGroup = this.container.append('g').attr('class', 'links');
     this.bridgeGroup = this.container.append('g').attr('class', 'bridge-arcs');
     this.heatGroup = this.container.append('g').attr('class', 'heat-links');
@@ -240,6 +242,8 @@ export class GraphView {
     if (this.activeNamespaces.length > 1) {
       this.groupBy = 'namespace';
     }
+
+    this.folderHullGroup.selectAll('*').remove();
 
     this.applyGroupForces(width, height);
 
@@ -674,6 +678,9 @@ export class GraphView {
     /* Namespace watermark labels */
     this.updateNsLabelPositions();
 
+    /* Folder contour hulls */
+    this.renderFolderHulls();
+
     /* Nodes */
     this.nodeGroup
       .selectAll<SVGGElement, SimNode>('.node')
@@ -750,6 +757,8 @@ export class GraphView {
       if (this.edgeClassFilter !== 'all' && d.class !== this.edgeClassFilter) return 'none';
       return null;
     });
+
+    this.renderFolderHulls();
   }
 
   private updateLabelVisibility(): void {
@@ -862,6 +871,18 @@ export class GraphView {
       return;
     }
 
+    /* Folder-based grouping: cluster by directory prefix */
+    if (this.groupBy === 'folder') {
+      const folders = [...new Set(this.nodes.map((n) => this.nodeFolder(n)))].sort();
+      const centroids = this.groupCentroids(folders, width, height);
+      const strength = 0.18;
+
+      this.simulation
+        .force('x', d3.forceX<SimNode>((d) => centroids.get(this.nodeFolder(d))?.x ?? cx).strength(strength))
+        .force('y', d3.forceY<SimNode>((d) => centroids.get(this.nodeFolder(d))?.y ?? cy).strength(strength));
+      return;
+    }
+
     const keyFn = this.groupBy === 'type'
       ? (d: SimNode) => d.type
       : (d: SimNode) => d.namespace;
@@ -875,8 +896,169 @@ export class GraphView {
       .force('y', d3.forceY<SimNode>((d) => centroids.get(keyFn(d))?.y ?? cy).strength(strength));
   }
 
+  /** Extract the folder prefix from a node ID (e.g. "packages/node" → "packages"). */
+  private nodeFolder(d: SimNode): string {
+    const slash = d.id.indexOf('/');
+    return slash > 0 ? d.id.substring(0, slash) : '_root';
+  }
+
+  /** Render topographic contour hulls around folder groups. */
+  private renderFolderHulls(): void {
+    if (this.groupBy !== 'folder') {
+      this.folderHullGroup.selectAll('*').remove();
+      return;
+    }
+
+    /* Group visible nodes by folder */
+    const folderNodes = new Map<string, SimNode[]>();
+    for (const n of this.nodes) {
+      if (!this.isNodeVisible(n) || n.x == null || n.y == null) continue;
+      const folder = this.nodeFolder(n);
+      let arr = folderNodes.get(folder);
+      if (!arr) { arr = []; folderNodes.set(folder, arr); }
+      arr.push(n);
+    }
+
+    /* Palette of warm, muted territory colors (Alpine Cartographic aesthetic) */
+    const hullColors = [
+      'rgba(212, 168, 83, 0.08)',   /* amber */
+      'rgba(107, 158, 135, 0.08)',  /* sage */
+      'rgba(196, 93, 75, 0.08)',    /* terracotta */
+      'rgba(130, 140, 180, 0.08)',  /* slate blue */
+      'rgba(180, 150, 100, 0.08)',  /* sand */
+      'rgba(150, 120, 170, 0.08)',  /* lavender */
+      'rgba(100, 160, 160, 0.08)',  /* teal */
+      'rgba(170, 130, 90, 0.08)',   /* sienna */
+    ];
+    const borderColors = [
+      'rgba(212, 168, 83, 0.25)',
+      'rgba(107, 158, 135, 0.25)',
+      'rgba(196, 93, 75, 0.25)',
+      'rgba(130, 140, 180, 0.25)',
+      'rgba(180, 150, 100, 0.25)',
+      'rgba(150, 120, 170, 0.25)',
+      'rgba(100, 160, 160, 0.25)',
+      'rgba(170, 130, 90, 0.25)',
+    ];
+
+    const folders = [...folderNodes.keys()].sort();
+    const padding = 35; /* Inflate hull outward by this many pixels */
+
+    interface HullDatum {
+      folder: string;
+      path: string;
+      cx: number;
+      cy: number;
+      fill: string;
+      stroke: string;
+    }
+    const hullData: HullDatum[] = [];
+
+    for (let fi = 0; fi < folders.length; fi++) {
+      const folder = folders[fi];
+      const nodes = folderNodes.get(folder)!;
+      const fill = hullColors[fi % hullColors.length];
+      const stroke = borderColors[fi % borderColors.length];
+
+      /* Centroid */
+      let cx = 0, cy = 0;
+      for (const n of nodes) { cx += n.x!; cy += n.y!; }
+      cx /= nodes.length;
+      cy /= nodes.length;
+
+      if (nodes.length === 1) {
+        /* Single node — draw a circle */
+        const r = padding + nodes[0].radius;
+        const n = nodes[0];
+        // Approximate circle as path for consistent rendering
+        hullData.push({
+          folder,
+          path: `M ${n.x! - r},${n.y!} A ${r},${r} 0 1,0 ${n.x! + r},${n.y!} A ${r},${r} 0 1,0 ${n.x! - r},${n.y!} Z`,
+          cx: n.x!, cy: n.y!,
+          fill, stroke,
+        });
+      } else if (nodes.length === 2) {
+        /* Two nodes — draw a rounded rectangle / capsule shape */
+        const [a, b] = nodes;
+        const dx = b.x! - a.x!;
+        const dy = b.y! - a.y!;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const nx = -dy / dist * padding;
+        const ny = dx / dist * padding;
+        // Build a capsule by expanding along the perpendicular
+        const points: [number, number][] = [
+          [a.x! + nx, a.y! + ny],
+          [b.x! + nx, b.y! + ny],
+          [b.x! - nx, b.y! - ny],
+          [a.x! - nx, a.y! - ny],
+        ];
+        const hull = d3.polygonHull(points);
+        if (hull) {
+          hullData.push({
+            folder,
+            path: `M ${hull.map((p) => p.join(',')).join(' L ')} Z`,
+            cx, cy, fill, stroke,
+          });
+        }
+      } else {
+        /* 3+ nodes — convex hull with padding */
+        const points: [number, number][] = nodes.map((n) => [n.x!, n.y!]);
+        const hull = d3.polygonHull(points);
+        if (hull) {
+          /* Inflate the hull outward from centroid */
+          const inflated = hull.map((p) => {
+            const vx = p[0] - cx;
+            const vy = p[1] - cy;
+            const len = Math.sqrt(vx * vx + vy * vy) || 1;
+            return [p[0] + (vx / len) * padding, p[1] + (vy / len) * padding] as [number, number];
+          });
+          /* Use cardinal closed curve for organic topo feel */
+          const lineGen = d3.line().curve(d3.curveCatmullRomClosed.alpha(0.5));
+          const pathStr = lineGen(inflated);
+          if (pathStr) {
+            hullData.push({ folder, path: pathStr, cx, cy, fill, stroke });
+          }
+        }
+      }
+    }
+
+    /* ── Render hull paths ── */
+    const hullSel = this.folderHullGroup
+      .selectAll<SVGPathElement, HullDatum>('.folder-hull')
+      .data(hullData, (d) => d.folder);
+
+    hullSel.exit().remove();
+
+    const enterHull = hullSel.enter()
+      .append('path')
+      .attr('class', 'folder-hull');
+
+    enterHull.merge(hullSel)
+      .attr('d', (d) => d.path)
+      .attr('fill', (d) => d.fill)
+      .attr('stroke', (d) => d.stroke)
+      .attr('stroke-width', 1)
+      .attr('stroke-dasharray', '4,3');
+
+    /* ── Render folder labels ── */
+    const labelSel = this.folderHullGroup
+      .selectAll<SVGTextElement, HullDatum>('.folder-label')
+      .data(hullData, (d) => d.folder);
+
+    labelSel.exit().remove();
+
+    const enterLabel = labelSel.enter()
+      .append('text')
+      .attr('class', 'folder-label');
+
+    enterLabel.merge(labelSel)
+      .attr('x', (d) => d.cx)
+      .attr('y', (d) => d.cy)
+      .text((d) => d.folder);
+  }
+
   /** Change the grouping mode and reheat the simulation. */
-  setGroupBy(mode: 'none' | 'type' | 'namespace' | 'tag'): void {
+  setGroupBy(mode: 'none' | 'type' | 'namespace' | 'tag' | 'folder'): void {
     this.groupBy = mode;
     const { width, height } = this.dimensions();
     this.applyGroupForces(width, height);
