@@ -173,20 +173,34 @@ export class GraphView {
     const nodeMap = new Map<string, APINode>();
     data.nodes.forEach((n) => nodeMap.set(n.id, n));
 
-    /* Build SimNodes */
-    this.nodes = data.nodes.map((n) => ({
-      id: n.id,
-      type: n.type,
-      namespace: n.namespace,
-      status: n.status,
-      summary: n.summary,
-      context: n.context,
-      edge_count: n.edge_count,
-      is_stale: n.is_stale,
-      tags: n.tags ?? [],
-      superseded_by: n.superseded_by,
-      radius: nodeRadius(n.edge_count),
-    }));
+    /* Snapshot existing node positions so we can preserve them across reloads.
+       This prevents the entire graph from re-settling when only a few nodes
+       are added/removed (e.g. during live-reload via SSE). */
+    const prevPositions = new Map<string, { x: number; y: number; fx?: number | null; fy?: number | null }>();
+    for (const n of this.nodes) {
+      if (n.x != null && n.y != null) {
+        prevPositions.set(n.id, { x: n.x, y: n.y, fx: n.fx, fy: n.fy });
+      }
+    }
+
+    /* Build SimNodes — restore positions for returning nodes */
+    this.nodes = data.nodes.map((n) => {
+      const prev = prevPositions.get(n.id);
+      return {
+        id: n.id,
+        type: n.type,
+        namespace: n.namespace,
+        status: n.status,
+        summary: n.summary,
+        context: n.context,
+        edge_count: n.edge_count,
+        is_stale: n.is_stale,
+        tags: n.tags ?? [],
+        superseded_by: n.superseded_by,
+        radius: nodeRadius(n.edge_count),
+        ...(prev ? { x: prev.x, y: prev.y, fx: prev.fx, fy: prev.fy } : {}),
+      };
+    });
 
     /* Build SimLinks — only include links whose both endpoints exist */
     const nodeIds = new Set(this.nodes.map((n) => n.id));
@@ -247,7 +261,11 @@ export class GraphView {
 
     this.applyGroupForces(width, height);
 
-    this.simulation.alpha(1).restart();
+    /* If most nodes already have positions (live-reload), use a gentle alpha
+       so only new nodes settle in. Full alpha(1) for initial load. */
+    const returningCount = this.nodes.filter((n) => prevPositions.has(n.id)).length;
+    const isReload = returningCount > 0 && returningCount >= this.nodes.length * 0.5;
+    this.simulation.alpha(isReload ? 0.3 : 1).restart();
 
     this.renderLinks();
     this.renderBridgeArcs();
