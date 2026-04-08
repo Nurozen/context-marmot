@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -590,6 +591,67 @@ func matchNamespace(nodeNS, requested string) bool {
 	// Also match if the node ID is prefixed with the namespace (e.g., namespace
 	// stored in the node ID itself for multi-namespace vaults).
 	return strings.HasPrefix(nodeNS, requested)
+}
+
+// handleVersion returns the current graph version counter.
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]int64{"version": s.version.Load()})
+}
+
+// handleSSE streams Server-Sent Events to the client. When the graph version
+// changes (due to file watcher detecting disk changes), a "graph-changed"
+// event is pushed to all connected clients.
+func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Register this client.
+	ch := make(chan struct{}, 1)
+	s.sseClients.Store(ch, true)
+	defer func() {
+		s.sseClients.Delete(ch)
+		close(ch)
+	}()
+
+	// Send initial version.
+	fmt.Fprintf(w, "data: {\"version\":%d}\n\n", s.version.Load())
+	flusher.Flush()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+			fmt.Fprintf(w, "event: graph-changed\ndata: {\"version\":%d}\n\n", s.version.Load())
+			flusher.Flush()
+		}
+	}
+}
+
+// NotifyChange bumps the version counter and notifies all SSE clients.
+// Called by the file watcher when vault files change on disk.
+func (s *Server) NotifyChange() {
+	s.version.Add(1)
+	s.sseClients.Range(func(key, _ any) bool {
+		ch := key.(chan struct{})
+		select {
+		case ch <- struct{}{}:
+		default: // don't block if client is slow
+		}
+		return true
+	})
 }
 
 // nodeToAPI converts a domain node to its API representation.

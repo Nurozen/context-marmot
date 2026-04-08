@@ -138,6 +138,16 @@ async function init(): Promise<void> {
 
   /* Load initial graph */
   await loadGraph();
+
+  /* ── Live-reload via SSE ───────────────────────────────────── */
+  const evtSource = new EventSource('/api/events');
+  evtSource.addEventListener('graph-changed', () => {
+    console.log('[live-reload] graph changed on disk, refreshing…');
+    void loadGraph();
+  });
+  evtSource.onerror = () => {
+    console.warn('[live-reload] SSE connection lost, will auto-reconnect');
+  };
 }
 
 /* ------------------------------------------------------------------ */

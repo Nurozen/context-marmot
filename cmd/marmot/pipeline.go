@@ -401,6 +401,15 @@ func runUIPipeline(dir string, port int, noOpen bool) error {
 	// Create API server with embedded frontend assets.
 	apiServer := api.NewServer(result.Engine, web.Assets)
 
+	// Start file watcher for live-reload.
+	stopWatcher, watchErr := apiServer.StartWatcher(dir)
+	if watchErr != nil {
+		fmt.Fprintf(os.Stderr, "live-reload: watcher failed to start: %v\n", watchErr)
+	} else {
+		defer stopWatcher()
+		fmt.Fprintln(os.Stderr, "live-reload: watching vault for changes")
+	}
+
 	addr := fmt.Sprintf(":%d", port)
 	url := fmt.Sprintf("http://localhost:%d", port)
 	fmt.Fprintf(os.Stderr, "ContextMarmot UI server starting at %s\n", url)
