@@ -1,17 +1,21 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/sdkgen"
 	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/verify"
 )
@@ -707,4 +711,137 @@ func nodeToAPI(n *node.Node, edgeCount int) APINode {
 	}
 
 	return apiNode
+}
+
+// ---------------------------------------------------------------------------
+// SDK endpoints
+// ---------------------------------------------------------------------------
+
+// handleSDKTS serves the generated TypeScript SDK file.
+func (s *Server) handleSDKTS(w http.ResponseWriter, r *http.Request) {
+	// Construct base URL from the request's Host header.
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+		scheme = fwd
+	}
+	baseURL := scheme + "://" + r.Host
+
+	content := sdkgen.Generate(baseURL)
+
+	w.Header().Set("Content-Type", "text/typescript; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="marmot-sdk.ts"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, content)
+}
+
+// handleSDKCall bridges TypeScript SDK tool calls to the MCP engine handlers.
+// It reads a JSON body, constructs an mcp.CallToolRequest, delegates to the
+// appropriate engine handler, and returns the result as JSON.
+func (s *Server) handleSDKCall(w http.ResponseWriter, r *http.Request) {
+	tool := r.PathValue("tool")
+	if tool == "" {
+		writeError(w, http.StatusBadRequest, "tool name is required")
+		return
+	}
+
+	// Read and parse JSON body into a generic map for arguments.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	var args map[string]any
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &args); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+	}
+	if args == nil {
+		args = make(map[string]any)
+	}
+
+	// Construct an mcp.CallToolRequest with the arguments map.
+	req := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      tool,
+			Arguments: args,
+		},
+	}
+
+	ctx := context.Background()
+
+	// Dispatch to the appropriate engine handler.
+	var result *mcp.CallToolResult
+	var handlerErr error
+
+	switch tool {
+	case "context_query":
+		result, handlerErr = s.engine.HandleContextQuery(ctx, req)
+	case "context_write":
+		result, handlerErr = s.engine.HandleContextWrite(ctx, req)
+	case "context_verify":
+		result, handlerErr = s.engine.HandleContextVerify(ctx, req)
+	case "context_delete":
+		result, handlerErr = s.engine.HandleContextDelete(ctx, req)
+	case "context_tag":
+		result, handlerErr = s.engine.HandleContextTag(ctx, req)
+	default:
+		writeError(w, http.StatusNotFound, "unknown tool: "+tool)
+		return
+	}
+
+	if handlerErr != nil {
+		writeError(w, http.StatusInternalServerError, "tool error: "+handlerErr.Error())
+		return
+	}
+
+	// Extract text content from the CallToolResult.
+	// The engine handlers return results via NewToolResultText or NewToolResultJSON,
+	// both of which place a TextContent as the first element.
+	if result == nil {
+		writeError(w, http.StatusInternalServerError, "tool returned nil result")
+		return
+	}
+
+	if result.IsError {
+		// Tool-level error: extract the error message from content.
+		msg := "unknown tool error"
+		if len(result.Content) > 0 {
+			if tc, ok := result.Content[0].(mcp.TextContent); ok {
+				msg = tc.Text
+			}
+		}
+		writeError(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+
+	// For successful results, extract the text content.
+	// If StructuredContent is present (from NewToolResultJSON), return it directly.
+	if result.StructuredContent != nil {
+		writeJSON(w, http.StatusOK, result.StructuredContent)
+		return
+	}
+
+	// Otherwise extract text from Content slice.
+	if len(result.Content) > 0 {
+		if tc, ok := result.Content[0].(mcp.TextContent); ok {
+			// Try to parse as JSON first (NewToolResultJSON puts JSON text in content).
+			var parsed any
+			if err := json.Unmarshal([]byte(tc.Text), &parsed); err == nil {
+				writeJSON(w, http.StatusOK, parsed)
+				return
+			}
+			// Not JSON — return as a context string (e.g., query XML result).
+			writeJSON(w, http.StatusOK, map[string]string{"context": tc.Text})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
 }

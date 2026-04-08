@@ -44,6 +44,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/summary/{namespace}", s.handleSummary)
 	s.mux.HandleFunc("GET /api/events", s.handleSSE)
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)
+	s.mux.HandleFunc("GET /sdk.ts", s.handleSDKTS)
+	s.mux.HandleFunc("POST /api/sdk/{tool}", s.handleSDKCall)
 
 	// Serve frontend assets (SPA fallback: serve index.html for non-API, non-asset paths).
 	if s.assets != nil {
@@ -91,7 +93,7 @@ func (s *Server) ListenAndServe(addr string) error {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

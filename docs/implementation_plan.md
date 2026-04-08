@@ -617,6 +617,20 @@ Multi-namespace view shows all namespaces as distant islands on the same canvas,
 - [x] Add 'Group by folder' option to toolbar dropdown
 - [x] CSS styles for `folder-hull` and `folder-label` elements
 
+## Phase 23: TypeScript SDK Generator — COMPLETE (2026-04-08)
+
+Locally-generated TypeScript SDK from MCP tool schemas, inspired by Cloudflare's code-mode pattern. A single `marmot sdk` command emits a self-contained `.ts` file with typed interfaces and a ready-to-use client class. No npm dependency required.
+
+- [x] Create `internal/sdkgen` package with `Generate(baseURL) string` function
+- [x] Generate all MCP tool input/output TypeScript interfaces (QueryInput, WriteInput, VerifyInput, DeleteInput, TagInput + results)
+- [x] Generate domain types (MarmotNode, MarmotEdge, GraphData, HeatPair, BridgeInfo)
+- [x] Generate `MarmotClient` class with 5 tool methods (query, write, verify, delete, tag) and 6 graph-read methods
+- [x] Add `marmot sdk` CLI command with `--out` and `--base-url` flags
+- [x] Add `GET /sdk.ts` HTTP endpoint for runtime SDK fetch
+- [x] Add `POST /api/sdk/{tool}` HTTP bridge for SDK → MCP tool calls
+- [x] Write comprehensive tests (6 test cases, all passing)
+- [x] Update README with TypeScript SDK section
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.
@@ -707,6 +721,7 @@ Post-MVP:
           └─> Phase 20 (Tags & Clustering)
           └─> Phase 21 (Multi-Namespace Bridges)
           └─> Phase 22 (Folder Grouping + Contour Hulls)
+    └─> Phase 23 (TypeScript SDK Generator)
 
   Phase 18.6 (when stable)
     └─> F1-F5 (Future Enhancements) [DEFERRED]

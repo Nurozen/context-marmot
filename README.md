@@ -34,6 +34,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
 - **Static analysis indexer** --- `marmot index <path>` parses Go (full AST), TypeScript (regex-based), and 30+ other languages into graph nodes with typed edges; incremental mode skips unchanged files; respects `.gitignore`
 - **Folder grouping** --- nodes cluster into topographic contour islands by their directory prefix (e.g. `packages/`, `core/`, `arch/`) with organic hulls and alpine cartographic styling
+- **TypeScript SDK** --- generate a type-safe client from MCP tool schemas; single `.ts` file, zero dependencies
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
 ## Quick Start
@@ -386,6 +387,7 @@ If the configured classifier provider's API key is not found at serve time, Cont
 | `marmot bridge <ns-a> <ns-b> [--relations ...] [--dir .marmot]` | Create bridge manifest between two namespaces |
 | `marmot summarize [--namespace ...] [--dir .marmot]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
+| `marmot sdk [--out ./marmot-sdk.ts] [--base-url URL]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
 | `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start HTTP server for the embedded graph visualization UI |
 
 ## Node Format
@@ -524,6 +526,65 @@ Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benc
 ### Post-MVP roadmap
 
 See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), node tags + domain clustering (Phase 20), multi-namespace bridge visualization (Phase 21), and folder grouping with contour hulls (Phase 22) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+
+## TypeScript SDK
+
+ContextMarmot can generate a type-safe TypeScript SDK from its MCP tool schemas --- a single self-contained `.ts` file with full interfaces and a ready-to-use client class.
+
+**Generate locally:**
+
+```bash
+# Write to file
+marmot sdk --out ./marmot-sdk.ts
+
+# Pipe to stdout
+marmot sdk
+
+# Custom server URL
+marmot sdk --base-url http://myserver:8080 --out ./sdk.ts
+```
+
+**Fetch from running server:**
+
+```bash
+# When marmot ui is running, the SDK is served at /sdk.ts
+curl http://localhost:3000/sdk.ts > marmot-sdk.ts
+```
+
+**Usage in your code:**
+
+```typescript
+import { MarmotClient } from './marmot-sdk';
+
+const client = new MarmotClient('http://localhost:3000');
+
+// Semantic query
+const result = await client.query({ query: 'authentication flow', depth: 3 });
+
+// Write a node
+await client.write({
+  id: 'auth/jwt-handler',
+  type: 'function',
+  summary: 'Validates and decodes JWT tokens',
+  edges: [{ target: 'auth/middleware', relation: 'calls' }],
+});
+
+// Check graph health
+const health = await client.verify({ check: 'all' });
+
+// Read graph data directly
+const graph = await client.getGraph('default');
+```
+
+**What's included:**
+
+- Full TypeScript interfaces for all 5 MCP tools (`query`, `write`, `verify`, `delete`, `tag`)
+- `MarmotClient` class with typed methods for tools + graph read APIs
+- Domain types: `MarmotNode`, `MarmotEdge`, `GraphData`, `HeatPair`, `BridgeInfo`
+- JSDoc comments on all interfaces and methods
+- Zero dependencies --- works with any fetch-compatible runtime (Node 18+, Deno, Bun, browsers)
+
+**Why local generation?** The SDK is generated from the exact tool schemas compiled into your `marmot` binary, so it's always in sync. No npm package to version separately. Regenerate after upgrading marmot.
 
 ## License
 
