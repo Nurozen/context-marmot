@@ -871,11 +871,22 @@ export class GraphView {
       return;
     }
 
-    /* Folder-based grouping: cluster by directory prefix */
+    /* Folder-based grouping: cluster by directory prefix.
+       Uses a wider centroid radius than other modes to give the contour
+       hulls breathing room between islands. */
     if (this.groupBy === 'folder') {
       const folders = [...new Set(this.nodes.map((n) => this.nodeFolder(n)))].sort();
-      const centroids = this.groupCentroids(folders, width, height);
-      const strength = 0.18;
+      const r = Math.min(width, height) * 0.38;
+      const centroids = new Map<string, { x: number; y: number }>();
+      folders.forEach((key, i) => {
+        if (folders.length === 1) {
+          centroids.set(key, { x: cx, y: cy });
+        } else {
+          const angle = (2 * Math.PI * i) / folders.length - Math.PI / 2;
+          centroids.set(key, { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
+        }
+      });
+      const strength = 0.22;
 
       this.simulation
         .force('x', d3.forceX<SimNode>((d) => centroids.get(this.nodeFolder(d))?.x ?? cx).strength(strength))
@@ -978,27 +989,32 @@ export class GraphView {
           fill, stroke,
         });
       } else if (nodes.length === 2) {
-        /* Two nodes — draw a rounded rectangle / capsule shape */
+        /* Two nodes — draw an organic capsule with semicircle end caps */
         const [a, b] = nodes;
         const dx = b.x! - a.x!;
         const dy = b.y! - a.y!;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const nx = -dy / dist * padding;
-        const ny = dx / dist * padding;
-        // Build a capsule by expanding along the perpendicular
-        const points: [number, number][] = [
-          [a.x! + nx, a.y! + ny],
-          [b.x! + nx, b.y! + ny],
-          [b.x! - nx, b.y! - ny],
-          [a.x! - nx, a.y! - ny],
+        const ux = dx / dist;            /* unit vector along a→b */
+        const uy = dy / dist;
+        const px = -uy * padding;         /* perpendicular */
+        const py = ux * padding;
+        /* Generate points: side A, semicircle around b, side B, semicircle around a */
+        const capsulePts: [number, number][] = [
+          [a.x! + px, a.y! + py],
+          [b.x! + px, b.y! + py],
+          [b.x! + ux * padding * 0.7 + px * 0.5, b.y! + uy * padding * 0.7 + py * 0.5],
+          [b.x! + ux * padding, b.y! + uy * padding],
+          [b.x! + ux * padding * 0.7 - px * 0.5, b.y! + uy * padding * 0.7 - py * 0.5],
+          [b.x! - px, b.y! - py],
+          [a.x! - px, a.y! - py],
+          [a.x! - ux * padding * 0.7 - px * 0.5, a.y! - uy * padding * 0.7 - py * 0.5],
+          [a.x! - ux * padding, a.y! - uy * padding],
+          [a.x! - ux * padding * 0.7 + px * 0.5, a.y! - uy * padding * 0.7 + py * 0.5],
         ];
-        const hull = d3.polygonHull(points);
-        if (hull) {
-          hullData.push({
-            folder,
-            path: `M ${hull.map((p) => p.join(',')).join(' L ')} Z`,
-            cx, cy, fill, stroke,
-          });
+        const lineGen = d3.line().curve(d3.curveCatmullRomClosed.alpha(0.5));
+        const pathStr = lineGen(capsulePts);
+        if (pathStr) {
+          hullData.push({ folder, path: pathStr, cx, cy, fill, stroke });
         }
       } else {
         /* 3+ nodes — convex hull with padding */
