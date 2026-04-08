@@ -66,6 +66,29 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultText(emptyXML), nil
 	}
 
+	// Step 2b: If cross-vault bridges exist, also search remote vault embeddings.
+	if e.VaultRegistry != nil {
+		for _, vid := range e.VaultRegistry.KnownVaultIDs() {
+			remoteStore, err := e.VaultRegistry.ResolveEmbeddingStore(vid)
+			if err != nil {
+				continue // best-effort
+			}
+			var remoteResults []embedding.ScoredResult
+			if includeSuperseded {
+				remoteResults, _ = remoteStore.Search(queryVec, 3, e.Embedder.Model())
+			} else {
+				remoteResults, _ = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+			}
+			// Prefix remote results with @vault-id/ so BridgedGraphResolver can resolve them.
+			for _, r := range remoteResults {
+				results = append(results, embedding.ScoredResult{
+					NodeID: "@" + vid + "/" + r.NodeID,
+					Score:  r.Score,
+				})
+			}
+		}
+	}
+
 	entryIDs := make([]string, 0, len(results))
 	for _, r := range results {
 		entryIDs = append(entryIDs, r.NodeID)

@@ -2,10 +2,12 @@ package namespace
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/routes"
@@ -18,6 +20,7 @@ type RemoteVault struct {
 	NodeStore *node.Store
 	Graph     *graph.Graph
 	Config    *config.VaultConfig
+	EmbStore  *embedding.Store // lazily opened; used for cross-vault query bridging
 	LoadedAt  time.Time
 }
 
@@ -175,5 +178,72 @@ func (r *VaultRegistry) KnownVaultIDs() []string {
 	return ids
 }
 
-// Close is a no-op currently but provides a hook for future cleanup.
-func (r *VaultRegistry) Close() {}
+// ResolveEmbeddingStore returns an embedding store for a remote vault,
+// loading it lazily. The store is read-only (used for search, not write).
+func (r *VaultRegistry) ResolveEmbeddingStore(vaultID string) (*embedding.Store, error) {
+	r.mu.RLock()
+	if rv, ok := r.vaults[vaultID]; ok && rv.EmbStore != nil {
+		r.mu.RUnlock()
+		return rv.EmbStore, nil
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Double-check after acquiring write lock.
+	if rv, ok := r.vaults[vaultID]; ok && rv.EmbStore != nil {
+		return rv.EmbStore, nil
+	}
+
+	// Find vault directory.
+	var vaultDir string
+	if r.routingTable != nil {
+		if p, ok := r.routingTable.Get(vaultID); ok {
+			vaultDir = p
+		}
+	}
+	if vaultDir == "" {
+		for path, id := range r.pathToID {
+			if id == vaultID {
+				vaultDir = path
+				break
+			}
+		}
+	}
+	if vaultDir == "" {
+		return nil, fmt.Errorf("unknown vault %q", vaultID)
+	}
+
+	// Open embedding store.
+	dbPath := filepath.Join(vaultDir, ".marmot-data", "embeddings.db")
+	store, err := embedding.NewStore(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open embedding store for vault %q: %w", vaultID, err)
+	}
+
+	// Cache on the RemoteVault entry (create if needed).
+	rv, ok := r.vaults[vaultID]
+	if !ok {
+		// Load the graph too if not already loaded.
+		_, loadErr := r.loadVaultLocked(vaultID, vaultDir)
+		if loadErr != nil {
+			_ = store.Close()
+			return nil, loadErr
+		}
+		rv = r.vaults[vaultID] // loadVaultLocked caches it
+	}
+	rv.EmbStore = store
+	return store, nil
+}
+
+// Close releases resources held by cached remote vaults.
+func (r *VaultRegistry) Close() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rv := range r.vaults {
+		if rv.EmbStore != nil {
+			_ = rv.EmbStore.Close()
+		}
+	}
+}
