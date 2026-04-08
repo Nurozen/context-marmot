@@ -433,9 +433,12 @@ export class MarmotClient {
    * @param id        - The node's ID (without namespace prefix).
    */
   async getNode(namespace: string, id: string): Promise<MarmotNode> {
+    // id may contain slashes (e.g. "auth/login") which must remain literal
+    // path segments — only encode each segment individually.
+    const encodedId = id.split('/').map(encodeURIComponent).join('/');
     return this.request<MarmotNode>(
       'GET',
-      ` + "`" + `/api/node/${encodeURIComponent(namespace)}/${encodeURIComponent(id)}` + "`" + `,
+      ` + "`" + `/api/node/${encodeURIComponent(namespace)}/${encodedId}` + "`" + `,
     );
   }
 

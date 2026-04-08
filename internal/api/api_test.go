@@ -987,3 +987,137 @@ func TestResponseContentType(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SDK endpoint tests
+// ---------------------------------------------------------------------------
+
+func TestHandleSDKTS(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	rec := doRequest(t, handler, "GET", "/sdk.ts", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/typescript") {
+		t.Errorf("expected Content-Type text/typescript, got %q", ct)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "MarmotClient") {
+		t.Error("SDK output missing MarmotClient class")
+	}
+	if !strings.Contains(body, "MarmotError") {
+		t.Error("SDK output missing MarmotError class")
+	}
+	if !strings.Contains(body, "export class") {
+		t.Error("SDK output missing export class declarations")
+	}
+}
+
+func TestHandleSDKCallUnknownTool(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	rec := doRequest(t, handler, "POST", "/api/sdk/invalid_tool", `{}`)
+	// Unknown tools should return 404.
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown tool, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var errResp ErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if !strings.Contains(errResp.Error, "unknown tool") {
+		t.Errorf("expected 'unknown tool' in error message, got %q", errResp.Error)
+	}
+}
+
+func TestHandleSDKCallContextQuery(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	// context_query should route correctly and not panic.
+	body := `{"query": "authentication", "depth": 2, "budget": 4096}`
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_query", body)
+
+	// May return 200 or 500 depending on embedding availability,
+	// but it should NOT panic or return 404/400.
+	if rec.Code == http.StatusNotFound || rec.Code == http.StatusBadRequest {
+		t.Errorf("context_query routing failed: got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSDKCallContextWrite(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	body := `{"id": "test/sdk-write", "type": "function", "summary": "SDK write test", "namespace": "default"}`
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_write", body)
+
+	// Should route to HandleContextWrite and succeed or return a tool-level error.
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("context_write routing failed: got 404: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSDKCallMalformedJSON(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_query", `{invalid json}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for malformed JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSDKCallEmptyBody(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	// Empty body should still route — the handler defaults to empty args map.
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_query", "")
+	// context_query requires a "query" argument, so it should return a tool-level error (422)
+	// or internal error, but NOT panic and NOT 404.
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("empty body should still route, got 404: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSDKCallContextVerify(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	body := `{"check": "all"}`
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_verify", body)
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("context_verify routing failed: got 404: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSDKCallContextDelete(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	body := `{"id": "nonexistent/node"}`
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_delete", body)
+	// Should route to delete handler. Will likely return an error since node doesn't exist.
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("context_delete routing failed: got 404: %s", rec.Body.String())
+	}
+}
+
+func TestHandleSDKCallContextTag(t *testing.T) {
+	server, _ := newTestServer(t)
+	handler := server.Handler()
+
+	body := `{"query": "auth", "tag": "test-tag"}`
+	rec := doRequest(t, handler, "POST", "/api/sdk/context_tag", body)
+	if rec.Code == http.StatusNotFound {
+		t.Errorf("context_tag routing failed: got 404: %s", rec.Body.String())
+	}
+}
