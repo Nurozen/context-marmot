@@ -15,26 +15,51 @@ Agent  -->  MCP Server  -->  Embed + Search + Traverse + Compact  -->  XML conte
 
 Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikilinks]]`. Open the vault in Obsidian or use the built-in web UI for graph visualization.
 
+---
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%">
+<img src="assets/screenshots/graph-namespace-bridges.png" alt="Multi-namespace graph with bridge arcs" width="100%">
+<p align="center"><em>Multi-namespace graph with bridge arcs</em></p>
+</td>
+<td width="50%">
+<img src="assets/screenshots/curator-chat.png" alt="Chat-driven graph curation" width="100%">
+<p align="center"><em>Chat-driven graph curation</em></p>
+</td>
+</tr>
+<tr>
+<td width="50%">
+<img src="assets/screenshots/detail-panel.png" alt="Node detail panel" width="100%">
+<p align="center"><em>Node detail panel with edges, tags, and summary</em></p>
+</td>
+<td width="50%">
+<img src="assets/screenshots/graph-folder-bridges.png" alt="Folder grouping with contour hulls" width="100%">
+<p align="center"><em>Folder grouping with organic contour hulls</em></p>
+</td>
+</tr>
+</table>
+
+---
+
 ## Features
 
 - **Graph-based context** --- nodes connected by typed, directed edges (structural and behavioral)
-- **Structural acyclicity** --- `contains`, `imports`, `extends`, `implements` edges enforce DAG structure; `calls`, `reads`, `writes`, `references` edges allow cycles (mutual recursion is real)
+- **Structural acyclicity** --- DAG-enforced for `contains`, `imports`, `extends`, `implements`; cycles allowed for behavioral edges
 - **Semantic search** --- embedding index for natural language queries with graph traversal expansion
 - **Token-budget compaction** --- results fit your context window, with full/compact/truncated tiers
-- **MCP server** --- 5 tools (`context_query`, `context_write`, `context_tag`, `context_verify`, `context_delete`) over stdio
-- **Domain tags** --- many-to-many semantic categorization for nodes; bulk-tag via search query; graph clustering and filtering by tag
-- **Obsidian-compatible** --- every node file renders natively in Obsidian with working graph view
+- **MCP server** --- 5 tools over stdio (`context_query`, `context_write`, `context_tag`, `context_verify`, `context_delete`)
+- **CRUD classifier** --- auto-classifies writes as ADD/UPDATE/SUPERSEDE/NOOP using embeddings + optional LLM
+- **Multi-namespace** --- project isolation with bridge manifests for cross-namespace and cross-vault edges
+- **Domain tags** --- many-to-many semantic categorization; bulk-tag via search query; graph clustering by tag
+- **Static analysis indexer** --- parses Go (full AST), TypeScript, and 30+ languages into graph nodes with typed edges
+- **Graph visualization** --- embedded D3 web UI with filters, search, heat overlay, folder grouping, and bridge arcs
+- **Graph Curator** --- chat-driven curation UI with NL queries, slash commands, and node-ref pills
+- **Summary engine** --- auto-generates namespace summaries via LLM; regenerates on significant changes
+- **Heat map** --- co-access frequency tracking with exponential decay; hot edges get traversal priority
 - **Integrity verification** --- hash-based staleness detection, dangling edge checks, cycle detection
-- **Temporal node lifecycle** --- soft-delete and supersede nodes; active-only queries by default with `include_superseded` opt-in
-- **CRUD classifier** --- `context_write` classifies incoming nodes as ADD / UPDATE / SUPERSEDE / NOOP using embedding similarity + optional LLM; falls back to embedding-distance thresholds when no LLM is configured
-- **Multi-namespace** --- project isolation with namespace directories, bridge manifests for cross-namespace edges, qualified ID resolution
-- **Heat map** --- co-access frequency tracking with exponential decay and floor; hot edges get traversal priority within budget constraints
-- **Summary engine** --- auto-generates `_summary.md` per namespace using LLM; async scheduler regenerates on significant node changes; graceful degradation when LLM unavailable
-- **Update engine** --- detects source file changes via hash comparison, propagates staleness through reverse edges, reindexes affected nodes; file watcher mode for continuous operation
-- **Concurrent-safe** --- namespace-level write locks let multiple agents safely share a vault; reads are lock-free
-- **Static analysis indexer** --- `marmot index <path>` parses Go (full AST), TypeScript (regex-based), and 30+ other languages into graph nodes with typed edges; incremental mode skips unchanged files; respects `.gitignore`
-- **Folder grouping** --- nodes cluster into topographic contour islands by their directory prefix (e.g. `packages/`, `core/`, `arch/`) with organic hulls and alpine cartographic styling
-- **TypeScript SDK** --- generate a type-safe client from MCP tool schemas; single `.ts` file, zero dependencies
 - **Single binary** --- Go, zero CGo, zero runtime dependencies
 
 ## Quick Start
@@ -99,7 +124,7 @@ marmot init
 2. **`configure`** --- prompts for embedding provider, model, API key, and CRUD classifier (provider + model)
 3. **`setup`** --- detects your tools (Claude Code, Codex, VS Code, Cursor) and writes MCP configs
 
-After init, write nodes and index:
+After init, index your source code:
 
 ```bash
 marmot index
@@ -125,251 +150,17 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
+## MCP Tools
+
 Once connected, agents get five tools:
 
 | Tool | Description |
 |------|-------------|
 | `context_query` | Search the graph by natural language. Returns XML-compacted subgraph within token budget. |
-| `context_write` | Write or update a node. Enforces structural acyclicity. Updates embedding index. Accepts optional `tags` for domain categorization. |
+| `context_write` | Write or update a node. Enforces structural acyclicity. Updates embedding index. Accepts optional `tags`. |
 | `context_tag` | Bulk-tag nodes by semantic search query. Finds nodes matching a query and applies the given tags. |
 | `context_verify` | Check node staleness, dangling edges, and structural integrity. |
-| `context_delete` | Soft-delete (supersede) a node. Marks it `status: superseded` with a `valid_until` timestamp. Excluded from future queries by default. |
-
-### Example: context_query
-
-```json
-{"query": "user authentication", "depth": 2, "budget": 4096}
-```
-
-Returns:
-
-```xml
-<context_result tokens="948" nodes="7">
-  <node id="auth/login" type="function" depth="0">
-    <summary>Authenticates a user with email and password...</summary>
-    <edges>
-      <edge target="auth/validate_token" relation="calls"/>
-      <edge target="db/users" relation="reads"/>
-    </edges>
-    <context language="typescript">...</context>
-  </node>
-  <node_compact id="db/users" type="function" depth="1">
-    <summary>Queries the users table...</summary>
-  </node_compact>
-  ...
-</context_result>
-```
-
-### Example: context_write
-
-```json
-{
-  "id": "auth/refresh",
-  "type": "function",
-  "tags": ["auth", "security"],
-  "summary": "Refreshes an expired JWT token",
-  "context": "func refreshToken(old string) (string, error) { ... }",
-  "edges": [{"target": "auth/validate_token", "relation": "calls"}]
-}
-```
-
-### Example: context_verify
-
-```json
-{"check": "integrity"}
-```
-
-## Bridges
-
-Bridges allow edges and queries to cross namespace or vault boundaries. Two types are supported:
-
-### Namespace bridges (same vault)
-
-Connect two namespaces within the same `.marmot/` vault. Nodes can declare edges to nodes in the other namespace using `namespace/node-id` format.
-
-```bash
-# Create a bridge between frontend and backend namespaces
-marmot bridge frontend backend --relations calls,reads,references
-```
-
-This creates `.marmot/_bridges/frontend--backend.md`:
-
-```yaml
----
-source: frontend
-target: backend
-created: "2026-04-08T10:00:00Z"
-allowed_relations:
-    - calls
-    - reads
-    - references
----
-```
-
-Once a bridge exists, nodes can declare cross-namespace edges:
-
-```yaml
-# In frontend/dashboard.md
-edges:
-    - target: backend/auth
-      relation: calls
-```
-
-The bridge manifest authorizes specific relation types at write time --- `context_write` rejects cross-namespace edges that aren't in the `allowed_relations` list.
-
-**Querying across namespaces:** `context_query` searches the global embedding index (all namespaces share one store) and traverses edges across namespace boundaries automatically. No special query syntax needed.
-
-**Graph UI:** Select "All namespaces" in the namespace dropdown to see cross-namespace edges rendered as dashed amber Bezier arcs ("marmot tunnels") between namespace islands.
-
-### Cross-vault bridges (separate projects)
-
-Connect two separate `.marmot/` vaults. Each vault can be a different project with its own embedding store.
-
-```bash
-# From your local vault, bridge to a remote vault
-marmot bridge /path/to/remote/.marmot --relations cross_project,references
-```
-
-This creates matching bridge manifests in **both** vaults and registers them in `~/.marmot/routes.yml` for cross-vault node resolution.
-
-Cross-vault bridge files use `@vault-id` prefixes:
-
-```yaml
----
-source: local-vault-id
-target: remote-vault-id
-source_vault_path: /path/to/local/.marmot
-target_vault_path: /path/to/remote/.marmot
-source_vault_id: local-vault-id
-target_vault_id: remote-vault-id
-allowed_relations:
-    - cross_project
-    - references
----
-```
-
-Nodes declare cross-vault edges with the `@vault-id/node-id` format:
-
-```yaml
-edges:
-    - target: "@remote-vault-id/shared/api-client"
-      relation: cross_project
-```
-
-**Querying across vaults:** `context_query` automatically searches the remote vault's embedding store (top 3 results per bridged vault) and includes those as additional entry points for graph traversal. Remote nodes appear in results with `@vault-id/` prefixed IDs.
-
-### Namespace setup
-
-To use namespace bridges, each namespace needs a `_namespace.md` file:
-
-```bash
-# Create namespace directories with manifests
-mkdir -p .marmot/frontend .marmot/backend
-
-cat > .marmot/frontend/_namespace.md << 'EOF'
----
-name: frontend
-description: Frontend UI components
----
-EOF
-
-cat > .marmot/backend/_namespace.md << 'EOF'
----
-name: backend
-description: Backend API services
----
-EOF
-```
-
-Verify namespaces are detected:
-
-```bash
-marmot status --dir .marmot
-# Should show: Namespaces: frontend, backend
-```
-
-## Embedding Providers
-
-ContextMarmot supports pluggable embedding providers for semantic search. Out of the box, two providers are available:
-
-| Provider | Models | Description |
-|----------|--------|-------------|
-| `mock` (default) | `mock-v1` | Character trigram hashing. No API key needed. Lexical overlap only --- texts must share substrings to match. |
-| `openai` | `text-embedding-3-small` (default), `text-embedding-3-large`, `text-embedding-ada-002` | Real semantic embeddings via the OpenAI API. Paraphrases and synonyms match. |
-
-### Configuring OpenAI embeddings
-
-The easiest way is the interactive configure command (also runs automatically during `marmot init`):
-
-```bash
-marmot configure
-```
-
-This prompts for provider, model, and API key. The key is stored in `.marmot/.marmot-data/.env` (gitignored).
-
-**Manual configuration** --- edit `.marmot/_config.md` frontmatter directly:
-
-```yaml
----
-version: "1"
-namespace: default
-embedding_provider: openai
-embedding_model: text-embedding-3-small
----
-```
-
-Then set your API key via environment variable:
-
-```bash
-export OPENAI_API_KEY=sk-...
-```
-
-After changing the embedding provider or model, rebuild embeddings:
-
-```bash
-marmot index --force
-```
-
-### Fallback behavior
-
-If `embedding_provider` is set to `openai` (or another non-mock provider) but the required API key is not found in the environment, ContextMarmot logs a warning to stderr and falls back to the mock embedder automatically. This ensures the tool never fails to start due to a missing key.
-
-## CRUD Classifier
-
-When an agent calls `context_write`, ContextMarmot automatically classifies the write before persisting:
-
-| Action | Meaning |
-|--------|---------|
-| **ADD** | New concept — no similar node exists |
-| **UPDATE** | Enriches or corrects an existing node (same concept, better content) |
-| **SUPERSEDE** | Replaces an existing node — old node is soft-deleted, chain preserved |
-| **NOOP** | Content is essentially identical to an existing node — skipped |
-
-Classification uses embedding similarity to find candidates, then optionally an LLM to decide. Without an LLM, pure embedding distance thresholds are used (NOOP ≥ 0.95, UPDATE ≥ 0.80, SUPERSEDE ≥ 0.65, else ADD).
-
-### Configuring the classifier
-
-Run `marmot configure` (also runs during `marmot init`) — it prompts for classifier provider after the embedding section:
-
-```
-CRUD Classifier:
-  > 1) openai   (gpt-5.1-codex-mini)
-    2) anthropic (claude-haiku-4-5-20251001)
-    3) none     (embedding-distance fallback)
-```
-
-If you select **openai** and your embedding provider is also OpenAI, the same `OPENAI_API_KEY` is reused — no second key needed. Selecting **anthropic** prompts for `ANTHROPIC_API_KEY` separately. Selecting **none** uses the embedding-distance fallback with no API calls.
-
-**Manual configuration** — edit `.marmot/_config.md` frontmatter directly:
-
-```yaml
-classifier_provider: openai
-classifier_model: gpt-5.1-codex-mini
-```
-
-### Fallback behavior
-
-If the configured classifier provider's API key is not found at serve time, ContextMarmot logs a warning to stderr and falls back to embedding-distance classification automatically.
+| `context_delete` | Soft-delete (supersede) a node. Excluded from future queries by default. |
 
 ## CLI Reference
 
@@ -378,213 +169,77 @@ If the configured classifier provider's API key is not found at serve time, Cont
 | `marmot init [--dir .marmot]` | Create a new vault, run configure, then setup |
 | `marmot configure [--dir .marmot]` | Interactive prompt for embedding provider, model, API key, and CRUD classifier |
 | `marmot setup [--dir .marmot] [--claude] [--codex] [--vscode] [--cursor]` | Generate MCP configs for detected (or specified) tools |
-| `marmot index [--dir .marmot] [--force] [<path>] [--incremental]` | Index node files into the embedding store. With `<path>`: run static analysis indexer on source code directory. `--incremental` skips unchanged files. `--force` clears and rebuilds all embeddings. |
+| `marmot index [--dir .marmot] [--force] [<path>] [--incremental]` | Index node files or run static analysis on source code. `--force` rebuilds all embeddings. |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
 | `marmot verify [--dir .marmot]` | Run integrity and staleness checks |
 | `marmot serve [--dir .marmot]` | Start the MCP server on stdio |
-| `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, stale nodes, namespaces, heat map |
+| `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, namespaces, heat map |
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
-| `marmot bridge <ns-a> <ns-b> [--relations ...] [--dir .marmot]` | Create bridge manifest between two namespaces |
-| `marmot summarize [--namespace ...] [--dir .marmot]` | Force summary regeneration for a namespace |
+| `marmot bridge <ns-a> <ns-b> [--relations ...]` | Create bridge manifest between two namespaces |
+| `marmot summarize [--namespace ...]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
-| `marmot sdk [--out ./marmot-sdk.ts] [--base-url URL]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
-| `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start HTTP server for the embedded graph visualization UI |
-
-## Node Format
-
-Nodes are markdown files with YAML frontmatter:
-
-```markdown
----
-id: auth/login
-type: function
-namespace: default
-status: active
-tags:
-  - auth
-  - security
-source:
-  path: src/auth/login.ts
-  lines: [1, 35]
-  hash: a3f8b2c1
-edges:
-  - target: auth/validate_token
-    relation: calls
-  - target: db/users
-    relation: reads
----
-
-Authenticates a user with email and password.
-
-## Relationships
-
-- **calls** [[auth/validate_token]]
-- **reads** [[db/users]]
-
-## Context
-
-// typescript
-export async function login(email: string, password: string) { ... }
-```
-
-### Edge types
-
-**Structural** (acyclic --- enforced):
-`contains`, `imports`, `extends`, `implements`
-
-**Behavioral** (cycles allowed):
-`calls`, `reads`, `writes`, `references`, `cross_project`, `associated`
+| `marmot sdk [--out ./marmot-sdk.ts]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
+| `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start the embedded graph visualization UI |
 
 ## Architecture
 
 ```
 cmd/marmot/              CLI (init, configure, setup, index, query, serve, verify)
 internal/
-  config/                Vault config parser, .env key storage, embedder + classifier factory
+  config/                Vault config, .env key storage, embedder + classifier factory
   node/                  Markdown parser/writer, atomic file I/O, temporal fields
-  graph/                 In-memory graph, adjacency lists, cycle detection, active-node index
-  verify/                Hash integrity, staleness, structural + temporal chain checks
+  graph/                 In-memory graph, adjacency lists, cycle detection
+  verify/                Hash integrity, staleness, structural checks
   embedding/             SQLite store, KNN search, OpenAI + mock embedders
-  traversal/             BFS traversal, token-budget XML compaction, superseded-node filtering
-  llm/                   LLM provider interface, OpenAI + Anthropic + mock implementations
-  classifier/            CRUD classifier: embedding search + LLM path + distance fallback
+  traversal/             BFS traversal, token-budget XML compaction
+  llm/                   LLM provider interface (OpenAI, Anthropic, mock)
+  classifier/            CRUD classifier: embedding + LLM + distance fallback
   namespace/             Namespace manager, bridge manifests, qualified ID resolution
-  summary/               Namespace summary generation, async scheduler, _summary.md I/O
-  update/                Source change detection, staleness propagation, reindex, file watcher
-  indexer/               Static analysis indexer: Go AST, TypeScript regex, generic file, ignore patterns, runner
-  mcp/                   MCP server (5 tools), engine wiring, cross-namespace edge validation
+  summary/               Namespace summary generation, async scheduler
+  update/                Source change detection, staleness propagation, file watcher
+  indexer/               Static analysis: Go AST, TypeScript regex, generic, runner
+  mcp/                   MCP server (5 tools), engine wiring
 ```
 
-See [docs/architecture.md](docs/architecture.md) for the full system design, and [docs/data-structures.md](docs/data-structures.md) for format specifications.
-
-## Development
-
-```bash
-make build         # Build binary to bin/marmot
-make test          # Run all tests with race detector
-make test-v        # Verbose test output
-make test-cover    # Generate coverage report
-make vet           # Run go vet
-make fmt           # Format code
-make tidy          # Tidy go.mod
-```
-
-Run integration tests:
-
-```bash
-go test -race -tags integration -count=1 ./internal/
-```
+See [docs/architecture.md](docs/architecture.md) for the full system design.
 
 ## Current Status
 
-**MVP complete.** Evaluated on [SWE-QA](https://huggingface.co/datasets/swe-qa/SWE-QA-Benchmark) — 20 code comprehension questions across django, flask, pytest, and requests, judged by Claude on correctness, completeness, and specificity (1–5):
+**MVP complete.** Evaluated on [SWE-QA](https://huggingface.co/datasets/swe-qa/SWE-QA-Benchmark) --- 20 code comprehension questions across django, flask, pytest, and requests:
 
 | Metric | Vanilla (file tools) | Hybrid (ContextMarmot) | Improvement |
 |--------|---------------------|----------------------|-------------|
-| Answer quality (1–5) | 4.62 | 4.62 | **identical** |
-| Tokens per question | 151,327 | 95,876 | **−37%** |
-| Cost per question | $0.1065 | $0.0834 | **−22%** |
-| Avg turns | 7.5 | 6.9 | −8% |
+| Answer quality (1-5) | 4.62 | 4.62 | **identical** |
+| Tokens per question | 151,327 | 95,876 | **-37%** |
+| Cost per question | $0.1065 | $0.0834 | **-22%** |
+| Avg turns | 7.5 | 6.9 | -8% |
 
-Same quality. Lower cost. The graph acts as a navigation map — agents query it first, then read only the files and line ranges it identifies, skipping broad exploration. On hard multi-file questions the savings are largest (up to 50% fewer turns).
+Same quality. Lower cost. The graph acts as a navigation map --- agents query it first, then read only the files and line ranges it identifies, skipping broad exploration.
 
-Evaluated with Claude Sonnet and OpenAI `text-embedding-3-small`. See [docs/benchmark.md](docs/benchmark.md) for full per-question breakdown and methodology.
-
-### MVP scope (implemented)
-
-- Node store with Obsidian-compatible markdown
-- In-memory graph with structural/behavioral edge classification
-- Embedding index with KNN search (Go-side, SQLite-backed)
-- Pluggable embedding providers (OpenAI and mock) with config-driven selection
-- Token-budget-aware graph traversal and XML compaction
-- MCP server with 5 tools over stdio
-- CLI with init, configure, setup, index, query, verify, serve
-- Interactive configuration (provider, model, API key) with vault `.env` storage
-- Auto-setup for Claude Code, Codex, VS Code, and Cursor (MCP config generation)
-- Security hardened (path traversal protection, input validation, parameterized SQL)
-- Temporal node lifecycle (Phase 8): soft-delete, supersede, `valid_from`/`valid_until`/`superseded_by` fields, active-only queries
-- CRUD classifier (Phase 9): ADD/UPDATE/SUPERSEDE/NOOP classification on every `context_write`, LLM + embedding-distance fallback, OpenAI and Anthropic providers
-- `context_delete` MCP tool for explicit soft-delete with optional `superseded_by` reference
-- Namespace-level write mutex (Phase 10): concurrent writes to different namespaces proceed in parallel; same-namespace writes serialize to prevent CRUD races and TOCTOU bugs
-- Namespace manager + bridges (Phase 11): `_namespace.md` per-namespace config, `_bridges/*.md` relation whitelists, qualified ID resolution, cross-namespace edge validation on write, auto-discovery of cross-namespace edges
-- Heat map (Phase 12): co-access frequency tracking in `_heat/<namespace>.md`, exponential decay with floor, heat-boosted BFS traversal priority, automatic co-access logging from `context_query`
-- Summary engine (Phase 13): `_summary.md` per namespace via LLM synthesis, async regeneration scheduler with delta threshold + periodic interval, graceful degradation
-- Update engine (Phase 13): source hash change detection, reverse-edge staleness propagation, automatic reindexing, fsnotify file watcher, batch update mode
-- Full CLI (Phase 15): `status`, `watch`, `bridge`, `summarize`, `reembed` commands; enhanced `verify` with namespace filter and staleness checks
-- Slim HTTP API (Phase 16): `/api/graph`, `/api/namespaces`, `/api/node`, `/api/search`, `/api/heat`, `/api/bridges`, `/api/summary`, and inline node updates via `PUT /api/node/{id...}`
-- Static analysis indexer (Phase 17): Go AST indexer (packages, functions, methods, types, interfaces), TypeScript regex-based indexer (classes, interfaces, functions, type aliases), generic file indexer (30+ extensions), `.gitignore` support, incremental indexing with CRUD classification, `marmot index <path>` CLI integration
-- Graph visualization frontend (Phase 19): embedded D3 web UI served by `marmot ui` with filters, search, heat overlay, minimap, legend, keyboard shortcuts, and inline summary/context editing
-- Node tags & domain clustering (Phase 20): many-to-many domain tags on nodes, `context_tag` MCP tool for bulk-tagging via semantic search, graph grouping and filtering by tag, tag badges in detail panel
-- Multi-namespace graph & bridge visualization (Phase 21): "All Namespaces" view shows cross-namespace bridges as curved Bezier arcs ("marmot tunnels"); each namespace forms a distinct island with watermark labels; bridge node indicators and hover highlighting
-- Folder grouping with contour hulls (Phase 22): "Group by folder" clusters nodes into topographic contour islands by directory prefix (e.g. `packages/`, `core/`, `arch/`) with organic Catmull-Rom hulls, alpine cartographic palette, and fluid tick-driven animation
+See [docs/benchmark.md](docs/benchmark.md) for the full per-question breakdown and methodology.
 
 ### Known MVP limitations
 
-- **Go-side KNN** --- sqlite-vec WASM bindings have an ABI mismatch with the current ncruces driver. Search scans all embeddings in Go. Fine for thousands of nodes; would need sqlite-vec for 100k+.
+- **Go-side KNN** --- search scans all embeddings in Go. Fine for thousands of nodes; would need sqlite-vec for 100k+.
 - **Limited provider selection** --- OpenAI and mock are supported. Voyage AI, Ollama, and other providers are not yet available.
 
 ### Post-MVP roadmap
 
-See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan including the TypeScript web UI. Temporal fields (Phase 8), CRUD classification (Phase 9), namespace-level concurrency (Phase 10), namespace manager + bridges (Phase 11), heat map (Phase 12), summary + update engines (Phase 13), full CLI (Phase 15), static analysis indexer (Phase 17), integration testing + CI/CD (Phase 18), graph visualization (Phase 19), node tags + domain clustering (Phase 20), multi-namespace bridge visualization (Phase 21), and folder grouping with contour hulls (Phase 22) are already implemented. See [docs/benchmark.md](docs/benchmark.md) for the SWE-QA evaluation methodology and results.
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan and phase status.
 
-## TypeScript SDK
+## Documentation
 
-ContextMarmot can generate a type-safe TypeScript SDK from its MCP tool schemas --- a single self-contained `.ts` file with full interfaces and a ready-to-use client class.
-
-**Generate locally:**
-
-```bash
-# Write to file
-marmot sdk --out ./marmot-sdk.ts
-
-# Pipe to stdout
-marmot sdk
-
-# Custom server URL
-marmot sdk --base-url http://myserver:8080 --out ./sdk.ts
-```
-
-**Fetch from running server:**
-
-```bash
-# When marmot ui is running, the SDK is served at /sdk.ts
-curl http://localhost:3000/sdk.ts > marmot-sdk.ts
-```
-
-**Usage in your code:**
-
-```typescript
-import { MarmotClient } from './marmot-sdk';
-
-const client = new MarmotClient('http://localhost:3000');
-
-// Semantic query
-const result = await client.query({ query: 'authentication flow', depth: 3 });
-
-// Write a node
-await client.write({
-  id: 'auth/jwt-handler',
-  type: 'function',
-  summary: 'Validates and decodes JWT tokens',
-  edges: [{ target: 'auth/middleware', relation: 'calls' }],
-});
-
-// Check graph health
-const health = await client.verify({ check: 'all' });
-
-// Read graph data directly
-const graph = await client.getGraph('default');
-```
-
-**What's included:**
-
-- Full TypeScript interfaces for all 5 MCP tools (`query`, `write`, `verify`, `delete`, `tag`)
-- `MarmotClient` class with typed methods for tools + graph read APIs
-- Domain types: `MarmotNode`, `MarmotEdge`, `GraphData`, `HeatPair`, `BridgeInfo`
-- JSDoc comments on all interfaces and methods
-- Zero dependencies --- works with any fetch-compatible runtime (Node 18+, Deno, Bun, browsers)
-
-**Why local generation?** The SDK is generated from the exact tool schemas compiled into your `marmot` binary, so it's always in sync. No npm package to version separately. Regenerate after upgrading marmot.
+| Document | Description |
+|----------|-------------|
+| [Architecture](docs/architecture.md) | Full system design and component interactions |
+| [Bridges](docs/bridges.md) | Namespace and cross-vault bridge configuration |
+| [Embedding Providers](docs/embedding-providers.md) | Embedding provider setup and fallback behavior |
+| [CRUD Classifier](docs/crud-classifier.md) | Write classification (ADD/UPDATE/SUPERSEDE/NOOP) |
+| [TypeScript SDK](docs/typescript-sdk.md) | Type-safe SDK generation and usage |
+| [Development](docs/development.md) | Build commands, node format, and edge types |
+| [Benchmark](docs/benchmark.md) | SWE-QA evaluation methodology and results |
+| [Data Structures](docs/data-structures.md) | Node, edge, and vault format specifications |
+| [Implementation Plan](docs/implementation_plan.md) | Full roadmap with phase status |
 
 ## License
 
