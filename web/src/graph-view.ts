@@ -78,6 +78,12 @@ export class GraphView {
   private heatPairs: APIHeatPair[] = [];
   private groupBy: 'none' | 'type' | 'namespace' | 'tag' | 'folder' = 'type';
 
+  /* Multi-selection for curator integration */
+  private multiSelectedIds: Set<string> = new Set();
+
+  /* Pulse animation layer */
+  private pulseGroup!: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+
   /* Minimap & heat overlay */
   private minimap: Minimap | null = null;
   private heatOverlay: HeatOverlay = new HeatOverlay();
@@ -111,6 +117,7 @@ export class GraphView {
     this.bridgeGroup = this.container.append('g').attr('class', 'bridge-arcs');
     this.heatGroup = this.container.append('g').attr('class', 'heat-links');
     this.nodeGroup = this.container.append('g').attr('class', 'nodes');
+    this.pulseGroup = this.container.append('g').attr('class', 'pulse-rings');
 
     /* Zoom */
     this.zoomBehavior = d3
@@ -319,6 +326,87 @@ export class GraphView {
       .attr('r', (d) => d.radius);
   }
 
+  /**
+   * Animated pulse highlight: 3 concentric amber rings expanding from the node.
+   * Pans the camera to center the node.
+   */
+  pulseNode(nodeId: string): void {
+    const node = this.nodes.find((n) => n.id === nodeId);
+    if (!node || node.x == null || node.y == null) return;
+
+    /* Pan to center the node */
+    const { width, height } = this.dimensions();
+    const scale = 2;
+    const tx = width / 2 - node.x * scale;
+    const ty = height / 2 - node.y * scale;
+    const transform = d3.zoomIdentity.translate(tx, ty).scale(scale);
+    this.svg.transition().duration(600).call(this.zoomBehavior.transform, transform);
+
+    /* Create 3 concentric pulse rings at staggered delays */
+    const cx = node.x;
+    const cy = node.y;
+    const r = node.radius;
+
+    for (let i = 0; i < 3; i++) {
+      const ring = this.pulseGroup
+        .append('circle')
+        .attr('class', 'node-pulse-ring')
+        .attr('cx', cx)
+        .attr('cy', cy)
+        .attr('r', r)
+        .attr('fill', 'none')
+        .attr('stroke', '#d4a853')
+        .attr('stroke-width', 2)
+        .attr('opacity', 0);
+
+      ring
+        .transition()
+        .delay(i * 300)
+        .duration(0)
+        .attr('opacity', 0.4)
+        .transition()
+        .duration(2000)
+        .ease(d3.easeCubicOut)
+        .attr('r', r * 3)
+        .attr('opacity', 0)
+        .attr('stroke-width', 0.5)
+        .remove();
+    }
+  }
+
+  /** Toggles a node in/out of the multi-selection set (Shift+click). */
+  toggleMultiSelect(nodeId: string): void {
+    if (this.multiSelectedIds.has(nodeId)) {
+      this.multiSelectedIds.delete(nodeId);
+    } else {
+      this.multiSelectedIds.add(nodeId);
+    }
+    this.applyMultiSelectStyling();
+    document.dispatchEvent(
+      new CustomEvent('curator-selection-changed', {
+        detail: { nodeIds: [...this.multiSelectedIds] },
+      }),
+    );
+  }
+
+  /** Clears multi-selection. */
+  clearMultiSelect(): void {
+    this.multiSelectedIds.clear();
+    this.applyMultiSelectStyling();
+    document.dispatchEvent(
+      new CustomEvent('curator-selection-changed', {
+        detail: { nodeIds: [] },
+      }),
+    );
+  }
+
+  /** Apply dashed amber ring to multi-selected nodes. */
+  private applyMultiSelectStyling(): void {
+    this.nodeGroup
+      .selectAll<SVGGElement, SimNode>('.node')
+      .classed('multiselected', (d) => this.multiSelectedIds.has(d.id));
+  }
+
   setHeatOverlay(enabled: boolean, heatPairs?: APIHeatPair[]): void {
     this.heatEnabled = enabled;
     if (heatPairs) this.heatPairs = heatPairs;
@@ -349,11 +437,33 @@ export class GraphView {
     const enter = linkSel
       .enter()
       .append('line')
-      .attr('class', (d) => `link ${d.class}`)
+      .attr('class', (d) => `link ${d.class} edge-entering`)
       .attr('stroke', '#555')
       .attr('stroke-opacity', (d) => (d.class === 'behavioral' ? 0.4 : 0.6))
       .attr('stroke-dasharray', (d) => (d.class === 'behavioral' ? '6,4' : null))
       .attr('marker-end', 'url(#arrow)');
+
+    /* New edges draw in via stroke-dashoffset animation.
+       The CSS class .edge-entering drives a 500ms transition. We remove the
+       class after the animation so it doesn't interfere with other dasharray
+       settings. */
+    enter.each(function () {
+      const el = this as SVGLineElement;
+      // The actual length is set after first tick positions the line,
+      // so we use a generous default.
+      el.style.strokeDasharray = '1000';
+      el.style.strokeDashoffset = '1000';
+      requestAnimationFrame(() => {
+        el.style.transition = 'stroke-dashoffset 500ms ease-out';
+        el.style.strokeDashoffset = '0';
+        setTimeout(() => {
+          el.style.strokeDasharray = '';
+          el.style.strokeDashoffset = '';
+          el.style.transition = '';
+          el.classList.remove('edge-entering');
+        }, 520);
+      });
+    });
 
     enter.merge(linkSel);
     this.applyVisibility();
@@ -508,7 +618,16 @@ export class GraphView {
       .selectAll<SVGGElement, SimNode>('.node')
       .data(this.nodes, (d) => d.id);
 
-    nodeSel.exit().transition().duration(200).attr('opacity', 0).remove();
+    /* Deleted nodes: shrink + fade out over 300ms */
+    nodeSel.exit()
+      .classed('node-exiting', true)
+      .transition()
+      .duration(300)
+      .ease(d3.easeCubicIn)
+      .style('opacity', 0)
+      .select('circle')
+      .attr('r', 0)
+      .remove();
 
     const enter = nodeSel.enter().append('g').attr('class', (d) => {
       let cls = 'node';
@@ -518,7 +637,14 @@ export class GraphView {
       return cls;
     });
 
-    /* Circle */
+    /* Circle — new nodes scale in with a spring animation */
+    enter
+      .style('opacity', 0)
+      .transition()
+      .duration(400)
+      .ease(d3.easeCubicOut)
+      .style('opacity', 1);
+
     enter
       .append('circle')
       .attr('r', 0)
@@ -526,6 +652,7 @@ export class GraphView {
       .attr('opacity', (d) => (d.superseded_by ? 0.4 : 1))
       .transition()
       .duration(400)
+      .ease(d3.easeBackOut.overshoot(1.5))
       .attr('r', (d) => d.radius);
 
     /* Label */
@@ -556,9 +683,26 @@ export class GraphView {
 
     enter.call(dragBehavior);
 
-    /* Click */
+    /* Click — supports Shift+click multi-select and @mention injection */
     enter.on('click', (event: MouseEvent, d: SimNode) => {
       event.stopPropagation();
+
+      if (event.shiftKey) {
+        /* Shift+click: toggle multi-selection */
+        this.toggleMultiSelect(d.id);
+        return;
+      }
+
+      /* If the curator input is focused, inject @mention instead of normal select */
+      const chatInput = document.getElementById('chat-input') as HTMLInputElement | null;
+      if (chatInput && document.activeElement === chatInput) {
+        document.dispatchEvent(
+          new CustomEvent('curator-inject-mention', { detail: { nodeId: d.id } }),
+        );
+        return;
+      }
+
+      /* Normal click: select node + show detail panel */
       document.getElementById('graph-svg')?.dispatchEvent(
         new CustomEvent<SimNode>('node-selected', { detail: d }),
       );

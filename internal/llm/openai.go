@@ -10,8 +10,11 @@ import (
 	"time"
 )
 
-// Ensure OpenAIProvider implements Summarizer.
-var _ Summarizer = (*OpenAIProvider)(nil)
+// Ensure OpenAIProvider implements Summarizer and ChatProvider.
+var (
+	_ Summarizer  = (*OpenAIProvider)(nil)
+	_ ChatProvider = (*OpenAIProvider)(nil)
+)
 
 const (
 	openaiLLMDefaultModel = "gpt-5.1-codex-mini"
@@ -177,4 +180,30 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, apiReq openaiResponsesRe
 	}
 
 	return text, nil
+}
+
+// Chat performs a simple (non-streaming) multi-turn chat using the OpenAI
+// Responses API.
+func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (string, error) {
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+
+	msgs := make([]openaiInputMessage, 0, len(req.Messages)+1)
+	msgs = append(msgs, openaiInputMessage{Role: "system", Content: req.SystemPrompt})
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			continue
+		}
+		msgs = append(msgs, openaiInputMessage{Role: m.Role, Content: m.Content})
+	}
+
+	apiReq := openaiResponsesRequest{
+		Model:     p.model,
+		MaxTokens: maxTokens,
+		Input:     msgs,
+	}
+
+	return p.doRequest(ctx, apiReq, "chat")
 }

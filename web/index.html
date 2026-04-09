@@ -53,6 +53,28 @@
         <div id="detail-content"></div>
       </aside>
     </div>
+    <div id="curator-drawer" class="curator-collapsed">
+      <div class="curator-handle" title="Drag to resize"></div>
+      <div class="curator-tabs">
+        <button class="curator-tab active" data-tab="chat">Chat</button>
+        <button class="curator-tab" data-tab="issues">Issues <span id="issues-badge" class="curator-badge" hidden>0</span></button>
+      </div>
+      <div class="curator-body">
+        <div id="curator-chat" class="curator-panel active">
+          <div id="chat-messages" class="chat-messages"></div>
+        </div>
+        <div id="curator-issues" class="curator-panel">
+          <div id="issues-list" class="issues-list"></div>
+        </div>
+      </div>
+      <div class="curator-input-bar">
+        <div id="chat-context-hint" class="chat-hint"></div>
+        <div class="chat-input-wrapper">
+          <input type="text" id="chat-input" placeholder="Ask about your graph, or type / for commands..." autocomplete="off" />
+          <button id="chat-send" class="chat-send-btn" title="Send">&rarr;</button>
+        </div>
+      </div>
+    </div>
   </div>
   <script type="module" src="/src/main.ts"></script>
 </body>

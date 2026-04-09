@@ -17,6 +17,7 @@
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve]                         Manage vault routing table
 //	marmot ui         [--dir .marmot] [--port 3274] [--no-open]    Start graph UI server
+//	marmot sdk        [--out <path>] [--base-url <url>]           Generate TypeScript SDK
 package main
 
 import (
@@ -104,6 +105,8 @@ func run(args []string) int {
 		return cmdRoute(cmdArgs)
 	case "ui":
 		return cmdUI(cmdArgs)
+	case "sdk":
+		return cmdSDK(cmdArgs)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", command)
 		usage()
@@ -113,7 +116,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, ui")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, ui, sdk")
 }
 
 // ---------------------------------------------------------------------------

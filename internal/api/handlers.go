@@ -1,17 +1,22 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/sdkgen"
 	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/verify"
 )
@@ -707,4 +712,242 @@ func nodeToAPI(n *node.Node, edgeCount int) APINode {
 	}
 
 	return apiNode
+}
+
+// ---------------------------------------------------------------------------
+// SDK endpoints
+// ---------------------------------------------------------------------------
+
+// handleSDKTS serves the generated TypeScript SDK file.
+func (s *Server) handleSDKTS(w http.ResponseWriter, r *http.Request) {
+	// Construct base URL from the request's Host header.
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if fwd := r.Header.Get("X-Forwarded-Proto"); fwd != "" {
+		scheme = fwd
+	}
+	baseURL := scheme + "://" + r.Host
+
+	content := sdkgen.Generate(baseURL)
+
+	w.Header().Set("Content-Type", "text/typescript; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="marmot-sdk.ts"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, content)
+}
+
+// handleSDKCall bridges TypeScript SDK tool calls to the MCP engine handlers.
+// It reads a JSON body, constructs an mcp.CallToolRequest, delegates to the
+// appropriate engine handler, and returns the result as JSON.
+func (s *Server) handleSDKCall(w http.ResponseWriter, r *http.Request) {
+	tool := r.PathValue("tool")
+	if tool == "" {
+		writeError(w, http.StatusBadRequest, "tool name is required")
+		return
+	}
+
+	// Read and parse JSON body into a generic map for arguments.
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
+		return
+	}
+	defer r.Body.Close()
+
+	var args map[string]any
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &args); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+			return
+		}
+	}
+	if args == nil {
+		args = make(map[string]any)
+	}
+
+	// Construct an mcp.CallToolRequest with the arguments map.
+	req := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      tool,
+			Arguments: args,
+		},
+	}
+
+	ctx := context.Background()
+
+	// Dispatch to the appropriate engine handler.
+	var result *mcp.CallToolResult
+	var handlerErr error
+
+	switch tool {
+	case "context_query":
+		result, handlerErr = s.engine.HandleContextQuery(ctx, req)
+	case "context_write":
+		result, handlerErr = s.engine.HandleContextWrite(ctx, req)
+	case "context_verify":
+		result, handlerErr = s.engine.HandleContextVerify(ctx, req)
+	case "context_delete":
+		result, handlerErr = s.engine.HandleContextDelete(ctx, req)
+	case "context_tag":
+		result, handlerErr = s.engine.HandleContextTag(ctx, req)
+	default:
+		writeError(w, http.StatusNotFound, "unknown tool: "+tool)
+		return
+	}
+
+	if handlerErr != nil {
+		writeError(w, http.StatusInternalServerError, "tool error: "+handlerErr.Error())
+		return
+	}
+
+	// Extract text content from the CallToolResult.
+	// The engine handlers return results via NewToolResultText or NewToolResultJSON,
+	// both of which place a TextContent as the first element.
+	if result == nil {
+		writeError(w, http.StatusInternalServerError, "tool returned nil result")
+		return
+	}
+
+	if result.IsError {
+		// Tool-level error: extract the error message from content.
+		msg := "unknown tool error"
+		if len(result.Content) > 0 {
+			if tc, ok := result.Content[0].(mcp.TextContent); ok {
+				msg = tc.Text
+			}
+		}
+		writeError(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+
+	// For successful results, extract the text content.
+	// If StructuredContent is present (from NewToolResultJSON), return it directly.
+	if result.StructuredContent != nil {
+		writeJSON(w, http.StatusOK, result.StructuredContent)
+		return
+	}
+
+	// Otherwise extract text from Content slice.
+	if len(result.Content) > 0 {
+		if tc, ok := result.Content[0].(mcp.TextContent); ok {
+			// Try to parse as JSON first (NewToolResultJSON puts JSON text in content).
+			var parsed any
+			if err := json.Unmarshal([]byte(tc.Text), &parsed); err == nil {
+				writeJSON(w, http.StatusOK, parsed)
+				return
+			}
+			// Not JSON — return as a context string (e.g., query XML result).
+			writeJSON(w, http.StatusOK, map[string]string{"context": tc.Text})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
+}
+
+// handleChatUndo pops the most recent undo entry for a session and restores
+// the pre-mutation state: existing nodes are restored via SaveNode + UpsertNode,
+// and nodes that were created by the mutation are deleted.
+func (s *Server) handleChatUndo(w http.ResponseWriter, r *http.Request) {
+	var req ChatUndoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	entry := s.undoStack.Pop(req.SessionID)
+	if entry == nil {
+		writeError(w, http.StatusNotFound, "no undo entries for session")
+		return
+	}
+
+	restored := 0
+
+	// Restore snapshots of nodes that existed before the mutation.
+	for _, snap := range entry.Snapshots {
+		if snap.Existed && snap.Node != nil {
+			if err := s.engine.NodeStore.SaveNode(snap.Node); err != nil {
+				continue
+			}
+			_ = s.engine.GetGraph().UpsertNode(snap.Node)
+			restored++
+		} else if !snap.Existed && snap.Node != nil {
+			// Node was created by the mutation — delete it.
+			_ = s.engine.NodeStore.DeleteNode(snap.Node.ID)
+			_ = s.engine.GetGraph().RemoveNode(snap.Node.ID)
+			restored++
+		}
+	}
+
+	// Delete nodes listed in Created (node IDs created by mutation).
+	for _, id := range entry.Created {
+		_ = s.engine.NodeStore.DeleteNode(id)
+		_ = s.engine.GetGraph().RemoveNode(id)
+		restored++
+	}
+
+	s.NotifyChange()
+
+	writeJSON(w, http.StatusOK, ChatUndoResponse{
+		Restored: restored,
+		UndoID:   entry.ID,
+	})
+}
+
+// handleSuggestions runs the curation suggestions engine and returns paginated
+// results. Query params: ns (namespace filter), limit (default 20), offset,
+// check_stale (expensive staleness check).
+func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("ns")
+	checkStale := r.URL.Query().Get("check_stale") == "true"
+
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	g := s.engine.GetGraph()
+
+	// Scope to namespace if provided.
+	var nodeIDs []string
+	if ns != "" {
+		for _, n := range g.AllActiveNodes() {
+			if matchNamespace(n.Namespace, ns) {
+				nodeIDs = append(nodeIDs, n.ID)
+			}
+		}
+	}
+
+	projectRoot := filepath.Dir(s.engine.MarmotDir)
+
+	opts := curator.AnalyzeOpts{
+		NodeIDs:     nodeIDs,
+		CheckStale:  checkStale,
+		ProjectRoot: projectRoot,
+		Limit:       limit,
+		Offset:      offset,
+	}
+
+	suggestions := curator.Analyze(g, s.engine.NodeStore, s.engine.EmbeddingStore, s.engine.Embedder, opts)
+
+	nodeCount := 0
+	if g != nil {
+		nodeCount = g.NodeCount()
+	}
+	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions, NodeCount: nodeCount})
 }

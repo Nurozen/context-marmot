@@ -8,10 +8,11 @@ import (
 	"sync/atomic"
 )
 
-// Ensure MockProvider implements both Provider and Summarizer.
+// Ensure MockProvider implements Provider, Summarizer, and ChatProvider.
 var (
-	_ Provider   = (*MockProvider)(nil)
-	_ Summarizer = (*MockProvider)(nil)
+	_ Provider     = (*MockProvider)(nil)
+	_ Summarizer   = (*MockProvider)(nil)
+	_ ChatProvider = (*MockProvider)(nil)
 )
 
 // MockProvider returns a configurable fixed result. Used in tests.
@@ -20,9 +21,12 @@ type MockProvider struct {
 	Err           error
 	SummaryResult string
 	SummaryErr    error
+	ChatResult    string
+	ChatErr       error
 
 	mu             sync.Mutex
 	Calls          int
+	ChatCalls      int
 	summarizeCalls int64 // accessed atomically
 }
 
@@ -57,4 +61,21 @@ func (m *MockProvider) Summarize(_ context.Context, req SummarizeRequest) (strin
 		fmt.Fprintf(&sb, "- [[%s]] (%s)\n", n.ID, n.Type)
 	}
 	return sb.String(), m.SummaryErr
+}
+
+// Chat returns a fixed chat result or a default echo. Thread-safe.
+func (m *MockProvider) Chat(_ context.Context, req ChatRequest) (string, error) {
+	m.mu.Lock()
+	m.ChatCalls++
+	m.mu.Unlock()
+	if m.ChatResult != "" {
+		return m.ChatResult, m.ChatErr
+	}
+	// Default: echo the last user message.
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			return "I can help with that. You said: " + req.Messages[i].Content, m.ChatErr
+		}
+	}
+	return "How can I help you curate your knowledge graph?", m.ChatErr
 }
