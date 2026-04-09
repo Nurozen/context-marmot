@@ -133,6 +133,7 @@ type ChatUndoResponse struct {
 // SuggestionsResponse is returned by GET /api/curator/suggestions.
 type SuggestionsResponse struct {
 	Suggestions []curator.Suggestion `json:"suggestions"`
+	NodeCount   int                  `json:"node_count"`
 }
 
 // ErrorResponse is returned for any API error.

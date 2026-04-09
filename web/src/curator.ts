@@ -338,6 +338,9 @@ export class Curator {
     this.exitCommandMode();
     this.hideAutocomplete();
 
+    /* Auto-expand drawer when submitting a message */
+    if (!this.expanded) this.expand();
+
     if (raw.startsWith('/')) {
       this.addUserMessage(raw);
       void this.executeCommand(raw);

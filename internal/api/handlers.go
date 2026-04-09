@@ -945,5 +945,9 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 
 	suggestions := curator.Analyze(g, s.engine.NodeStore, s.engine.EmbeddingStore, s.engine.Embedder, opts)
 
-	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions})
+	nodeCount := 0
+	if g != nil {
+		nodeCount = g.NodeCount()
+	}
+	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions, NodeCount: nodeCount})
 }
