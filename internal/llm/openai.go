@@ -196,7 +196,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (string, err
 		if m.Role == "system" {
 			continue
 		}
-		msgs = append(msgs, openaiInputMessage{Role: m.Role, Content: m.Content})
+		msgs = append(msgs, openaiInputMessage(m))
 	}
 
 	apiReq := openaiResponsesRequest{

@@ -165,7 +165,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (string, 
 		if m.Role == "system" {
 			continue // system prompt is a separate field in Anthropic API
 		}
-		msgs = append(msgs, anthropicMessage{Role: m.Role, Content: m.Content})
+		msgs = append(msgs, anthropicMessage(m))
 	}
 
 	apiReq := anthropicRequest{
