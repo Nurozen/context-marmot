@@ -1346,3 +1346,780 @@ textarea:focus-visible {
   text-transform: uppercase;
   user-select: none;
 }
+
+/* ── Issues Panel ────────────────────────────────────────────── */
+.issues-list {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.issues-health {
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.issues-health-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: 12px var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.health-divider {
+  color: var(--border-subtle);
+}
+
+.issues-count {
+  color: var(--accent);
+}
+
+.issues-progress {
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.issues-progress-fill {
+  height: 100%;
+  background: var(--secondary);
+  border-radius: 2px;
+  transition: width 400ms var(--ease-out);
+}
+
+.issues-pct-label {
+  font: 10px var(--font-mono);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.issues-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font: 12px var(--font-sans);
+  color: var(--text-muted);
+}
+
+/* ── Issue Cards ─────────────────────────────────────────────── */
+.issue-card {
+  display: flex;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border-radius: 6px;
+  border-left: 3px solid var(--border-subtle);
+  transition: opacity 300ms, transform 300ms;
+}
+
+.issue-card.issue-error {
+  border-left-color: var(--color-danger, #e74c3c);
+}
+
+.issue-card.issue-warning {
+  border-left-color: var(--accent);
+}
+
+.issue-card.issue-info {
+  border-left-color: var(--secondary);
+}
+
+.issue-card.dismissing {
+  opacity: 0;
+  transform: translateX(20px);
+}
+
+.issue-icon {
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+  padding-top: 1px;
+}
+
+.issue-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.issue-message {
+  font: 13px/1.4 var(--font-sans);
+  color: var(--text-primary);
+}
+
+.issue-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.issue-nodes .node-ref {
+  display: inline-block;
+  padding: 1px 8px;
+  font: 10px/1.4 var(--font-mono);
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  user-select: none;
+}
+
+.issue-nodes .node-ref:hover {
+  background: var(--accent-glow);
+}
+
+.issue-actions {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.issue-btn {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font: 11px var(--font-mono);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 150ms;
+  white-space: nowrap;
+}
+
+.issue-btn:hover {
+  background: var(--bg-tertiary);
+}
+
+.issue-btn-primary {
+  background: var(--secondary);
+  color: white;
+  border-color: var(--secondary);
+}
+
+.issue-btn-primary:hover {
+  filter: brightness(1.15);
+}
+
+.issue-btn-danger {
+  background: transparent;
+  color: var(--color-danger, #e74c3c);
+  border-color: var(--color-danger, #e74c3c);
+}
+
+.issue-btn-danger:hover {
+  background: rgba(196, 93, 75, 0.1);
+}
+
+/* Type dropdown styled as a button */
+.issue-type-select {
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  padding-right: 10px;
+}
+
+/* ── Curator Badge ───────────────────────────────────────────── */
+.curator-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  font: 10px/1 var(--font-mono);
+  font-weight: 600;
+  color: var(--bg-primary);
+  background: var(--secondary);
+  border-radius: 999px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.curator-badge[hidden] {
+  display: none;
+}
+
+/* ── Curator Drawer ──────────────────────────────────────────── */
+
+:root {
+  --drawer-h: 42px;
+}
+
+#app {
+  /* override to include drawer in flow */
+}
+
+/* Main area shrinks when curator drawer is expanded.
+   The drawer height is driven by .curator-collapsed (42px) or .curator-expanded (320px).
+   We use the CSS variable --drawer-h for the collapsed state. When expanded, the drawer
+   element's own flex-shrink:0 + explicit height handles the layout. */
+#main-area {
+  height: calc(100vh - var(--toolbar-h) - var(--drawer-h));
+  transition: height 280ms var(--ease-out);
+}
+
+#curator-drawer {
+  position: relative;
+  width: 100%;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: height 280ms var(--ease-out);
+  flex-shrink: 0;
+  z-index: 50;
+}
+
+#curator-drawer.curator-collapsed {
+  height: 42px;
+}
+
+#curator-drawer.curator-expanded {
+  height: 320px;
+}
+
+/* ── Drag Handle ─────────────────────────────────────────────── */
+.curator-handle {
+  height: 6px;
+  width: 100%;
+  cursor: row-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: transparent;
+  position: relative;
+  transition: background var(--transition-fast);
+}
+
+.curator-handle::after {
+  content: '';
+  width: 32px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--text-muted);
+  opacity: 0.3;
+  transition: opacity var(--transition-fast);
+}
+
+.curator-handle:hover {
+  background: var(--bg-hover);
+}
+
+.curator-handle:hover::after {
+  opacity: 0.6;
+}
+
+/* ── Tabs ────────────────────────────────────────────────────── */
+.curator-tabs {
+  display: none;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.curator-expanded .curator-tabs {
+  display: flex;
+}
+
+.curator-tab {
+  padding: 6px 14px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  user-select: none;
+  letter-spacing: 0.01em;
+}
+
+.curator-tab:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.curator-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.curator-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--secondary);
+  border-radius: 999px;
+  margin-left: 4px;
+  line-height: 1;
+}
+
+/* ── Body (messages + issues panels) ─────────────────────────── */
+.curator-body {
+  flex: 1;
+  overflow: hidden;
+  display: none;
+  position: relative;
+}
+
+.curator-expanded .curator-body {
+  display: block;
+}
+
+.curator-panel {
+  display: none;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.curator-panel.active {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Chat Messages ───────────────────────────────────────────── */
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.chat-message {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  line-height: 1.55;
+  word-break: break-word;
+  animation: fadeSlideIn 200ms var(--ease-out) both;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+.chat-message-system {
+  align-self: flex-start;
+  background: transparent;
+  border-left: 3px solid var(--secondary);
+  color: var(--text-secondary);
+  padding-left: 10px;
+}
+
+.chat-message-command {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.chat-message-command.success {
+  border-left: 3px solid var(--color-success);
+}
+
+.chat-message-command.error {
+  border-left: 3px solid var(--color-danger);
+}
+
+.chat-message-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chat-message-actions button {
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.chat-message-actions button:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-dim);
+  background: var(--bg-hover);
+}
+
+/* ── Node reference pill ─────────────────────────────────────── */
+.node-ref {
+  display: inline-block;
+  padding: 1px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.node-ref:hover {
+  background: var(--accent-glow);
+  color: var(--accent-hover);
+}
+
+/* ── Input Bar ───────────────────────────────────────────────── */
+.curator-input-bar {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.chat-hint {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  padding: 0 2px 4px;
+  min-height: 0;
+  line-height: 1.3;
+}
+
+.chat-hint:empty {
+  display: none;
+}
+
+.chat-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#chat-input {
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast);
+}
+
+#chat-input::placeholder {
+  color: var(--text-muted);
+  font-weight: 300;
+}
+
+#chat-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+  background: var(--bg-elevated);
+}
+
+#chat-input.chat-input-command-mode {
+  border-left: 3px solid var(--accent);
+  background: var(--bg-tertiary);
+}
+
+.chat-send-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.chat-send-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+/* ── Autocomplete Dropdown ───────────────────────────────────── */
+.curator-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: 12px;
+  right: 12px;
+  margin-bottom: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-md);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.4);
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 60;
+}
+
+.curator-autocomplete-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.curator-autocomplete-item:last-child {
+  border-bottom: none;
+}
+
+.curator-autocomplete-item:hover,
+.curator-autocomplete-item.selected {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.curator-autocomplete-item .ac-cmd {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.curator-autocomplete-item .ac-hint {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-left: auto;
+}
+
+/* ── Issues List ─────────────────────────────────────────────── */
+.issues-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.issue-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+  animation: fadeSlideIn 200ms var(--ease-out) both;
+}
+
+.issue-card-type {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-warning);
+  margin-bottom: 4px;
+}
+
+.issue-card-message {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+
+.issue-card-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.issue-card-actions button {
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: 1px solid transparent;
+}
+
+.issue-btn-danger {
+  color: var(--color-danger);
+  background: rgba(196, 93, 75, 0.1);
+  border-color: rgba(196, 93, 75, 0.2) !important;
+}
+
+.issue-btn-danger:hover {
+  background: rgba(196, 93, 75, 0.2);
+}
+
+.issue-btn-neutral {
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-color: var(--border-medium) !important;
+}
+
+.issue-btn-neutral:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.issue-btn-positive {
+  color: var(--secondary);
+  background: var(--secondary-dim);
+  border-color: rgba(107, 158, 135, 0.2) !important;
+}
+
+.issue-btn-positive:hover {
+  background: rgba(107, 158, 135, 0.2);
+}
+
+/* ── Issues progress bar ─────────────────────────────────────── */
+.issues-progress {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.issues-progress-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.issues-progress-bar {
+  height: 4px;
+  background: var(--bg-tertiary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.issues-progress-fill {
+  height: 100%;
+  background: var(--secondary);
+  border-radius: 2px;
+  transition: width 400ms var(--ease-out);
+}
+
+/* ── Thinking Indicator ──────────────────────────────────────── */
+.chat-thinking {
+  align-self: flex-start;
+  display: flex;
+  gap: 4px;
+  padding: 10px 14px;
+  background: transparent;
+}
+
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: thinkingPulse 1.4s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(2) {
+  animation-delay: 200ms;
+}
+
+.thinking-dot:nth-child(3) {
+  animation-delay: 400ms;
+}
+
+@keyframes thinkingPulse {
+  0%, 80%, 100% {
+    opacity: 0.2;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ── Node Pulse Ring (SVG) ──────────────────────────────────── */
+#graph-svg .node-pulse-ring {
+  pointer-events: none;
+}
+
+/* ── Multi-select Node Styling ──────────────────────────────── */
+#graph-svg .node.multiselected circle {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-dasharray: 4 2;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
+
+#graph-svg .node.multiselected text {
+  fill: var(--accent);
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+/* ── Chat Node Reference in Messages ────────────────────────── */
+.chat-message .node-ref {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  background: rgba(212, 168, 83, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.chat-message .node-ref:hover {
+  background: var(--accent-glow);
+  color: var(--accent-hover);
+}
+
+/* ── Mutation Edge Animation ────────────────────────────────── */
+#graph-svg .link.edge-entering {
+  /* Animated via inline style in graph-view.ts */
+}
+
+/* ── Mobile: Curator as overlay ──────────────────────────────── */
+@media (max-width: 768px) {
+  #curator-drawer.curator-expanded {
+    position: fixed;
+    inset: 0;
+    height: 100vh !important;
+    z-index: 200;
+    border-top: none;
+  }
+}

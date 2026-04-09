@@ -5,6 +5,8 @@ import { DetailPanel } from './detail-panel';
 import { Filters } from './filters';
 import { Search } from './search';
 import { initKeyboard } from './keyboard';
+import { IssuesPanel } from './issues';
+import { Curator } from './curator';
 import type { GraphResponse } from './types';
 
 let currentNamespace = 'default';
@@ -15,6 +17,8 @@ let graphView: GraphView | null = null;
 let detailPanel: DetailPanel;
 let filters: Filters;
 let search: Search;
+let issuesPanel: IssuesPanel;
+let curator: Curator;
 
 async function init(): Promise<void> {
   const select = document.getElementById('namespace-select') as HTMLSelectElement;
@@ -46,11 +50,38 @@ async function init(): Promise<void> {
     highlightNode(nodeId);
   });
 
+  /* ── Issues panel ────────────────────────────────────────────── */
+  const issuesContainer = document.getElementById('issues-list')!;
+  const issuesBadge = document.getElementById('issues-badge')!;
+  issuesPanel = new IssuesPanel(issuesContainer, issuesBadge, async (cmd) => {
+    console.log('[curator] executing command:', cmd);
+    // TODO: route through curator command handler when available
+  });
+
+  /* ── Curator (chat + graph integration) ───────────────────────── */
+  curator = new Curator();
+
+  /* Highlight nodes from issue card pills or chat node-ref pills */
+  document.addEventListener('curator-highlight-node', ((e: CustomEvent) => {
+    const nodeId = (e.detail as { nodeId: string }).nodeId ?? e.detail;
+    if (typeof nodeId === 'string') {
+      highlightNode(nodeId);
+      graphView?.pulseNode(nodeId);
+    }
+  }) as EventListener);
+
+  /* Listen for curator requesting a graph reload (after mutations) */
+  document.addEventListener('curator-reload-graph', () => {
+    void loadGraph();
+  });
+
   initKeyboard({
     onSearch: () => search.focus(),
     onEscape: () => {
       search.clear();
       detailPanel.hide();
+      curator.collapse();
+      graphView?.clearMultiSelect();
     },
     onRefresh: () => {
       void loadGraph();
@@ -58,6 +89,12 @@ async function init(): Promise<void> {
     onFitView: () => {
       // TODO: call graphView.fitToViewport() when implemented
       console.log('Fit to viewport (not yet implemented)');
+    },
+    onCuratorToggle: () => {
+      curator.toggle();
+    },
+    onCuratorSlash: () => {
+      curator.open(true);
     },
   });
 
@@ -191,6 +228,12 @@ async function loadGraph(): Promise<void> {
       const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
       groupBySelect.value = 'namespace';
     }
+
+    /* Update curator with fresh graph data */
+    curator.updateGraphData(currentData, currentNamespace);
+
+    /* Load curation suggestions after graph data is available */
+    issuesPanel.load(currentNamespace === '_all' ? undefined : currentNamespace);
   } catch (err) {
     console.error('Failed to load graph:', err);
   }

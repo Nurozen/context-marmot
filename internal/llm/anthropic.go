@@ -145,8 +145,79 @@ func (p *AnthropicProvider) Classify(ctx context.Context, req ClassifyRequest) (
 	return parseClassifyJSON(apiResp.Content[0].Text), nil
 }
 
-// Ensure AnthropicProvider implements Summarizer.
-var _ Summarizer = (*AnthropicProvider)(nil)
+// Ensure AnthropicProvider implements Summarizer and ChatProvider.
+var (
+	_ Summarizer  = (*AnthropicProvider)(nil)
+	_ ChatProvider = (*AnthropicProvider)(nil)
+)
+
+// Chat performs a simple (non-streaming) multi-turn chat using the Anthropic
+// Messages API. It sends the system prompt and conversation history and returns
+// the assistant's text reply.
+func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (string, error) {
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+
+	msgs := make([]anthropicMessage, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			continue // system prompt is a separate field in Anthropic API
+		}
+		msgs = append(msgs, anthropicMessage{Role: m.Role, Content: m.Content})
+	}
+
+	apiReq := anthropicRequest{
+		Model:     p.model,
+		MaxTokens: maxTokens,
+		System:    req.SystemPrompt,
+		Messages:  msgs,
+	}
+
+	bodyBytes, err := json.Marshal(apiReq)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: marshal chat request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicEndpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("anthropic: create chat request: %w", err)
+	}
+	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("anthropic-version", anthropicVersion)
+	httpReq.Header.Set("content-type", "application/json")
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: chat network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("anthropic: read chat response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var apiResp anthropicResponse
+		if err := json.Unmarshal(respBody, &apiResp); err == nil && apiResp.Error != nil {
+			return "", fmt.Errorf("anthropic: chat API error (%d): %s", resp.StatusCode, apiResp.Error.Message)
+		}
+		return "", fmt.Errorf("anthropic: chat unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var apiResp anthropicResponse
+	if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		return "", fmt.Errorf("anthropic: unmarshal chat response: %w", err)
+	}
+
+	if len(apiResp.Content) == 0 {
+		return "", fmt.Errorf("anthropic: empty content in chat response")
+	}
+
+	return apiResp.Content[0].Text, nil
+}
 
 // Summarize generates a namespace summary using the Anthropic Messages API.
 func (p *AnthropicProvider) Summarize(ctx context.Context, req SummarizeRequest) (string, error) {

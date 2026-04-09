@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/nurozen/context-marmot/internal/curator"
+	"github.com/nurozen/context-marmot/internal/llm"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 )
 
@@ -20,12 +22,18 @@ type Server struct {
 	// Live-reload: file watcher pushes version bumps to SSE clients.
 	version    atomic.Int64
 	sseClients sync.Map // map of chan struct{} for each connected SSE client
+
+	// Mutation undo system.
+	undoStack *curator.UndoStack
+
+	// LLM chat provider (optional; nil = slash-commands only).
+	llmChat llm.ChatProvider
 }
 
 // NewServer creates a Server wired to the given engine. If assets is non-nil,
 // the server also serves an embedded SPA frontend.
 func NewServer(engine *mcpserver.Engine, assets fs.FS) *Server {
-	s := &Server{engine: engine, assets: assets}
+	s := &Server{engine: engine, assets: assets, undoStack: curator.NewUndoStack()}
 	s.mux = http.NewServeMux()
 	s.registerRoutes()
 	return s
@@ -46,6 +54,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)
 	s.mux.HandleFunc("GET /sdk.ts", s.handleSDKTS)
 	s.mux.HandleFunc("POST /api/sdk/{tool}", s.handleSDKCall)
+	s.mux.HandleFunc("POST /api/chat", s.handleChat)
+	s.mux.HandleFunc("POST /api/chat/undo", s.handleChatUndo)
+	s.mux.HandleFunc("GET /api/curator/suggestions", s.handleSuggestions)
 
 	// Serve frontend assets (SPA fallback: serve index.html for non-API, non-asset paths).
 	if s.assets != nil {
@@ -87,6 +98,12 @@ func (s *Server) Handler() http.Handler {
 // ListenAndServe starts the HTTP server on the given address.
 func (s *Server) ListenAndServe(addr string) error {
 	return http.ListenAndServe(addr, s.Handler())
+}
+
+// WithLLMChat sets the LLM chat provider. When set, the POST /api/chat
+// endpoint supports natural language messages in addition to slash commands.
+func (s *Server) WithLLMChat(provider llm.ChatProvider) {
+	s.llmChat = provider
 }
 
 // corsMiddleware adds permissive CORS headers for local development.

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/sdkgen"
@@ -844,4 +845,105 @@ func (s *Server) handleSDKCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"result": "ok"})
+}
+
+// handleChatUndo pops the most recent undo entry for a session and restores
+// the pre-mutation state: existing nodes are restored via SaveNode + UpsertNode,
+// and nodes that were created by the mutation are deleted.
+func (s *Server) handleChatUndo(w http.ResponseWriter, r *http.Request) {
+	var req ChatUndoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	entry := s.undoStack.Pop(req.SessionID)
+	if entry == nil {
+		writeError(w, http.StatusNotFound, "no undo entries for session")
+		return
+	}
+
+	restored := 0
+
+	// Restore snapshots of nodes that existed before the mutation.
+	for _, snap := range entry.Snapshots {
+		if snap.Existed && snap.Node != nil {
+			if err := s.engine.NodeStore.SaveNode(snap.Node); err != nil {
+				continue
+			}
+			_ = s.engine.GetGraph().UpsertNode(snap.Node)
+			restored++
+		} else if !snap.Existed && snap.Node != nil {
+			// Node was created by the mutation — delete it.
+			_ = s.engine.NodeStore.DeleteNode(snap.Node.ID)
+			_ = s.engine.GetGraph().RemoveNode(snap.Node.ID)
+			restored++
+		}
+	}
+
+	// Delete nodes listed in Created (node IDs created by mutation).
+	for _, id := range entry.Created {
+		_ = s.engine.NodeStore.DeleteNode(id)
+		_ = s.engine.GetGraph().RemoveNode(id)
+		restored++
+	}
+
+	s.NotifyChange()
+
+	writeJSON(w, http.StatusOK, ChatUndoResponse{
+		Restored: restored,
+		UndoID:   entry.ID,
+	})
+}
+
+// handleSuggestions runs the curation suggestions engine and returns paginated
+// results. Query params: ns (namespace filter), limit (default 20), offset,
+// check_stale (expensive staleness check).
+func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("ns")
+	checkStale := r.URL.Query().Get("check_stale") == "true"
+
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+
+	g := s.engine.GetGraph()
+
+	// Scope to namespace if provided.
+	var nodeIDs []string
+	if ns != "" {
+		for _, n := range g.AllActiveNodes() {
+			if matchNamespace(n.Namespace, ns) {
+				nodeIDs = append(nodeIDs, n.ID)
+			}
+		}
+	}
+
+	projectRoot := filepath.Dir(s.engine.MarmotDir)
+
+	opts := curator.AnalyzeOpts{
+		NodeIDs:     nodeIDs,
+		CheckStale:  checkStale,
+		ProjectRoot: projectRoot,
+		Limit:       limit,
+		Offset:      offset,
+	}
+
+	suggestions := curator.Analyze(g, s.engine.NodeStore, s.engine.EmbeddingStore, s.engine.Embedder, opts)
+
+	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions})
 }

@@ -3,6 +3,8 @@
 // backed by the MCP Engine.
 package api
 
+import "github.com/nurozen/context-marmot/internal/curator"
+
 // APINode is the JSON representation of a knowledge-graph node.
 type APINode struct {
 	ID           string     `json:"id"`
@@ -115,6 +117,22 @@ type NodeUpdateResponse struct {
 	NodeID string `json:"node_id"`
 	Hash   string `json:"hash"`
 	Status string `json:"status"`
+}
+
+// ChatUndoRequest is the JSON body for POST /api/chat/undo.
+type ChatUndoRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// ChatUndoResponse is returned by POST /api/chat/undo.
+type ChatUndoResponse struct {
+	Restored int    `json:"restored"`
+	UndoID   string `json:"undo_id"`
+}
+
+// SuggestionsResponse is returned by GET /api/curator/suggestions.
+type SuggestionsResponse struct {
+	Suggestions []curator.Suggestion `json:"suggestions"`
 }
 
 // ErrorResponse is returned for any API error.
