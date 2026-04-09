@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/verify"
@@ -47,6 +48,11 @@ var allowedTypes = map[string]bool{
 	"decision":  true,
 	"reference": true,
 	"composite": true,
+	"file":      true,
+	"interface": true,
+	"method":    true,
+	"type":      true,
+	"package":   true,
 }
 
 // validRelations is the set of valid EdgeRelation values for /link and /unlink.
@@ -333,6 +339,51 @@ func executeMerge(_ context.Context, cmd *SlashCommand, engine *mcp.Engine) (*Co
 		existingEdges[key] = true
 	}
 
+	// Redirect incoming edges: find other nodes that have edges targeting B
+	// and rewrite them to target A instead.
+	g := engine.GetGraph()
+	inboundEdges := g.GetEdges(diskB.ID, graph.Inbound)
+	for _, ie := range inboundEdges {
+		sourceID := ie.Target // in inEdges, Target holds the source node ID
+		if sourceID == diskA.ID || sourceID == diskB.ID {
+			continue // skip A's own edges to B (already handled) and self-refs
+		}
+		srcPath, pathErr := engine.NodeStore.SafeNodePath(sourceID)
+		if pathErr != nil {
+			continue
+		}
+		srcDisk, loadErr := engine.NodeStore.LoadNode(srcPath)
+		if loadErr != nil {
+			continue
+		}
+		changed := false
+		for i, e := range srcDisk.Edges {
+			if e.Target == diskB.ID {
+				// Rewrite to point to A, unless that would create a duplicate.
+				newKey := string(e.Relation) + "|" + diskA.ID
+				dupFound := false
+				for _, existing := range srcDisk.Edges {
+					if existing.Target == diskA.ID && existing.Relation == e.Relation {
+						dupFound = true
+						break
+					}
+				}
+				if sourceID == diskA.ID || dupFound {
+					// Remove the edge entirely (it would be a self-loop on A or a dup).
+					srcDisk.Edges = append(srcDisk.Edges[:i], srcDisk.Edges[i+1:]...)
+					_ = newKey // suppress unused warning
+				} else {
+					srcDisk.Edges[i].Target = diskA.ID
+				}
+				changed = true
+			}
+		}
+		if changed {
+			_ = engine.NodeStore.SaveNode(srcDisk)
+			_ = g.UpsertNode(srcDisk)
+		}
+	}
+
 	// Copy B's tags that A doesn't have.
 	existingTags := make(map[string]bool)
 	for _, t := range diskA.Tags {
@@ -349,7 +400,7 @@ func executeMerge(_ context.Context, cmd *SlashCommand, engine *mcp.Engine) (*Co
 	if err := engine.NodeStore.SaveNode(diskA); err != nil {
 		return nil, fmt.Errorf("save merged node A: %w", err)
 	}
-	_ = engine.GetGraph().UpsertNode(diskA)
+	_ = g.UpsertNode(diskA)
 
 	// Delete B (soft-delete pointing to A as superseder).
 	if err := engine.NodeStore.SoftDeleteNode(diskB.ID, diskA.ID); err != nil {
@@ -358,7 +409,7 @@ func executeMerge(_ context.Context, cmd *SlashCommand, engine *mcp.Engine) (*Co
 	// Reload B and update graph.
 	reloaded, err := engine.NodeStore.LoadNode(engine.NodeStore.NodePath(diskB.ID))
 	if err == nil {
-		_ = engine.GetGraph().UpsertNode(reloaded)
+		_ = g.UpsertNode(reloaded)
 	}
 
 	return &CommandResult{
