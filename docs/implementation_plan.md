@@ -631,6 +631,87 @@ Locally-generated TypeScript SDK from MCP tool schemas, inspired by Cloudflare's
 - [x] Write comprehensive tests (6 test cases, all passing)
 - [x] Update README with TypeScript SDK section
 
+## Phase 24: Graph Curator — Chat-driven graph curation UI
+
+Chat panel embedded in the web UI that lets users refine the auto-generated knowledge graph through structured commands and natural language. Uses the TypeScript SDK HTTP bridge for mutations and SSE live-reload for visual feedback. Designed as a low-friction curation path — proactive suggestions surface issues, quick-fix buttons resolve them, and slash commands handle precise edits without LLM round-trips.
+
+**Specs:** `docs/spec-graph-curator.md` (UX), `docs/spec-graph-curator-backend.md` (backend), `docs/spec-graph-curator-usage.md` (usage patterns)
+
+### 24.1 — Backend: Curation Suggestions Engine
+- [ ] Create `internal/curator/suggestions.go` with `Analyze(graph, embeddingStore, opts) []Suggestion`
+- [ ] Detect orphan nodes (0 edges), missing summaries, stale sources, untyped nodes
+- [ ] Detect duplicate nodes via embedding similarity (>0.95 threshold, skip if no embedder)
+- [ ] Detect disconnected subgraphs via union-find
+- [ ] Add `GET /api/curator/suggestions?ns=&limit=&offset=` endpoint
+- [ ] Sort results by severity (error > warning > info), paginate
+
+### 24.2 — Backend: Slash Command Parser
+- [ ] Create `internal/curator/commands.go` with `ParseCommand(msg) (*SlashCommand, bool)`
+- [ ] Implement 8 commands: `/tag`, `/untag`, `/type`, `/merge`, `/delete`, `/link`, `/unlink`, `/verify`
+- [ ] `/merge` compound operation: union edges, copy metadata, delete source node
+- [ ] Validate edge relations against `EdgeRelation` enum, node IDs against live graph
+- [ ] Wire commands to existing engine handlers (HandleContextWrite, HandleContextDelete, etc.)
+
+### 24.3 — Backend: Mutation Undo System
+- [ ] Create `internal/curator/undo.go` with per-session LIFO stack (max 50 entries)
+- [ ] Snapshot affected nodes before every mutation (commands + LLM actions)
+- [ ] `POST /api/chat/undo` endpoint: restore snapshots, delete created nodes, fire NotifyChange()
+- [ ] Handle edge cases: undo past stack depth, undo after external graph change
+
+### 24.4 — Backend: Chat LLM Endpoint
+- [ ] Create `internal/llm/chat.go` with `ChatProvider` interface extending `Provider`
+- [ ] Implement `ChatStream` for OpenAI Responses API with tool-calling support
+- [ ] Create `internal/curator/prompt.go` — assemble system prompt from graph stats, selected nodes, tool schemas
+- [ ] Tool execution loop: LLM emits tool_call → snapshot → dispatch → append result → resume
+- [ ] `POST /api/chat` endpoint with SSE streaming (delta, action, done, error events)
+- [ ] Graceful degradation: no LLM key → slash commands only, clear error message for free-text
+
+### 24.5 — Frontend: Bottom Drawer Shell
+- [ ] Add curator drawer HTML structure (collapsed 42px bar, expandable to 320px/40vh)
+- [ ] Implement drag-to-resize handle (160px–40vh range)
+- [ ] Graph canvas height transition (280ms ease-out) on expand/collapse
+- [ ] Chat tab + Issues tab within drawer
+- [ ] Style within Alpine cartographic aesthetic (--bg-secondary, --accent, IBM Plex Mono)
+- [ ] Mobile: full-screen overlay with FAB trigger (<768px)
+
+### 24.6 — Frontend: Slash Command Input
+- [ ] Detect `/` prefix in input, switch to command mode (visual indicator)
+- [ ] Autocomplete dropdown (max 8 items): command names, then fuzzy-match node IDs for args
+- [ ] Tab to accept suggestion, Enter to execute
+- [ ] Parse and execute commands client-side via MarmotClient SDK calls
+- [ ] Echo results as system messages with mutation feedback
+
+### 24.7 — Frontend: Natural Language Chat
+- [ ] Connect to `POST /api/chat` with SSE streaming
+- [ ] Render streaming tokens in real-time with pulsing amber indicator
+- [ ] Parse `action` events: highlight nodes, execute SDK mutations, show suggestions
+- [ ] Stop button to abort generation
+- [ ] Conversation history management (cap at ~20 exchanges, compact older messages)
+
+### 24.8 — Frontend: Graph ↔ Chat Integration
+- [ ] @mention tokens: clicking a node while input is focused inserts node ID as a pill
+- [ ] Node-ref pills in chat messages: clickable, pan + highlight + 2s amber pulse animation
+- [ ] Multi-select with Shift+click, selection-aware input placeholder
+- [ ] Mutation animations: fade-in for new nodes, shrink-out for deletes, stroke-draw for new edges
+- [ ] Dynamic placeholder text based on selection state
+
+### 24.9 — Frontend: Guided Curation / Issues Tab
+- [ ] Call `GET /api/curator/suggestions` on graph load, show badge count on drawer tab
+- [ ] Render suggestion cards: orphans, duplicates, stale, untyped, untagged clusters
+- [ ] Quick-fix buttons per card (Delete, Keep, Connect to..., Merge, etc.)
+- [ ] Health summary line: "247 nodes, 3 issues" (neutral, not gamified)
+- [ ] Invalidate suggestions on SSE graph-changed event
+- [ ] Progressive disclosure: show NL input by default, slash commands in collapsible help
+
+### 24.10 — Keyboard Shortcuts & Polish
+- [ ] Cmd+K toggle drawer + focus input
+- [ ] `/` focus input in command mode (when no text field focused)
+- [ ] Escape collapse drawer
+- [ ] Cmd+Z / Cmd+Shift+Z for undo/redo
+- [ ] Shift+Enter for newline in NL mode
+- [ ] Onboarding state: empty graph shows "Run `marmot index`" card
+- [ ] Network disconnect handling: optimistic UI with rollback on error
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.
@@ -722,6 +803,7 @@ Post-MVP:
           └─> Phase 21 (Multi-Namespace Bridges)
           └─> Phase 22 (Folder Grouping + Contour Hulls)
     └─> Phase 23 (TypeScript SDK Generator)
+          └─> Phase 24 (Graph Curator Chat)
 
   Phase 18.6 (when stable)
     └─> F1-F5 (Future Enhancements) [DEFERRED]
