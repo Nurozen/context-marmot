@@ -218,6 +218,7 @@ type engineResult struct {
 	Engine    *mcpserver.Engine
 	HeatMap   *heatmap.HeatMap
 	Scheduler *summary.Scheduler
+	LLM       llm.Provider // may be nil when no LLM is configured
 	Cleanup   func()
 }
 
@@ -361,6 +362,7 @@ func buildEngine(dir string) (*engineResult, error) {
 		Engine:    engine,
 		HeatMap:   hm,
 		Scheduler: sumScheduler,
+		LLM:       llmProvider,
 		Cleanup:   cleanup,
 	}, nil
 }
@@ -400,6 +402,16 @@ func runUIPipeline(dir string, port int, noOpen bool) error {
 
 	// Create API server with embedded frontend assets.
 	apiServer := api.NewServer(result.Engine, web.Assets)
+
+	// Wire the Graph Curator chat provider. Both OpenAI and Anthropic providers
+	// implement llm.ChatProvider; reuse whichever was configured for the
+	// classifier so the UI chat works without extra setup.
+	if chatProvider, ok := result.LLM.(llm.ChatProvider); ok && chatProvider != nil {
+		apiServer.WithLLMChat(chatProvider)
+		fmt.Fprintln(os.Stderr, "chat: curator LLM provider wired")
+	} else {
+		fmt.Fprintln(os.Stderr, "chat: no LLM provider configured — curator slash commands only (run 'marmot configure' to enable NL chat)")
+	}
 
 	// Start file watcher for live-reload.
 	stopWatcher, watchErr := apiServer.StartWatcher(dir)
@@ -955,25 +967,30 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 		g = loaded
 	}
 
-	// 7. Create classifier if LLM provider configured — best effort, nil if fails.
-	var cls *classifier.Classifier
+	// 7. Create classifier. Always attach one — with the configured LLM when a
+	// key is available, otherwise with a nil LLM so the embedding-distance
+	// fallback still deduplicates on re-index.
+	cls := &classifier.Classifier{
+		Store:    embStore,
+		Embedder: embedder,
+	}
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			cls = &classifier.Classifier{
-				Store:    embStore,
-				Embedder: embedder,
-				LLM:      llm.NewOpenAIProvider(key),
-			}
+			cls.LLM = llm.NewOpenAIProvider(key)
+			fmt.Fprintln(os.Stderr, "classifier: using openai/"+vaultCfg.ClassifierModel)
+		} else {
+			fmt.Fprintln(os.Stderr, "classifier: openai configured but OPENAI_API_KEY not found; using embedding-distance fallback")
 		}
 	case "anthropic":
 		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			cls = &classifier.Classifier{
-				Store:    embStore,
-				Embedder: embedder,
-				LLM:      llm.NewAnthropicProvider(key),
-			}
+			cls.LLM = llm.NewAnthropicProvider(key)
+			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+vaultCfg.ClassifierModel)
+		} else {
+			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
 		}
+	default:
+		fmt.Fprintln(os.Stderr, "classifier: using embedding-distance fallback")
 	}
 
 	// 8. Create default registry.
@@ -1007,10 +1024,7 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 	fmt.Printf("Indexing source directory: %s\n", absSrcDir)
 
 	ctx := context.Background()
-	var idxClassifier indexer.Classifier
-	if cls != nil {
-		idxClassifier = &classifierAdapter{cls: cls}
-	}
+	idxClassifier := indexer.Classifier(&classifierAdapter{cls: cls})
 	runner := indexer.NewRunner(runnerCfg, registry, nodeStore, embStore, embedder, idxClassifier, g)
 	result, err := runner.Run(ctx)
 	if err != nil {

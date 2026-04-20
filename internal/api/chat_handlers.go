@@ -44,7 +44,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, curator.ChatResponse{
 			Message: curator.ChatMessage{
 				Role:    "assistant",
-				Content: "No LLM provider configured. Slash commands are available: /tag, /type, /verify, /delete, /link, /merge, /unlink, /untag",
+				Content: "No LLM provider configured. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat. Slash commands are still available: /tag, /type, /verify, /delete, /link, /merge, /unlink, /untag",
 			},
 		})
 		return

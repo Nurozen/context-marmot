@@ -710,7 +710,7 @@ export class Curator {
       if (!response.ok) {
         const errText =
           response.status === 404 || response.status === 501
-            ? 'LLM not configured -- slash commands are available. Set MARMOT_LLM_KEY to enable AI.'
+            ? 'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.'
             : `Chat request failed (${response.status})`;
         this.addSystemMessage(errText);
         return;
@@ -727,7 +727,7 @@ export class Curator {
     } catch {
       thinkingEl.remove();
       this.addSystemMessage(
-        'LLM not configured -- slash commands are available. Set MARMOT_LLM_KEY to enable AI.',
+        'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
       );
     }
   }

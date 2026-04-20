@@ -34,3 +34,7 @@ classifier_model: gpt-5.1-codex-mini
 ## Fallback behavior
 
 If the configured classifier provider's API key is not found at serve time, ContextMarmot logs a warning to stderr and falls back to embedding-distance classification automatically.
+
+## Shared with the Graph Curator chat
+
+The same provider configured here is also used by the Graph Curator's natural-language chat in `marmot ui`. No separate setup is required --- if `marmot configure` wires OpenAI or Anthropic for the classifier, the UI chat works automatically. Selecting **none** leaves the chat drawer in slash-commands-only mode.
