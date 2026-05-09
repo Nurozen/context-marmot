@@ -24,6 +24,13 @@ type MockProvider struct {
 	ChatResult    string
 	ChatErr       error
 
+	// ChatResults, if non-nil, is consumed in order — the first Chat call
+	// pops index 0, the next pops index 1, and so on. After the queue is
+	// drained, Chat falls back to ChatResult or the default echo. This lets
+	// tests script multi-turn conversations (e.g. code-mode phase 1 then
+	// phase 2).
+	ChatResults []string
+
 	mu             sync.Mutex
 	Calls          int
 	ChatCalls      int
@@ -67,6 +74,13 @@ func (m *MockProvider) Summarize(_ context.Context, req SummarizeRequest) (strin
 func (m *MockProvider) Chat(_ context.Context, req ChatRequest) (string, error) {
 	m.mu.Lock()
 	m.ChatCalls++
+	// Consume the queue first if non-empty.
+	if len(m.ChatResults) > 0 {
+		next := m.ChatResults[0]
+		m.ChatResults = m.ChatResults[1:]
+		m.mu.Unlock()
+		return next, m.ChatErr
+	}
 	m.mu.Unlock()
 	if m.ChatResult != "" {
 		return m.ChatResult, m.ChatErr

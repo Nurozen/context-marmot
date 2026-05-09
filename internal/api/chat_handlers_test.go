@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/curator"
@@ -161,5 +162,167 @@ func TestHandleChat_InvalidJSON(t *testing.T) {
 	rec := doRequest(t, handler, "POST", "/api/chat", "not json")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Code-mode tests
+// ---------------------------------------------------------------------------
+
+func TestHandleChat_CodeMode_Roundtrip(t *testing.T) {
+	server, _ := newTestServer(t)
+
+	// Phase 1: model emits code that calls client.getStats().
+	// Phase 2: model produces a NL summary referencing the result.
+	mock := &llm.MockProvider{
+		ChatResults: []string{
+			"I'll check the graph stats.\n\n```js\nreturn client.getStats();\n```",
+			"The graph has 4 nodes across 1 namespace (default), with 3 outgoing edges. The auth/login node is the most connected.",
+		},
+	}
+	server.WithLLMChat(mock)
+	handler := server.Handler()
+
+	body := `{"message": "How big is the graph?", "session_id": "code-1"}`
+	rec := doRequest(t, handler, "POST", "/api/chat", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp curator.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.CodeRun == nil {
+		t.Fatalf("expected CodeRun to be populated, got nil")
+	}
+	if !strings.Contains(resp.CodeRun.Code, "client.getStats") {
+		t.Errorf("expected code to mention getStats, got %q", resp.CodeRun.Code)
+	}
+	if resp.CodeRun.Error != "" {
+		t.Errorf("expected no error, got %q", resp.CodeRun.Error)
+	}
+	if resp.CodeRun.Result == nil {
+		t.Errorf("expected non-nil Result")
+	}
+	// Final message should be the phase-2 summary, not the phase-1 code.
+	if !strings.Contains(resp.Message.Content, "4 nodes") {
+		t.Errorf("expected final message to be phase-2 summary, got %q", resp.Message.Content)
+	}
+	if mock.ChatCalls != 2 {
+		t.Errorf("expected 2 LLM calls (phase 1 + phase 2), got %d", mock.ChatCalls)
+	}
+}
+
+func TestHandleChat_CodeMode_NoCode(t *testing.T) {
+	server, _ := newTestServer(t)
+
+	// Model decides the question doesn't need graph access — direct answer.
+	mock := &llm.MockProvider{
+		ChatResults: []string{
+			"To tag a node, use the `/tag <name>` slash command after selecting nodes.",
+		},
+	}
+	server.WithLLMChat(mock)
+	handler := server.Handler()
+
+	body := `{"message": "How do I tag a node?", "session_id": "code-2"}`
+	rec := doRequest(t, handler, "POST", "/api/chat", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp curator.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.CodeRun != nil {
+		t.Errorf("expected no CodeRun for direct answer, got %+v", resp.CodeRun)
+	}
+	if !strings.Contains(resp.Message.Content, "/tag") {
+		t.Errorf("expected message to mention /tag, got %q", resp.Message.Content)
+	}
+	// Only one LLM call — phase 2 was skipped.
+	if mock.ChatCalls != 1 {
+		t.Errorf("expected 1 LLM call (no code path), got %d", mock.ChatCalls)
+	}
+}
+
+func TestHandleChat_CodeMode_BrokenCode(t *testing.T) {
+	server, _ := newTestServer(t)
+
+	mock := &llm.MockProvider{
+		ChatResults: []string{
+			"```js\nthis is not valid javascript syntax!\n```",
+			"I tried to inspect the graph but my code was malformed. Try asking again.",
+		},
+	}
+	server.WithLLMChat(mock)
+	handler := server.Handler()
+
+	body := `{"message": "Show me orphan nodes", "session_id": "code-3"}`
+	rec := doRequest(t, handler, "POST", "/api/chat", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp curator.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.CodeRun == nil {
+		t.Fatalf("expected CodeRun even on parse failure")
+	}
+	if resp.CodeRun.Error == "" {
+		t.Errorf("expected non-empty Error on broken code")
+	}
+	// Phase 2 should still produce a message (model gets to apologize).
+	if !strings.Contains(resp.Message.Content, "malformed") {
+		t.Errorf("expected phase-2 apology, got %q", resp.Message.Content)
+	}
+	if mock.ChatCalls != 2 {
+		t.Errorf("expected 2 LLM calls even on broken code, got %d", mock.ChatCalls)
+	}
+}
+
+func TestHandleChat_CodeMode_QueryGraph(t *testing.T) {
+	// Verifies the client.search method actually returns nodes from the seeded graph.
+	server, _ := newTestServer(t)
+
+	mock := &llm.MockProvider{
+		ChatResults: []string{
+			"```js\nreturn client.listByType(\"function\").map(n => n.id);\n```",
+			"There are two function nodes: auth/login and auth/token.",
+		},
+	}
+	server.WithLLMChat(mock)
+	handler := server.Handler()
+
+	body := `{"message": "List all function nodes", "session_id": "code-4"}`
+	rec := doRequest(t, handler, "POST", "/api/chat", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp curator.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.CodeRun == nil || resp.CodeRun.Error != "" {
+		t.Fatalf("expected successful execution, got %+v", resp.CodeRun)
+	}
+	// Result should be a slice of strings containing the function node IDs.
+	got, ok := resp.CodeRun.Result.([]any)
+	if !ok {
+		t.Fatalf("expected []any result, got %T (%v)", resp.CodeRun.Result, resp.CodeRun.Result)
+	}
+	have := map[string]bool{}
+	for _, v := range got {
+		if s, ok := v.(string); ok {
+			have[s] = true
+		}
+	}
+	if !have["auth/login"] || !have["auth/token"] {
+		t.Errorf("expected auth/login and auth/token in result, got %v", got)
 	}
 }

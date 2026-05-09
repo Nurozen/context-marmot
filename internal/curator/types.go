@@ -27,8 +27,20 @@ type ChatAction struct {
 
 // ChatResponse is the JSON response for POST /api/chat.
 type ChatResponse struct {
-	Message ChatMessage `json:"message"`
-	UndoID  string      `json:"undo_id,omitempty"`
+	Message ChatMessage  `json:"message"`
+	UndoID  string       `json:"undo_id,omitempty"`
+	CodeRun *CodeRunInfo `json:"code_run,omitempty"`
+}
+
+// CodeRunInfo describes a single code-mode execution that took place during
+// a chat turn. The frontend renders it as a collapsible panel above the
+// final assistant message.
+type CodeRunInfo struct {
+	Code       string   `json:"code"`
+	Result     any      `json:"result"`
+	Logs       []string `json:"logs"`
+	Error      string   `json:"error,omitempty"`
+	DurationMS int64    `json:"duration_ms"`
 }
 
 // GraphStats summarises the current state of the knowledge graph for the

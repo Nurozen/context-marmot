@@ -26,6 +26,16 @@ interface ChatResponse {
     content: string;
     actions?: ChatAction[];
   };
+  undo_id?: string;
+  code_run?: CodeRunInfo;
+}
+
+export interface CodeRunInfo {
+  code: string;
+  result: unknown;
+  logs: string[];
+  error?: string;
+  duration_ms: number;
 }
 
 /** Shape returned by /api/verify/:ns */
@@ -690,7 +700,7 @@ export class Curator {
   async sendNaturalLanguage(message: string): Promise<void> {
     this.addUserMessage(message);
 
-    const thinkingEl = this.addThinkingIndicator();
+    const indicator = this.addThinkingIndicator();
 
     try {
       const response = await fetch('/api/chat', {
@@ -705,7 +715,7 @@ export class Curator {
         }),
       });
 
-      thinkingEl.remove();
+      indicator.dispose();
 
       if (!response.ok) {
         const errText =
@@ -717,7 +727,7 @@ export class Curator {
       }
 
       const data = (await response.json()) as ChatResponse;
-      this.addSystemMessage(data.message.content);
+      this.addSystemMessage(data.message.content, undefined, data.code_run);
 
       if (data.message.actions) {
         for (const action of data.message.actions) {
@@ -725,7 +735,7 @@ export class Curator {
         }
       }
     } catch {
-      thinkingEl.remove();
+      indicator.dispose();
       this.addSystemMessage(
         'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
       );
@@ -750,14 +760,24 @@ export class Curator {
   addSystemMessage(
     text: string,
     actions?: Array<{ label: string; onClick: () => void }>,
+    codeRun?: CodeRunInfo,
   ): void {
     const msg: ChatMessage = { role: 'system', content: text, timestamp: Date.now() };
     this.chatHistory.push(msg);
 
+    /* Wrap in an assistant container so an optional code-run panel can
+       sit ABOVE the bubble while keeping left-alignment. */
+    const container = document.createElement('div');
+    container.className = 'chat-message-assistant';
+
+    if (codeRun) {
+      container.appendChild(renderCodeRunPanel(codeRun));
+    }
+
     const el = document.createElement('div');
     el.className = 'chat-message chat-message-system';
     el.innerHTML = this.renderMessageWithNodeRefs(text);
-    this.messagesEl.appendChild(el);
+    container.appendChild(el);
 
     if (actions && actions.length > 0) {
       const bar = document.createElement('div');
@@ -776,6 +796,7 @@ export class Curator {
       el.appendChild(bar);
     }
 
+    this.messagesEl.appendChild(container);
     this.scrollToBottom();
   }
 
@@ -787,14 +808,38 @@ export class Curator {
     this.scrollToBottom();
   }
 
-  private addThinkingIndicator(): HTMLElement {
+  /**
+   * Show an in-flight indicator. Two stages:
+   *  - 0..1500ms: thinking dots
+   *  - 1500ms+:   "running code..." with a small spinner
+   * The frontend doesn't know the actual phase (no streaming in v1) -- this
+   * is purely a UX hint that the request can take longer than a typical
+   * LLM call because the server may be executing JS in goja.
+   */
+  private addThinkingIndicator(): { dispose: () => void } {
     const el = document.createElement('div');
     el.className = 'chat-message chat-thinking';
     el.innerHTML =
-      '<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>';
+      '<span class="thinking-dot"></span>' +
+      '<span class="thinking-dot"></span>' +
+      '<span class="thinking-dot"></span>';
     this.messagesEl.appendChild(el);
     this.scrollToBottom();
-    return el;
+
+    const swap = window.setTimeout(() => {
+      el.classList.add('chat-running-code');
+      el.innerHTML =
+        '<span class="running-spinner" aria-hidden="true"></span>' +
+        '<span class="running-label">running code...</span>';
+      this.scrollToBottom();
+    }, 1500);
+
+    return {
+      dispose: () => {
+        window.clearTimeout(swap);
+        el.remove();
+      },
+    };
   }
 
   /** Render node IDs in backticks as clickable pills. */
@@ -1175,4 +1220,156 @@ function escHtml(s: string): string {
 
 function escAttr(s: string): string {
   return s.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* ------------------------------------------------------------------ */
+/*  Code-run panel                                                     */
+/* ------------------------------------------------------------------ */
+
+/** Build the collapsible code/result panel rendered above an assistant
+ *  message when the backend executed code on the user's behalf. */
+function renderCodeRunPanel(run: CodeRunInfo): HTMLElement {
+  const panel = document.createElement('div');
+  panel.className = 'code-run-panel';
+  const hasError = !!run.error;
+  if (hasError) panel.classList.add('has-error');
+
+  /* Header */
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'code-run-header';
+  const chevron = document.createElement('span');
+  chevron.className = 'code-run-chevron';
+  chevron.textContent = '▶'; /* right-pointing triangle */
+  const label = document.createElement('span');
+  label.className = 'code-run-label';
+  if (hasError) {
+    label.innerHTML = `Code &middot; <span class="code-run-err-tag">Error</span>`;
+  } else {
+    label.innerHTML = `Code &middot; <span class="code-run-duration">${run.duration_ms}ms</span>`;
+  }
+
+  /* Copy button (lives in header, but doesn't toggle expand) */
+  const copyBtn = document.createElement('span');
+  copyBtn.className = 'code-run-copy';
+  copyBtn.setAttribute('role', 'button');
+  copyBtn.setAttribute('tabindex', '0');
+  copyBtn.title = 'Copy code';
+  copyBtn.textContent = 'copy';
+  const doCopy = (ev: Event) => {
+    ev.stopPropagation();
+    void navigator.clipboard?.writeText(run.code).then(
+      () => {
+        const prev = copyBtn.textContent;
+        copyBtn.textContent = 'copied!';
+        copyBtn.classList.add('copied');
+        window.setTimeout(() => {
+          copyBtn.textContent = prev;
+          copyBtn.classList.remove('copied');
+        }, 1200);
+      },
+      () => {
+        copyBtn.textContent = 'failed';
+      },
+    );
+  };
+  copyBtn.addEventListener('click', doCopy);
+  copyBtn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      doCopy(e);
+    }
+  });
+
+  header.appendChild(chevron);
+  header.appendChild(label);
+  header.appendChild(copyBtn);
+
+  /* Body */
+  const body = document.createElement('div');
+  body.className = 'code-run-body';
+
+  /* Code block */
+  const codeBlock = document.createElement('pre');
+  codeBlock.className = 'code-run-code';
+  const codeEl = document.createElement('code');
+  codeEl.textContent = run.code;
+  codeBlock.appendChild(codeEl);
+  body.appendChild(codeBlock);
+
+  /* Error or result section */
+  if (hasError) {
+    const errLabel = document.createElement('div');
+    errLabel.className = 'code-run-section-label';
+    errLabel.textContent = 'Error:';
+    body.appendChild(errLabel);
+    const errBlock = document.createElement('pre');
+    errBlock.className = 'code-run-error';
+    errBlock.textContent = run.error ?? '';
+    body.appendChild(errBlock);
+  } else {
+    const resultLabel = document.createElement('div');
+    resultLabel.className = 'code-run-section-label';
+    const count = arrayLikeCount(run.result);
+    resultLabel.textContent =
+      count !== null ? `Result (${count} item${count === 1 ? '' : 's'}):` : 'Result:';
+    body.appendChild(resultLabel);
+
+    if (run.result === null || run.result === undefined) {
+      const muted = document.createElement('div');
+      muted.className = 'code-run-result-muted';
+      muted.textContent = '(no return value)';
+      body.appendChild(muted);
+    } else {
+      const resultBlock = document.createElement('pre');
+      resultBlock.className = 'code-run-result';
+      let pretty: string;
+      try {
+        pretty = JSON.stringify(run.result, null, 2);
+      } catch {
+        pretty = String(run.result);
+      }
+      resultBlock.textContent = pretty;
+      body.appendChild(resultBlock);
+    }
+  }
+
+  /* Logs */
+  if (run.logs && run.logs.length > 0) {
+    const logsLabel = document.createElement('div');
+    logsLabel.className = 'code-run-section-label';
+    logsLabel.textContent = 'Logs:';
+    body.appendChild(logsLabel);
+    const ul = document.createElement('ul');
+    ul.className = 'code-run-logs';
+    for (const line of run.logs) {
+      const li = document.createElement('li');
+      li.textContent = line;
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+  }
+
+  /* Default expanded state: collapsed unless error */
+  let expanded = hasError;
+  const applyExpanded = () => {
+    panel.classList.toggle('expanded', expanded);
+    chevron.textContent = expanded ? '▼' : '▶';
+  };
+  applyExpanded();
+
+  header.addEventListener('click', () => {
+    expanded = !expanded;
+    applyExpanded();
+  });
+
+  panel.appendChild(header);
+  panel.appendChild(body);
+  return panel;
+}
+
+/** Return array length for arrays, otherwise null. Used to label result
+ *  blocks like "Result (3 items)". */
+function arrayLikeCount(v: unknown): number | null {
+  return Array.isArray(v) ? v.length : null;
 }

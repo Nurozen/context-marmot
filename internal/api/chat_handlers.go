@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nurozen/context-marmot/internal/codemode"
 	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/llm"
@@ -144,10 +145,101 @@ func collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) [
 	return ids
 }
 
-// handleLLMChat builds a system prompt with graph context and calls the LLM
-// for a natural language response.
+// handleLLMChat runs the two-phase code-mode chat flow:
+//
+//  1. Build a phase-1 system prompt that documents the `client` JS API and
+//     ask the LLM to either answer directly or emit a single code block.
+//  2. If the response contains a code block, execute it in a goja sandbox.
+//     Then call the LLM again with a phase-2 prompt that includes the code
+//     and the execution result, asking for a natural-language answer.
+//
+// If phase 1 returns no code block, we treat the response as the final
+// answer and skip phase 2.
 func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curator.ChatRequest) {
-	// Build graph stats.
+	// Build graph stats + selected-node summaries (used by phase-1 prompt).
+	stats, selectedSummaries := s.buildChatContext(req.SelectedNodes)
+
+	// Phase-1 prompt: documents the client API + graph context.
+	// TODO: read engine.ReadOnly once feat/package-docs lands on main.
+	phase1Prompt := codemode.BuildPhase1Prompt(stats, selectedSummaries, false)
+
+	// Build the LLM message history (shared between both phases).
+	history := make([]llm.ChatMessage, 0, len(req.History)+1)
+	for _, h := range req.History {
+		if h.Role == "system" {
+			continue
+		}
+		history = append(history, llm.ChatMessage{Role: h.Role, Content: h.Content})
+	}
+	userMsg := llm.ChatMessage{Role: "user", Content: req.Message}
+
+	ctx := context.Background()
+
+	// Phase 1.
+	phase1, err := s.llmChat.Chat(ctx, llm.ChatRequest{
+		SystemPrompt: phase1Prompt,
+		Messages:     append(history, userMsg),
+		MaxTokens:    1024,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "LLM error (phase 1): "+err.Error())
+		return
+	}
+
+	// Try to extract code. If none → phase-1 message IS the final answer.
+	code := codemode.ExtractCode(phase1)
+	if code == "" {
+		writeJSON(w, http.StatusOK, curator.ChatResponse{
+			Message: curator.ChatMessage{Role: "assistant", Content: phase1},
+		})
+		return
+	}
+
+	// Execute the code in a fresh sandbox.
+	if s.codeExecutor == nil {
+		s.codeExecutor = codemode.NewExecutor(s.engine)
+	}
+	execResult := s.codeExecutor.Execute(ctx, code)
+
+	codeRun := &curator.CodeRunInfo{
+		Code:       code,
+		Result:     execResult.Value,
+		Logs:       execResult.Logs,
+		Error:      execResult.Error,
+		DurationMS: execResult.DurationMS,
+	}
+
+	// Phase 2: synthesize a natural-language answer from the execution.
+	phase2Prompt := codemode.BuildPhase2Prompt(req.Message, code, execResult)
+	phase2, err := s.llmChat.Chat(ctx, llm.ChatRequest{
+		SystemPrompt: phase2Prompt,
+		// Phase 2 only needs the user's original question — the prompt itself
+		// already contains the code and result.
+		Messages:  []llm.ChatMessage{userMsg},
+		MaxTokens: 1024,
+	})
+	if err != nil {
+		// Best effort: return phase-1 message + the code-run info so the user
+		// still sees something concrete.
+		writeJSON(w, http.StatusOK, curator.ChatResponse{
+			Message: curator.ChatMessage{
+				Role:    "assistant",
+				Content: phase1 + "\n\n_(failed to summarize the result: " + err.Error() + ")_",
+			},
+			CodeRun: codeRun,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, curator.ChatResponse{
+		Message: curator.ChatMessage{Role: "assistant", Content: phase2},
+		CodeRun: codeRun,
+	})
+}
+
+// buildChatContext assembles GraphStats and the selected-node summaries
+// for the phase-1 system prompt. Extracted so tests can call it.
+func (s *Server) buildChatContext(selectedNodeIDs []string) (curator.GraphStats, []curator.APINodeSummary) {
 	g := s.engine.GetGraph()
 	allNodes := g.AllActiveNodes()
 
@@ -159,8 +251,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curat
 			ns = "default"
 		}
 		nsSet[ns] = true
-		outEdges := g.GetEdges(n.ID, graph.Outbound)
-		totalEdges += len(outEdges)
+		totalEdges += len(g.GetEdges(n.ID, graph.Outbound))
 	}
 	namespaces := make([]string, 0, len(nsSet))
 	for ns := range nsSet {
@@ -173,9 +264,8 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curat
 		Namespaces: namespaces,
 	}
 
-	// Build selected node summaries.
 	var selectedSummaries []curator.APINodeSummary
-	for _, id := range req.SelectedNodes {
+	for _, id := range selectedNodeIDs {
 		n, ok := s.engine.ResolveNodeID(id)
 		if !ok {
 			continue
@@ -194,42 +284,5 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curat
 			Edges:   len(outEdges) + len(inEdges),
 		})
 	}
-
-	systemPrompt := curator.BuildSystemPrompt(stats, selectedSummaries)
-
-	// Build the LLM message history.
-	messages := make([]llm.ChatMessage, 0, len(req.History)+1)
-	for _, h := range req.History {
-		if h.Role == "system" {
-			continue
-		}
-		messages = append(messages, llm.ChatMessage{
-			Role:    h.Role,
-			Content: h.Content,
-		})
-	}
-	messages = append(messages, llm.ChatMessage{
-		Role:    "user",
-		Content: req.Message,
-	})
-
-	chatReq := llm.ChatRequest{
-		SystemPrompt: systemPrompt,
-		Messages:     messages,
-		MaxTokens:    1024,
-	}
-
-	ctx := context.Background()
-	text, err := s.llmChat.Chat(ctx, chatReq)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LLM error: "+err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, curator.ChatResponse{
-		Message: curator.ChatMessage{
-			Role:    "assistant",
-			Content: text,
-		},
-	})
+	return stats, selectedSummaries
 }
