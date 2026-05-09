@@ -37,7 +37,12 @@ type Server struct {
 // NewServer creates a Server wired to the given engine. If assets is non-nil,
 // the server also serves an embedded SPA frontend.
 func NewServer(engine *mcpserver.Engine, assets fs.FS) *Server {
-	s := &Server{engine: engine, assets: assets, undoStack: curator.NewUndoStack()}
+	s := &Server{
+		engine:       engine,
+		assets:       assets,
+		undoStack:    curator.NewUndoStack(),
+		codeExecutor: codemode.NewExecutor(engine),
+	}
 	s.mux = http.NewServeMux()
 	s.registerRoutes()
 	return s

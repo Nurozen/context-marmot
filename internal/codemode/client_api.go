@@ -12,6 +12,16 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
+// MaxListItems caps the number of nodes any list method returns to JS, so a
+// huge graph can't blow up Go-side memory before result truncation kicks in
+// at the executor layer. When this limit is hit the result includes a
+// trailing sentinel marker.
+const MaxListItems = 500
+
+// truncatedMarkerNode signals that the list method capped its output. The
+// LLM sees this as a sentinel string in the array and adjusts its answer.
+var truncatedMarkerNode = ClientNode{ID: "<TRUNCATED at 500 items>", Status: "truncated"}
+
 // ClientNode is the JS-friendly projection of a graph node returned by the
 // `client` API. Edges are resolved into the node-id-plus-relation pairs the
 // LLM most often wants to look at.
@@ -54,7 +64,10 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 		}
 	}
 
-	// query — semantic search via the existing MCP handler.
+	// query — semantic search via the existing MCP handler. The XML payload
+	// the MCP handler returns is a token-budgeted blob meant for an agent's
+	// context window; for code-mode we additionally project the entry nodes
+	// into the structured ClientNode shape so the LLM can index by ID.
 	mustSet("query", func(call goja.FunctionCall) goja.Value {
 		input := exportObject(rt, call.Argument(0))
 		q, _ := input["query"].(string)
@@ -76,9 +89,7 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 		return rt.ToValue(map[string]any{
 			"xml":   extractText(result),
 			"error": isErr(result),
-			// Convenience: also project entry node IDs from the active graph
-			// using the same query so the LLM can drill in.
-			"nodes": searchToClientNodes(engine, q, 10),
+			"nodes": searchEntryNodes(engine, q, 10),
 		})
 	})
 
@@ -88,7 +99,7 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 		if q == "" {
 			panic(rt.NewTypeError("client.search: query is required"))
 		}
-		return rt.ToValue(searchToClientNodes(engine, q, 20))
+		return rt.ToValue(searchEntryNodes(engine, q, 20))
 	})
 
 	// getNode — fetch a single node by ID. Accepts either ("ns", "id") or
@@ -153,20 +164,16 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 	})
 
 	// getGraph — full graph snapshot, optionally filtered to a namespace.
+	// Capped at MaxListItems entries to bound memory.
 	mustSet("getGraph", func(call goja.FunctionCall) goja.Value {
 		ns := ""
 		if len(call.Arguments) > 0 {
 			ns = call.Argument(0).String()
 		}
 		g := engine.GetGraph()
-		nodes := g.AllActiveNodes()
-		out := make([]ClientNode, 0, len(nodes))
-		for _, n := range nodes {
-			if ns != "" && n.Namespace != ns {
-				continue
-			}
-			out = append(out, toClientNode(g, n))
-		}
+		out := collectCapped(g, func(n *node.Node) bool {
+			return ns == "" || n.Namespace == ns
+		})
 		return rt.ToValue(out)
 	})
 
@@ -176,13 +183,7 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 		if tag == "" {
 			panic(rt.NewTypeError("client.listByTag: tag is required"))
 		}
-		g := engine.GetGraph()
-		out := make([]ClientNode, 0)
-		for _, n := range g.AllActiveNodes() {
-			if hasTag(n, tag) {
-				out = append(out, toClientNode(g, n))
-			}
-		}
+		out := collectCapped(engine.GetGraph(), func(n *node.Node) bool { return hasTag(n, tag) })
 		return rt.ToValue(out)
 	})
 
@@ -192,13 +193,7 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 		if t == "" {
 			panic(rt.NewTypeError("client.listByType: type is required"))
 		}
-		g := engine.GetGraph()
-		out := make([]ClientNode, 0)
-		for _, n := range g.AllActiveNodes() {
-			if n.Type == t {
-				out = append(out, toClientNode(g, n))
-			}
-		}
+		out := collectCapped(engine.GetGraph(), func(n *node.Node) bool { return n.Type == t })
 		return rt.ToValue(out)
 	})
 
@@ -208,17 +203,13 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 		if ns == "" {
 			panic(rt.NewTypeError("client.listByNamespace: namespace is required"))
 		}
-		g := engine.GetGraph()
-		out := make([]ClientNode, 0)
-		for _, n := range g.AllActiveNodes() {
+		out := collectCapped(engine.GetGraph(), func(n *node.Node) bool {
 			nodeNS := n.Namespace
 			if nodeNS == "" {
 				nodeNS = "default"
 			}
-			if nodeNS == ns {
-				out = append(out, toClientNode(g, n))
-			}
-		}
+			return nodeNS == ns
+		})
 		return rt.ToValue(out)
 	})
 
@@ -264,13 +255,10 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 	// listOrphans — nodes with no inbound and no outbound edges.
 	mustSet("listOrphans", func(call goja.FunctionCall) goja.Value {
 		g := engine.GetGraph()
-		out := make([]ClientNode, 0)
-		for _, n := range g.AllActiveNodes() {
-			if len(g.GetEdges(n.ID, graph.Outbound)) == 0 &&
-				len(g.GetEdges(n.ID, graph.Inbound)) == 0 {
-				out = append(out, toClientNode(g, n))
-			}
-		}
+		out := collectCapped(g, func(n *node.Node) bool {
+			return len(g.GetEdges(n.ID, graph.Outbound)) == 0 &&
+				len(g.GetEdges(n.ID, graph.Inbound)) == 0
+		})
 		return rt.ToValue(out)
 	})
 
@@ -354,25 +342,21 @@ func bfsNeighbors(g *graph.Graph, startID string, depth int) []ClientNode {
 	for d := 0; d < depth; d++ {
 		next := make([]string, 0)
 		for _, id := range frontier {
-			for _, e := range g.GetEdges(id, graph.Outbound) {
-				if _, seen := visited[e.Target]; seen {
-					continue
+			for _, dir := range []graph.Direction{graph.Outbound, graph.Inbound} {
+				for _, e := range g.GetEdges(id, dir) {
+					if _, seen := visited[e.Target]; seen {
+						continue
+					}
+					visited[e.Target] = struct{}{}
+					if len(out) >= MaxListItems {
+						out = append(out, truncatedMarkerNode)
+						return out
+					}
+					if n, ok := g.GetNode(e.Target); ok {
+						out = append(out, toClientNode(g, n))
+					}
+					next = append(next, e.Target)
 				}
-				visited[e.Target] = struct{}{}
-				if n, ok := g.GetNode(e.Target); ok {
-					out = append(out, toClientNode(g, n))
-				}
-				next = append(next, e.Target)
-			}
-			for _, e := range g.GetEdges(id, graph.Inbound) {
-				if _, seen := visited[e.Target]; seen {
-					continue
-				}
-				visited[e.Target] = struct{}{}
-				if n, ok := g.GetNode(e.Target); ok {
-					out = append(out, toClientNode(g, n))
-				}
-				next = append(next, e.Target)
 			}
 		}
 		frontier = next
@@ -383,21 +367,17 @@ func bfsNeighbors(g *graph.Graph, startID string, depth int) []ClientNode {
 	return out
 }
 
-// searchToClientNodes runs a query through HandleContextQuery and projects
-// the entry nodes back into the JS shape. It uses the same path as MCP so
-// it benefits from the lexical fallback when no embedder key is set.
-func searchToClientNodes(engine *mcpserver.Engine, query string, limit int) []ClientNode {
-	g := engine.GetGraph()
-	// Reuse the same lightweight search as the existing /api/search handler:
-	// we directly probe the embedding store. This avoids round-tripping XML.
-	if engine.Embedder == nil || engine.EmbeddingStore == nil {
+// searchEntryNodes returns up to `limit` nodes that match `query` by
+// projecting the embedding store's top-K hits back into ClientNode shape.
+// When the embedder is unusable (no API key, mock with no matches), returns
+// an empty slice — the LLM gets the empty array and can pick another tool.
+func searchEntryNodes(engine *mcpserver.Engine, query string, limit int) []ClientNode {
+	if engine == nil || engine.Embedder == nil || engine.EmbeddingStore == nil {
 		return nil
 	}
+	g := engine.GetGraph()
 	vec, err := engine.Embedder.Embed(query)
 	if err != nil {
-		// Lexical fallback — call HandleContextQuery and try to extract IDs.
-		req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "context_query", Arguments: map[string]any{"query": query}}}
-		_, _ = engine.HandleContextQuery(context.Background(), req)
 		return nil
 	}
 	results, err := engine.EmbeddingStore.SearchActive(vec, limit, engine.Embedder.Model())
@@ -409,6 +389,27 @@ func searchToClientNodes(engine *mcpserver.Engine, query string, limit int) []Cl
 		if n, ok := g.GetNode(r.NodeID); ok {
 			out = append(out, toClientNode(g, n))
 		}
+	}
+	return out
+}
+
+// collectCapped iterates the graph's active nodes, filters by `keep`, and
+// returns at most MaxListItems entries. When the cap is hit, a sentinel
+// node is appended so the LLM can detect truncation.
+func collectCapped(g *graph.Graph, keep func(*node.Node) bool) []ClientNode {
+	if g == nil {
+		return nil
+	}
+	out := make([]ClientNode, 0)
+	for _, n := range g.AllActiveNodes() {
+		if !keep(n) {
+			continue
+		}
+		if len(out) >= MaxListItems {
+			out = append(out, truncatedMarkerNode)
+			return out
+		}
+		out = append(out, toClientNode(g, n))
 	}
 	return out
 }

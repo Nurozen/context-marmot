@@ -144,17 +144,23 @@ func (e *Executor) Execute(ctx context.Context, jsCode string) *Result {
 
 	// Export to a Go value, then check size.
 	exported := value.Export()
-	res.Value = exported
 
-	// Size-check via JSON serialization. If too big, truncate to a string
-	// summary and flag.
-	if blob, err := json.Marshal(exported); err == nil && len(blob) > MaxResultBytes {
-		res.Truncated = true
-		// Replace Value with a truncated string so downstream JSON marshal
-		// stays bounded.
-		res.Value = string(blob[:MaxResultBytes]) + "<TRUNCATED at 8KB>"
+	// Size-check via JSON serialization. The check serves two purposes:
+	//  - If the value can't be JSON-encoded at all (channels, funcs, cycles),
+	//    we can't reliably hand it to the phase-2 LLM call. Set an error.
+	//  - If it serializes too large, replace with a truncated string so
+	//    downstream JSON marshal stays bounded.
+	blob, err := json.Marshal(exported)
+	if err != nil {
+		res.Error = "result is not JSON-serializable: " + err.Error()
+		return res
 	}
-
+	if len(blob) > MaxResultBytes {
+		res.Truncated = true
+		res.Value = string(blob[:MaxResultBytes]) + "<TRUNCATED at 8KB>"
+		return res
+	}
+	res.Value = exported
 	return res
 }
 

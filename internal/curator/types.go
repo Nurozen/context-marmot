@@ -41,6 +41,9 @@ type CodeRunInfo struct {
 	Logs       []string `json:"logs"`
 	Error      string   `json:"error,omitempty"`
 	DurationMS int64    `json:"duration_ms"`
+	// Truncated is true when the result exceeded MaxResultBytes and was
+	// replaced with a truncated string before serialization.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // GraphStats summarises the current state of the knowledge graph for the

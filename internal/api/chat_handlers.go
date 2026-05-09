@@ -155,7 +155,7 @@ func collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) [
 //
 // If phase 1 returns no code block, we treat the response as the final
 // answer and skip phase 2.
-func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curator.ChatRequest) {
+func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curator.ChatRequest) {
 	// Build graph stats + selected-node summaries (used by phase-1 prompt).
 	stats, selectedSummaries := s.buildChatContext(req.SelectedNodes)
 
@@ -163,17 +163,24 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curat
 	// TODO: read engine.ReadOnly once feat/package-docs lands on main.
 	phase1Prompt := codemode.BuildPhase1Prompt(stats, selectedSummaries, false)
 
-	// Build the LLM message history (shared between both phases).
+	// Build the LLM message history. Strip past assistant code blocks so we
+	// don't re-train the model on its previous code on phase-1 turns — keep
+	// only the assistant's final natural-language text.
 	history := make([]llm.ChatMessage, 0, len(req.History)+1)
 	for _, h := range req.History {
 		if h.Role == "system" {
 			continue
 		}
-		history = append(history, llm.ChatMessage{Role: h.Role, Content: h.Content})
+		content := h.Content
+		if h.Role == "assistant" {
+			content = stripCodeBlocks(content)
+		}
+		history = append(history, llm.ChatMessage{Role: h.Role, Content: content})
 	}
 	userMsg := llm.ChatMessage{Role: "user", Content: req.Message}
 
-	ctx := context.Background()
+	// Use the request context so client disconnects abort downstream work.
+	ctx := r.Context()
 
 	// Phase 1.
 	phase1, err := s.llmChat.Chat(ctx, llm.ChatRequest{
@@ -195,10 +202,8 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curat
 		return
 	}
 
-	// Execute the code in a fresh sandbox.
-	if s.codeExecutor == nil {
-		s.codeExecutor = codemode.NewExecutor(s.engine)
-	}
+	// Execute the code in a fresh sandbox. Executor was constructed in
+	// NewServer so this is a plain field read — no race.
 	execResult := s.codeExecutor.Execute(ctx, code)
 
 	codeRun := &curator.CodeRunInfo{
@@ -207,6 +212,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, _ *http.Request, req curat
 		Logs:       execResult.Logs,
 		Error:      execResult.Error,
 		DurationMS: execResult.DurationMS,
+		Truncated:  execResult.Truncated,
 	}
 
 	// Phase 2: synthesize a natural-language answer from the execution.
@@ -285,4 +291,25 @@ func (s *Server) buildChatContext(selectedNodeIDs []string) (curator.GraphStats,
 		})
 	}
 	return stats, selectedSummaries
+}
+
+// stripCodeBlocks removes fenced code blocks from a string. Used to clean
+// past assistant turns before re-sending them on phase-1 prompts so the
+// model doesn't try to "continue" stale code.
+func stripCodeBlocks(s string) string {
+	const fence = "```"
+	out := s
+	for {
+		i := strings.Index(out, fence)
+		if i < 0 {
+			break
+		}
+		j := strings.Index(out[i+len(fence):], fence)
+		if j < 0 {
+			break
+		}
+		end := i + len(fence) + j + len(fence)
+		out = out[:i] + out[end:]
+	}
+	return strings.TrimSpace(out)
 }
