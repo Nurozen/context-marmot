@@ -712,6 +712,53 @@ Chat panel embedded in the web UI that lets users refine the auto-generated know
 - [x] Onboarding state: empty graph shows "Run `marmot index`" card
 - [x] Network disconnect handling: optimistic UI with rollback on error
 
+## Phase 25: Documentation Bundles — `marmot package-docs` — COMPLETE (2026-05-08)
+
+Bundle a `.marmot/` vault into a sharable, agent-native documentation archive. Recipients drop the bundle into their project, point their agent at it via MCP, and get read-only graph access immediately — no API key required for browsing or keyword search. Spec: `docs/spec-package-docs.md`.
+
+### 25.1 — Packager core (`internal/packager`)
+- [x] `Package(opts)` walks the source vault and writes a `.tar.gz` or `.zip`
+- [x] Strip `.marmot-data/.env`, `embeddings.db-wal`, `embeddings.db-shm`
+- [x] Strip `.obsidian/workspace.json`, `workspace-mobile.json` (or whole `.obsidian/` with `--no-obsidian`)
+- [x] Exclude `_heat/` by default (local usage telemetry); opt-in via `--include-heat`
+- [x] Sanitize `_config.md`: drop secret-bearing fields, force `read_only: true`
+- [x] Generate `_package.md` manifest with provenance + how-to-use
+- [x] Refuse to package vaults with missing `_config.md` or empty `embeddings.db`
+- [x] Atomic write via tmp + rename
+- [x] Stable, deterministic file ordering inside the archive
+
+### 25.2 — CLI (`marmot package-docs`)
+- [x] Flags: `--dir`, `--out`, `--zip`, `--include-heat`, `--no-obsidian`
+- [x] Default output filename derived from `vault_id` or directory name
+- [x] Exit code 2 for "vault unsuitable", 1 for other errors
+- [x] Human-readable success line with node/edge/namespace counts and archive size
+
+### 25.3 — Engine read-only mode
+- [x] Add `Engine.ReadOnly bool` and `VaultConfig.ReadOnly bool`
+- [x] `NewEngine` reads `read_only` from `_config.md` frontmatter
+- [x] `HandleContextWrite`, `HandleContextDelete`, `HandleContextTag` reject with `"vault is read-only; writes are disabled"` when set
+- [x] `HandleContextQuery` and `HandleContextVerify` continue to work normally
+
+### 25.4 — Lexical fallback in `context_query`
+- [x] `embedderUsable()` probes the embedder once with `Embed("ping")`, caches the result
+- [x] When embedder is unusable, log to stderr once and route through lexical search
+- [x] `LexicalSearch` scores nodes: +3.0 for summary match, +1.0 for context match, +0.5 per matching tag
+- [x] Stopword filtering (a, the, is, of, in, to, and)
+- [x] Substring matching (so "auth" matches "authentication")
+- [x] BFS expansion + token-budget compaction reused unchanged from semantic path
+
+### 25.5 — Setup integration
+- [x] `marmot setup --read-only` flag: passes `--read-only` to `marmot serve` in MCP configs
+- [x] Auto-detect: if `_package.md` with `read_only: true` exists in the vault, treat as read-only
+- [x] Skip API-key prompt section when read-only
+- [x] `marmot serve --read-only` flag: one-way override (can turn read-only ON, never OFF)
+
+### 25.6 — Tests
+- [x] `internal/packager/packager_test.go`: round-trip, secret-stripping, read-only flag, zip format, heat exclusion
+- [x] `internal/mcp/lexical_test.go`: basic match, tag-only match, top-K, stopwords, empty query
+- [x] `internal/mcp/read_only_test.go`: write/delete/tag rejected, query+verify allowed, lexical fallback path
+- [x] End-to-end binary test: package the demo vault, extract it, serve it, verify `context_write` rejection over MCP
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.

@@ -367,13 +367,26 @@ func buildEngine(dir string) (*engineResult, error) {
 	}, nil
 }
 
-// runServePipeline starts the MCP server on stdio.
-func runServePipeline(dir string) error {
+// runServePipeline starts the MCP server on stdio. When readOnly is true, the
+// engine refuses mutating MCP tool calls (context_write/tag/delete). The flag
+// can also be auto-set from _config.md frontmatter (read_only: true) by the
+// engine itself once that wiring lands; the CLI flag is an explicit override.
+func runServePipeline(dir string, readOnly bool) error {
 	result, err := buildEngine(dir)
 	if err != nil {
 		return err
 	}
 	defer result.Cleanup()
+
+	// The CLI flag is a one-way override: it can turn read-only ON, never OFF.
+	// (Bundled vaults set read_only=true in _config.md, which NewEngine already
+	// honors. Operators can also force it via --read-only on a writable vault.)
+	if readOnly {
+		result.Engine.ReadOnly = true
+	}
+	if result.Engine.ReadOnly {
+		fmt.Fprintln(os.Stderr, "serve: read-only mode active — write tools disabled")
+	}
 
 	ctx := context.Background()
 	if result.Scheduler != nil {

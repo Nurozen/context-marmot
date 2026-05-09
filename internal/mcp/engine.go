@@ -43,6 +43,17 @@ type Engine struct {
 	MarmotDir    string
 	LocalVaultID string // cached from config; avoids repeated disk reads in handlers
 	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
+
+	// ReadOnly disables write tools (context_write, context_delete, context_tag).
+	// Set from VaultConfig.ReadOnly during engine construction, or via CLI flag.
+	ReadOnly bool
+
+	// embedderUsableOnce gates the one-time probe of the embedder.
+	embedderUsableOnce   sync.Once
+	embedderUsableCached bool
+
+	// lexicalFallbackOnce ensures the lexical-fallback log line fires once.
+	lexicalFallbackOnce sync.Once
 }
 
 // SetGraph atomically replaces the in-memory graph.
@@ -141,8 +152,31 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		Embedder:       embedder,
 		MarmotDir:      marmotDir,
 	}
+	// Read-only flag from vault config (CLI override is layered on by the caller).
+	if cfg, cfgErr := config.Load(marmotDir); cfgErr == nil && cfg != nil {
+		eng.ReadOnly = cfg.ReadOnly
+	}
 	eng.SetGraph(g)
 	return eng, nil
+}
+
+// embedderUsable returns true if calling Embed() is likely to succeed.
+// For OpenAI/Anthropic embedders, this means an API key is present and the
+// embedder responds without error. For the mock embedder, always true.
+//
+// The result is cached after the first call so we don't probe on every query.
+func (e *Engine) embedderUsable() bool {
+	if e.Embedder == nil {
+		return false
+	}
+	e.embedderUsableOnce.Do(func() {
+		// Probe with a tiny string. Mock embedder always succeeds; OpenAI/Anthropic
+		// will fail fast if no API key (no network call attempted) or on auth error.
+		if _, err := e.Embedder.Embed("ping"); err == nil {
+			e.embedderUsableCached = true
+		}
+	})
+	return e.embedderUsableCached
 }
 
 // WithHeatMap attaches a heat map to the engine for traversal priority.

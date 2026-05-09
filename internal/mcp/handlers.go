@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -18,6 +19,10 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// queryTopK is the number of seed nodes pulled from semantic or lexical
+// search before BFS expansion.
+const queryTopK = 5
 
 // ---------------------------------------------------------------------------
 // context_query
@@ -46,52 +51,64 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 	mode := req.GetString("mode", "adjacency")
 	includeSuperseded := req.GetBool("include_superseded", false)
 
-	// Step 1: Embed the query.
-	queryVec, err := e.Embedder.Embed(query)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("embed query: %v", err)), nil
-	}
-
-	// Step 2: Search embedding index for top-k entry nodes.
-	topK := 5
-	var results []embedding.ScoredResult
-	if includeSuperseded {
-		results, err = e.EmbeddingStore.Search(queryVec, topK, e.Embedder.Model())
-	} else {
-		results, err = e.EmbeddingStore.SearchActive(queryVec, topK, e.Embedder.Model())
-	}
-	if err != nil {
-		// If model mismatch or empty store, return empty result gracefully.
-		emptyXML := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
-		return mcp.NewToolResultText(emptyXML), nil
-	}
-
-	// Step 2b: If cross-vault bridges exist, also search remote vault embeddings.
-	if e.VaultRegistry != nil {
-		for _, vid := range e.VaultRegistry.KnownVaultIDs() {
-			remoteStore, err := e.VaultRegistry.ResolveEmbeddingStore(vid)
-			if err != nil {
-				continue // best-effort
-			}
-			var remoteResults []embedding.ScoredResult
+	// Step 1: Determine whether semantic search is available. If not, fall
+	// back to lexical (keyword) scoring against active nodes.
+	var entryIDs []string
+	if e.embedderUsable() {
+		// Semantic path: embed the query and search the vector index.
+		queryVec, err := e.Embedder.Embed(query)
+		if err != nil {
+			// The probe said usable but this call failed (e.g. transient API
+			// error). Fall through to lexical so the agent still gets a result.
+			entryIDs = lexicalEntryIDs(e, query)
+		} else {
+			var results []embedding.ScoredResult
 			if includeSuperseded {
-				remoteResults, _ = remoteStore.Search(queryVec, 3, e.Embedder.Model())
+				results, err = e.EmbeddingStore.Search(queryVec, queryTopK, e.Embedder.Model())
 			} else {
-				remoteResults, _ = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+				results, err = e.EmbeddingStore.SearchActive(queryVec, queryTopK, e.Embedder.Model())
 			}
-			// Prefix remote results with @vault-id/ so BridgedGraphResolver can resolve them.
-			for _, r := range remoteResults {
-				results = append(results, embedding.ScoredResult{
-					NodeID: "@" + vid + "/" + r.NodeID,
-					Score:  r.Score,
-				})
+			if err != nil {
+				// If model mismatch or empty store, return empty result gracefully.
+				emptyXML := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
+				return mcp.NewToolResultText(emptyXML), nil
+			}
+
+			// If cross-vault bridges exist, also search remote vault embeddings.
+			if e.VaultRegistry != nil {
+				for _, vid := range e.VaultRegistry.KnownVaultIDs() {
+					remoteStore, err := e.VaultRegistry.ResolveEmbeddingStore(vid)
+					if err != nil {
+						continue // best-effort
+					}
+					var remoteResults []embedding.ScoredResult
+					if includeSuperseded {
+						remoteResults, _ = remoteStore.Search(queryVec, 3, e.Embedder.Model())
+					} else {
+						remoteResults, _ = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+					}
+					// Prefix remote results with @vault-id/ so BridgedGraphResolver can resolve them.
+					for _, r := range remoteResults {
+						results = append(results, embedding.ScoredResult{
+							NodeID: "@" + vid + "/" + r.NodeID,
+							Score:  r.Score,
+						})
+					}
+				}
+			}
+
+			entryIDs = make([]string, 0, len(results))
+			for _, r := range results {
+				entryIDs = append(entryIDs, r.NodeID)
 			}
 		}
-	}
-
-	entryIDs := make([]string, 0, len(results))
-	for _, r := range results {
-		entryIDs = append(entryIDs, r.NodeID)
+	} else {
+		// Lexical fallback path. Log once so the operator can see why
+		// semantic search isn't running.
+		e.lexicalFallbackOnce.Do(func() {
+			fmt.Fprintln(os.Stderr, "query: no embedder available; using lexical fallback")
+		})
+		entryIDs = lexicalEntryIDs(e, query)
 	}
 
 	if len(entryIDs) == 0 {
@@ -168,6 +185,9 @@ type WriteResult struct {
 // It constructs a Node, validates structural acyclicity, persists via the
 // node store, and updates the embedding index.
 func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e.ReadOnly {
+		return mcp.NewToolResultError("vault is read-only; writes are disabled"), nil
+	}
 	args := req.GetArguments()
 
 	id := req.GetString("id", "")
@@ -561,6 +581,9 @@ type DeleteResult struct {
 
 // HandleContextDelete marks a node as superseded/soft-deleted.
 func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e.ReadOnly {
+		return mcp.NewToolResultError("vault is read-only; writes are disabled"), nil
+	}
 	id := req.GetString("id", "")
 	if id == "" {
 		return mcp.NewToolResultError("id parameter is required"), nil
@@ -641,6 +664,9 @@ type TagResult struct {
 
 // HandleContextTag bulk-tags nodes matching a semantic search query.
 func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if e.ReadOnly {
+		return mcp.NewToolResultError("vault is read-only; writes are disabled"), nil
+	}
 	query := req.GetString("query", "")
 	if query == "" {
 		return mcp.NewToolResultError("query parameter is required"), nil
@@ -767,4 +793,22 @@ func matchNamespace(nodeNS, requested string) bool {
 func sha256Hex(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+// lexicalEntryIDs runs LexicalSearch over the engine's active nodes and
+// returns up to queryTopK matching IDs. Cross-vault remote nodes are not
+// considered — the lexical fallback is local-only by design (we'd need to
+// load every remote vault's nodes into memory to do otherwise).
+func lexicalEntryIDs(e *Engine, query string) []string {
+	g := e.GetGraph()
+	if g == nil {
+		return nil
+	}
+	active := g.AllActiveNodes()
+	matched := LexicalSearch(query, active, queryTopK)
+	ids := make([]string, 0, len(matched))
+	for _, n := range matched {
+		ids = append(ids, n.ID)
+	}
+	return ids
 }

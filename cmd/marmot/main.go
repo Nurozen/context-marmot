@@ -6,8 +6,9 @@
 //	marmot configure  [--dir .marmot]                            Configure vault settings
 //	marmot setup      [--dir .marmot]                            Generate MCP tool configs
 //	marmot index      [--dir .marmot] [--force] [<path>] [--incremental]  Index nodes or source code
+//	marmot package-docs [--dir .marmot] [--out file] [--zip] ...  Bundle vault into a sharable archive
 //	marmot query      --query "..." [flags]                      Query the knowledge graph
-//	marmot serve      [--dir .marmot]                            Start MCP server on stdio
+//	marmot serve      [--dir .marmot] [--read-only]              Start MCP server on stdio
 //	marmot verify     [--dir .marmot] [--namespace] [--staleness] [--bridges] Run integrity checks
 //	marmot status     [--dir .marmot]                            Show vault statistics
 //	marmot watch      [--dir .marmot]                            Watch for file changes and auto-reindex
@@ -85,6 +86,8 @@ func run(args []string) int {
 		return cmdSetup(cmdArgs)
 	case "index":
 		return cmdIndex(cmdArgs)
+	case "package-docs":
+		return cmdPackageDocs(cmdArgs)
 	case "query":
 		return cmdQuery(cmdArgs)
 	case "serve":
@@ -116,7 +119,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, ui, sdk")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, package-docs, query, serve, verify, status, watch, bridge, summarize, reembed, route, ui, sdk")
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +330,7 @@ func runQuery(dir, query string, depth, budget int) error {
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	readOnly := fs.Bool("read-only", false, "refuse mutating MCP tools (context_write/tag/delete)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -334,19 +338,19 @@ func cmdServe(args []string) int {
 		*dir = discoverVault()
 	}
 
-	if err := runServe(*dir); err != nil {
+	if err := runServe(*dir, *readOnly); err != nil {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func runServe(dir string) error {
+func runServe(dir string, readOnly bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
 	}
 
-	return runServePipeline(dir)
+	return runServePipeline(dir, readOnly)
 }
 
 // ---------------------------------------------------------------------------

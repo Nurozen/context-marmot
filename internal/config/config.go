@@ -18,6 +18,7 @@ const DefaultTokenBudget = 4096
 type VaultConfig struct {
 	Version            string `yaml:"version"`
 	VaultID            string `yaml:"vault_id,omitempty"`
+	ReadOnly           bool   `yaml:"read_only,omitempty"`
 	Namespace          string `yaml:"namespace"`
 	EmbeddingProvider  string `yaml:"embedding_provider"`           // openai | mock
 	EmbeddingModel     string `yaml:"embedding_model"`              // model name

@@ -57,6 +57,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **Static analysis indexer** --- parses Go (full AST), TypeScript, and 30+ languages into graph nodes with typed edges
 - **Graph visualization** --- embedded D3 web UI with filters, search, heat overlay, folder grouping, and bridge arcs
 - **Graph Curator** --- chat-driven curation UI with NL queries, slash commands, and node-ref pills
+- **Documentation bundles** --- `marmot package-docs` packs a vault into a sharable, read-only archive; recipients drop it into any project for instant agent-native docs (lexical search works without an API key)
 - **Summary engine** --- auto-generates namespace summaries via LLM; regenerates on significant changes
 - **Heat map** --- co-access frequency tracking with exponential decay; hot edges get traversal priority
 - **Integrity verification** --- hash-based staleness detection, dangling edge checks, cycle detection
@@ -179,6 +180,7 @@ Once connected, agents get five tools:
 | `marmot summarize [--namespace ...]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
 | `marmot sdk [--out ./marmot-sdk.ts]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
+| `marmot package-docs [--out vault.tar.gz] [--zip]` | Bundle a vault into a shareable read-only documentation archive |
 | `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start the embedded graph visualization UI |
 
 ## Architecture
@@ -236,6 +238,7 @@ See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan
 | [Embedding Providers](docs/embedding-providers.md) | Embedding provider setup and fallback behavior |
 | [CRUD Classifier](docs/crud-classifier.md) | Write classification (ADD/UPDATE/SUPERSEDE/NOOP) |
 | [TypeScript SDK](docs/typescript-sdk.md) | Type-safe SDK generation and usage |
+| [Documentation Bundles](docs/package-docs.md) | Packaging vaults for read-only sharing |
 | [Development](docs/development.md) | Build commands, node format, and edge types |
 | [Benchmark](docs/benchmark.md) | SWE-QA evaluation methodology and results |
 | [Data Structures](docs/data-structures.md) | Node, edge, and vault format specifications |

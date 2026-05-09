@@ -122,7 +122,7 @@ func TestServeRequiresVault(t *testing.T) {
 	dir := t.TempDir()
 	vault := filepath.Join(dir, "nonexistent")
 
-	err := runServe(vault)
+	err := runServe(vault, false)
 	if err == nil {
 		t.Fatal("expected error for nonexistent vault, got nil")
 	}
