@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -145,6 +146,11 @@ func collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) [
 	return ids
 }
 
+// PerPhaseChatTimeout caps how long a single LLM call may take. The
+// underlying HTTP client also enforces its own 120s timeout; this is the
+// shorter, per-phase guarantee so a slow phase-1 call cannot starve phase 2.
+const PerPhaseChatTimeout = 90 * time.Second
+
 // handleLLMChat runs the two-phase code-mode chat flow:
 //
 //  1. Build a phase-1 system prompt that documents the `client` JS API and
@@ -154,7 +160,9 @@ func collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) [
 //     and the execution result, asking for a natural-language answer.
 //
 // If phase 1 returns no code block, we treat the response as the final
-// answer and skip phase 2.
+// answer and skip phase 2. Each LLM call is capped at PerPhaseChatTimeout
+// so a stuck request can't hang the user indefinitely. Phase boundaries
+// are logged to stderr so operators can see where time goes.
 func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curator.ChatRequest) {
 	// Build graph stats + selected-node summaries (used by phase-1 prompt).
 	stats, selectedSummaries := s.buildChatContext(req.SelectedNodes)
@@ -181,13 +189,21 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 
 	// Use the request context so client disconnects abort downstream work.
 	ctx := r.Context()
+	turnStart := time.Now()
+	fmt.Fprintf(os.Stderr, "chat[%s]: turn start, history=%d msgs, msg=%q\n",
+		req.SessionID, len(history), truncatePreview(req.Message, 80))
 
 	// Phase 1.
-	phase1, err := s.llmChat.Chat(ctx, llm.ChatRequest{
+	phase1Ctx, phase1Cancel := context.WithTimeout(ctx, PerPhaseChatTimeout)
+	phase1Start := time.Now()
+	phase1, err := s.llmChat.Chat(phase1Ctx, llm.ChatRequest{
 		SystemPrompt: phase1Prompt,
 		Messages:     append(history, userMsg),
 		MaxTokens:    4096,
 	})
+	phase1Cancel()
+	fmt.Fprintf(os.Stderr, "chat[%s]: phase 1 done in %s (err=%v, bytes=%d)\n",
+		req.SessionID, time.Since(phase1Start).Round(time.Millisecond), err, len(phase1))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LLM error (phase 1): "+err.Error())
 		return
@@ -196,6 +212,8 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 	// Try to extract code. If none → phase-1 message IS the final answer.
 	code := codemode.ExtractCode(phase1)
 	if code == "" {
+		fmt.Fprintf(os.Stderr, "chat[%s]: no code block in phase 1 — returning direct answer (total %s)\n",
+			req.SessionID, time.Since(turnStart).Round(time.Millisecond))
 		writeJSON(w, http.StatusOK, curator.ChatResponse{
 			Message: curator.ChatMessage{Role: "assistant", Content: phase1},
 		})
@@ -213,7 +231,10 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 		UndoStack:     s.undoStack,
 		NotifyChange:  s.NotifyChange,
 	}
+	execStart := time.Now()
 	execResult := s.codeExecutor.ExecuteWithWrites(ctx, code, writeCtx)
+	fmt.Fprintf(os.Stderr, "chat[%s]: sandbox exec done in %s (err=%q)\n",
+		req.SessionID, time.Since(execStart).Round(time.Millisecond), execResult.Error)
 
 	// Recovery: if the first attempt threw a runtime error (typically
 	// "node not found" or a typo'd method name), give the model one more
@@ -229,11 +250,16 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 			"in with `client.getNode(...)` or `client.getNeighbors(...)`. " +
 			"Emit a fresh `js` code block.\n"
 
-		retryResp, retryErr := s.llmChat.Chat(ctx, llm.ChatRequest{
+		retryCtx, retryCancel := context.WithTimeout(ctx, PerPhaseChatTimeout)
+		retryStart := time.Now()
+		retryResp, retryErr := s.llmChat.Chat(retryCtx, llm.ChatRequest{
 			SystemPrompt: retryPrompt,
 			Messages:     append(history, userMsg),
 			MaxTokens:    4096,
 		})
+		retryCancel()
+		fmt.Fprintf(os.Stderr, "chat[%s]: retry done in %s (err=%v)\n",
+			req.SessionID, time.Since(retryStart).Round(time.Millisecond), retryErr)
 		if retryErr == nil {
 			if retryCode := codemode.ExtractCode(retryResp); retryCode != "" {
 				retryResult := s.codeExecutor.ExecuteWithWrites(ctx, retryCode, writeCtx)
@@ -259,13 +285,19 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 
 	// Phase 2: synthesize a natural-language answer from the execution.
 	phase2Prompt := codemode.BuildPhase2Prompt(req.Message, code, execResult)
-	phase2, err := s.llmChat.Chat(ctx, llm.ChatRequest{
+	phase2Ctx, phase2Cancel := context.WithTimeout(ctx, PerPhaseChatTimeout)
+	phase2Start := time.Now()
+	phase2, err := s.llmChat.Chat(phase2Ctx, llm.ChatRequest{
 		SystemPrompt: phase2Prompt,
 		// Phase 2 only needs the user's original question — the prompt itself
 		// already contains the code and result.
 		Messages:  []llm.ChatMessage{userMsg},
 		MaxTokens: 4096,
 	})
+	phase2Cancel()
+	fmt.Fprintf(os.Stderr, "chat[%s]: phase 2 done in %s (err=%v, total %s)\n",
+		req.SessionID, time.Since(phase2Start).Round(time.Millisecond), err,
+		time.Since(turnStart).Round(time.Millisecond))
 	if err != nil {
 		// Best effort: return phase-1 message + the code-run info so the user
 		// still sees something concrete.
@@ -333,6 +365,15 @@ func (s *Server) buildChatContext(selectedNodeIDs []string) (curator.GraphStats,
 		})
 	}
 	return stats, selectedSummaries
+}
+
+// truncatePreview returns at most n bytes of s, suffixed with "..." when
+// truncated. Used purely for stderr logging.
+func truncatePreview(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // stripCodeBlocks removes fenced code blocks from a string. Used to clean
