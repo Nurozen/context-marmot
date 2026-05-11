@@ -30,12 +30,22 @@ interface ChatResponse {
   code_run?: CodeRunInfo;
 }
 
+export interface MutationRecord {
+  op: string; // "tag" | "untag" | "type" | "link" | "unlink" | "merge" | "delete" | "verify"
+  message: string;
+  nodes?: string[];
+  undo_id?: string;
+  success: boolean;
+}
+
 export interface CodeRunInfo {
   code: string;
   result: unknown;
   logs: string[];
   error?: string;
   duration_ms: number;
+  truncated?: boolean;
+  mutations?: MutationRecord[];
 }
 
 /** Shape returned by /api/verify/:ns */
@@ -771,7 +781,7 @@ export class Curator {
     container.className = 'chat-message-assistant';
 
     if (codeRun) {
-      container.appendChild(renderCodeRunPanel(codeRun));
+      container.appendChild(renderCodeRunPanel(codeRun, this.sessionId, this.nodeIds));
     }
 
     const el = document.createElement('div');
@@ -1228,11 +1238,18 @@ function escAttr(s: string): string {
 
 /** Build the collapsible code/result panel rendered above an assistant
  *  message when the backend executed code on the user's behalf. */
-function renderCodeRunPanel(run: CodeRunInfo): HTMLElement {
+function renderCodeRunPanel(
+  run: CodeRunInfo,
+  sessionId: string,
+  knownNodeIds: string[],
+): HTMLElement {
   const panel = document.createElement('div');
   panel.className = 'code-run-panel';
   const hasError = !!run.error;
   if (hasError) panel.classList.add('has-error');
+
+  const mutations = run.mutations ?? [];
+  const hasMutations = mutations.length > 0;
 
   /* Header */
   const header = document.createElement('button');
@@ -1311,8 +1328,16 @@ function renderCodeRunPanel(run: CodeRunInfo): HTMLElement {
     const resultLabel = document.createElement('div');
     resultLabel.className = 'code-run-section-label';
     const count = arrayLikeCount(run.result);
-    resultLabel.textContent =
+    const baseText =
       count !== null ? `Result (${count} item${count === 1 ? '' : 's'}):` : 'Result:';
+    resultLabel.textContent = baseText;
+    if (run.truncated) {
+      const truncBadge = document.createElement('span');
+      truncBadge.className = 'code-run-truncated-badge';
+      truncBadge.textContent = '(truncated)';
+      resultLabel.appendChild(document.createTextNode(' '));
+      resultLabel.appendChild(truncBadge);
+    }
     body.appendChild(resultLabel);
 
     if (run.result === null || run.result === undefined) {
@@ -1334,6 +1359,11 @@ function renderCodeRunPanel(run: CodeRunInfo): HTMLElement {
     }
   }
 
+  /* Mutations audit trail (above logs, below result/error) */
+  if (hasMutations) {
+    body.appendChild(renderMutationsSection(mutations, sessionId, knownNodeIds));
+  }
+
   /* Logs */
   if (run.logs && run.logs.length > 0) {
     const logsLabel = document.createElement('div');
@@ -1350,8 +1380,8 @@ function renderCodeRunPanel(run: CodeRunInfo): HTMLElement {
     body.appendChild(ul);
   }
 
-  /* Default expanded state: collapsed unless error */
-  let expanded = hasError;
+  /* Default expanded state: collapsed unless error or there are mutations */
+  let expanded = hasError || hasMutations;
   const applyExpanded = () => {
     panel.classList.toggle('expanded', expanded);
     chevron.textContent = expanded ? '▼' : '▶';
@@ -1372,4 +1402,196 @@ function renderCodeRunPanel(run: CodeRunInfo): HTMLElement {
  *  blocks like "Result (3 items)". */
 function arrayLikeCount(v: unknown): number | null {
   return Array.isArray(v) ? v.length : null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Mutations audit-trail section                                      */
+/* ------------------------------------------------------------------ */
+
+/** POST /api/chat/undo for a specific undo_id. Returns true on success. */
+async function postUndo(sessionId: string, undoId: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/chat/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, undo_id: undoId }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+interface RowHandle {
+  row: HTMLElement;
+  undoBtn: HTMLButtonElement | null;
+  undoId: string | null;
+  applied: boolean; // success === true
+  done: boolean; // already undone
+  markUndone: () => void;
+}
+
+/** Build the mutations audit-trail section. Sits between the result/error
+ *  block and the logs block inside .code-run-body. */
+function renderMutationsSection(
+  mutations: MutationRecord[],
+  sessionId: string,
+  knownNodeIds: string[],
+): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'code-run-mutations';
+
+  const appliedCount = mutations.filter((m) => m.success).length;
+  const rejectedCount = mutations.length - appliedCount;
+
+  /* Header line */
+  const head = document.createElement('div');
+  head.className = 'code-run-mutations-head';
+
+  const title = document.createElement('div');
+  title.className = 'code-run-mutations-title';
+  if (rejectedCount > 0) {
+    title.innerHTML =
+      `Changes (${appliedCount} applied, ` +
+      `<span class="code-run-mutations-rejected">${rejectedCount} rejected</span>)`;
+  } else {
+    title.textContent = `Changes (${appliedCount})`;
+  }
+  head.appendChild(title);
+
+  /* Build row handles first so "Undo all" can iterate them */
+  const handles: RowHandle[] = [];
+  const list = document.createElement('div');
+  list.className = 'code-run-mutations-list';
+
+  for (const m of mutations) {
+    const handle = renderMutationRow(m, sessionId, knownNodeIds);
+    handles.push(handle);
+    list.appendChild(handle.row);
+  }
+
+  /* Undo all (only if at least one applied mutation with an undo_id) */
+  const undoableHandles = handles.filter((h) => h.applied && h.undoId);
+  if (undoableHandles.length > 0) {
+    const undoAll = document.createElement('button');
+    undoAll.type = 'button';
+    undoAll.className = 'code-run-mutations-undo-all';
+    undoAll.textContent = 'Undo all';
+    undoAll.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      undoAll.disabled = true;
+      /* Reverse order so the undo stack stays consistent. Sequential, not
+         parallel. */
+      const reversed = undoableHandles.slice().reverse();
+      for (const h of reversed) {
+        if (h.done || !h.undoId) continue;
+        const ok = await postUndo(sessionId, h.undoId);
+        if (ok) h.markUndone();
+      }
+      /* Hide the button once all rows have been processed */
+      const remaining = handles.some((h) => h.applied && h.undoId && !h.done);
+      if (!remaining) undoAll.remove();
+      else undoAll.disabled = false;
+    });
+    head.appendChild(undoAll);
+  }
+
+  section.appendChild(head);
+  section.appendChild(list);
+  return section;
+}
+
+function renderMutationRow(
+  m: MutationRecord,
+  sessionId: string,
+  knownNodeIds: string[],
+): RowHandle {
+  const row = document.createElement('div');
+  row.className = 'code-run-mutation-row';
+  if (!m.success) row.classList.add('failed');
+
+  /* Status icon */
+  const icon = document.createElement('span');
+  icon.className = 'code-run-mutation-icon';
+  icon.textContent = m.success ? '✓' : '✗';
+  row.appendChild(icon);
+
+  /* Op tag */
+  const op = document.createElement('span');
+  op.className = 'code-run-mutation-op';
+  op.textContent = `[${m.op}]`;
+  row.appendChild(op);
+
+  /* Message + inline node pills */
+  const msg = document.createElement('span');
+  msg.className = 'code-run-mutation-msg';
+  msg.textContent = m.message;
+  row.appendChild(msg);
+
+  if (m.nodes && m.nodes.length > 0) {
+    const pills = document.createElement('span');
+    pills.className = 'code-run-mutation-nodes';
+    for (const id of m.nodes) {
+      const pill = document.createElement('span');
+      pill.className = 'node-ref';
+      pill.dataset.nodeId = id;
+      pill.textContent = shortLabel(id);
+      if (!knownNodeIds.includes(id)) {
+        pill.classList.add('unknown');
+      }
+      pills.appendChild(pill);
+    }
+    row.appendChild(pills);
+  }
+
+  /* Right-edge: Undo button or nothing */
+  const trailing = document.createElement('span');
+  trailing.className = 'code-run-mutation-trailing';
+  row.appendChild(trailing);
+
+  let undoBtn: HTMLButtonElement | null = null;
+  const undoId = m.undo_id ?? null;
+  const applied = m.success === true;
+
+  const handle: RowHandle = {
+    row,
+    undoBtn: null,
+    undoId,
+    applied,
+    done: false,
+    markUndone: () => {
+      handle.done = true;
+      row.classList.add('undone');
+      if (undoBtn) {
+        const chip = document.createElement('span');
+        chip.className = 'code-run-mutation-undone-chip';
+        chip.textContent = 'Undone';
+        undoBtn.replaceWith(chip);
+        undoBtn = null;
+        handle.undoBtn = null;
+      }
+    },
+  };
+
+  if (applied && undoId) {
+    undoBtn = document.createElement('button');
+    undoBtn.type = 'button';
+    undoBtn.className = 'code-run-mutation-undo';
+    undoBtn.textContent = 'Undo';
+    undoBtn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (handle.done || !handle.undoId) return;
+      undoBtn!.disabled = true;
+      const ok = await postUndo(sessionId, handle.undoId);
+      if (ok) {
+        handle.markUndone();
+      } else {
+        undoBtn!.disabled = false;
+      }
+    });
+    trailing.appendChild(undoBtn);
+    handle.undoBtn = undoBtn;
+  }
+
+  return handle;
 }

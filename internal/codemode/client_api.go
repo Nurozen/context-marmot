@@ -52,7 +52,12 @@ type ClientStats struct {
 // registerClient wires the `client` global. Each method is synchronous and
 // either returns a Go value (auto-converted by goja) or panics with a JS
 // exception via runtime.NewTypeError / NewGoError.
-func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
+//
+// The scope's WriteContext, if non-nil, unlocks write methods (tag, untag,
+// type, link, unlink, merge, delete). Each successful write is recorded in
+// scope.mutations with an undo stack entry.
+func registerClient(rt *goja.Runtime, scope *runScope) error {
+	engine := scope.engine
 	if engine == nil {
 		return fmt.Errorf("nil engine")
 	}
@@ -276,6 +281,12 @@ func registerClient(rt *goja.Runtime, engine *mcpserver.Engine) error {
 			Namespaces: allNamespaces(g),
 		})
 	})
+
+	// Mutation methods (tag, untag, setType, link, unlink, merge, delete,
+	// verify). Registered only when the executor was given a WriteContext.
+	if err := registerWrites(rt, client, scope); err != nil {
+		return err
+	}
 
 	return rt.GlobalObject().Set("client", client)
 }

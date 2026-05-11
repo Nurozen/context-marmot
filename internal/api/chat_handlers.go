@@ -202,9 +202,18 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 		return
 	}
 
-	// Execute the code in a fresh sandbox. Executor was constructed in
-	// NewServer so this is a plain field read — no race.
-	execResult := s.codeExecutor.Execute(ctx, code)
+	// Execute the code in a fresh sandbox. Writes are enabled by default —
+	// the LLM is told to only call mutation methods when the user asked for
+	// a change. Each successful write records a MutationRecord that surfaces
+	// in the chat response and an undo entry so the user can roll back.
+	writeCtx := &codemode.WriteContext{
+		SessionID:     req.SessionID,
+		SelectedNodes: req.SelectedNodes,
+		Namespace:     req.Namespace,
+		UndoStack:     s.undoStack,
+		NotifyChange:  s.NotifyChange,
+	}
+	execResult := s.codeExecutor.ExecuteWithWrites(ctx, code, writeCtx)
 
 	codeRun := &curator.CodeRunInfo{
 		Code:       code,
@@ -213,6 +222,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 		Error:      execResult.Error,
 		DurationMS: execResult.DurationMS,
 		Truncated:  execResult.Truncated,
+		Mutations:  execResult.Mutations,
 	}
 
 	// Phase 2: synthesize a natural-language answer from the execution.

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dop251/goja"
+	"github.com/nurozen/context-marmot/internal/curator"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 )
 
@@ -31,6 +32,10 @@ const (
 	MaxLogEntries = 50
 	// MaxLogEntryBytes truncates each individual log entry.
 	MaxLogEntryBytes = 1024
+	// MaxMutationsPerTurn caps how many graph mutations one code execution
+	// may perform. Past this, calls to write methods throw a JS exception
+	// and the partial result is returned.
+	MaxMutationsPerTurn = 50
 )
 
 // Result is the outcome of a single code execution.
@@ -43,6 +48,23 @@ type Result struct {
 	// Truncated indicates the JSON serialization of Value exceeded
 	// MaxResultBytes and was truncated for the next LLM call.
 	Truncated bool
+	// Mutations records every successful graph mutation performed during
+	// this execution. Populated only when the executor was given a
+	// non-nil WriteContext.
+	Mutations []curator.MutationRecord
+}
+
+// WriteContext bundles the per-turn state required to perform mutations from
+// code-mode. When non-nil and the engine is writable, the `client` global
+// includes tag/untag/type/link/unlink/merge/delete methods.
+type WriteContext struct {
+	SessionID     string
+	SelectedNodes []string
+	Namespace     string
+	UndoStack     *curator.UndoStack
+	// NotifyChange, if non-nil, is invoked after every successful mutation
+	// so SSE subscribers can refresh.
+	NotifyChange func()
 }
 
 // Executor wraps a graph engine in a goja sandbox. Each call to Execute
@@ -50,6 +72,16 @@ type Result struct {
 type Executor struct {
 	engine  *mcpserver.Engine
 	timeout time.Duration
+}
+
+// runScope holds the per-execution state shared between client API methods.
+// Created fresh for each Execute call.
+type runScope struct {
+	rt           *goja.Runtime
+	engine       *mcpserver.Engine
+	write        *WriteContext // nil = read-only
+	mutations    []curator.MutationRecord
+	mutationsCap int
 }
 
 // NewExecutor builds an Executor backed by the given engine. Engine must be
@@ -66,10 +98,17 @@ func (e *Executor) WithTimeout(d time.Duration) *Executor {
 	return &cp
 }
 
-// Execute runs jsCode in a fresh sandbox. The code is implicitly wrapped in
-// an IIFE so a top-level `return` works. The returned *Result is never nil;
-// timeouts, parse errors, and runtime exceptions all populate Result.Error.
+// Execute runs jsCode in a fresh, read-only sandbox.
 func (e *Executor) Execute(ctx context.Context, jsCode string) *Result {
+	return e.ExecuteWithWrites(ctx, jsCode, nil)
+}
+
+// ExecuteWithWrites runs jsCode in a fresh sandbox. When write is non-nil
+// and the engine is not read-only, write-side client methods (tag, link,
+// delete, etc.) are exposed and apply real mutations through the standard
+// curator command pipeline (snapshots, undo stack, file writes). Passing
+// nil for `write` matches Execute's read-only behavior.
+func (e *Executor) ExecuteWithWrites(ctx context.Context, jsCode string, write *WriteContext) *Result {
 	start := time.Now()
 	res := &Result{Code: jsCode}
 
@@ -91,8 +130,9 @@ func (e *Executor) Execute(ctx context.Context, jsCode string) *Result {
 
 	// Register `client` proxy. Nil engine is permitted for sandbox-only
 	// scenarios (tests, dry-run prompts) — `client` is simply absent.
+	scope := &runScope{rt: rt, engine: e.engine, write: write, mutationsCap: MaxMutationsPerTurn}
 	if e.engine != nil {
-		if err := registerClient(rt, e.engine); err != nil {
+		if err := registerClient(rt, scope); err != nil {
 			res.Error = "failed to wire client API: " + err.Error()
 			res.DurationMS = time.Since(start).Milliseconds()
 			return res
@@ -126,6 +166,7 @@ func (e *Executor) Execute(ctx context.Context, jsCode string) *Result {
 	value, runErr := rt.RunString(wrapped)
 	res.DurationMS = time.Since(start).Milliseconds()
 	res.Logs = trimLogs(logs)
+	res.Mutations = scope.mutations
 
 	if runErr != nil {
 		// Distinguish interrupts from regular exceptions for a friendlier message.
