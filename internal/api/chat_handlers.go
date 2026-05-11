@@ -186,7 +186,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 	phase1, err := s.llmChat.Chat(ctx, llm.ChatRequest{
 		SystemPrompt: phase1Prompt,
 		Messages:     append(history, userMsg),
-		MaxTokens:    1024,
+		MaxTokens:    4096,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "LLM error (phase 1): "+err.Error())
@@ -232,7 +232,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 		retryResp, retryErr := s.llmChat.Chat(ctx, llm.ChatRequest{
 			SystemPrompt: retryPrompt,
 			Messages:     append(history, userMsg),
-			MaxTokens:    1024,
+			MaxTokens:    4096,
 		})
 		if retryErr == nil {
 			if retryCode := codemode.ExtractCode(retryResp); retryCode != "" {
@@ -264,7 +264,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 		// Phase 2 only needs the user's original question — the prompt itself
 		// already contains the code and result.
 		Messages:  []llm.ChatMessage{userMsg},
-		MaxTokens: 1024,
+		MaxTokens: 4096,
 	})
 	if err != nil {
 		// Best effort: return phase-1 message + the code-run info so the user

@@ -12,7 +12,11 @@ import (
 )
 
 const (
-	anthropicDefaultModel = "claude-haiku-4-5-20251001"
+	// AnthropicDefaultModel is the model used when classifier_model is unset
+	// in vault config. We default to the most capable family (Opus) so the
+	// curator chat works well out of the box; users can downgrade to Haiku
+	// for cheaper classifier-only setups by setting classifier_model.
+	AnthropicDefaultModel = "claude-opus-4-7-latest"
 	anthropicEndpoint     = "https://api.anthropic.com/v1/messages"
 	anthropicVersion      = "2023-06-01"
 	anthropicMaxCandidates = 3
@@ -34,12 +38,23 @@ type AnthropicProvider struct {
 	client *http.Client
 }
 
-// NewAnthropicProvider creates a new AnthropicProvider using the given API key.
+// NewAnthropicProvider creates a new AnthropicProvider using the given API
+// key. Uses AnthropicDefaultModel — callers that want to honor a
+// vault-configured model should construct via NewAnthropicProviderWithModel.
 func NewAnthropicProvider(apiKey string) *AnthropicProvider {
+	return NewAnthropicProviderWithModel(apiKey, AnthropicDefaultModel)
+}
+
+// NewAnthropicProviderWithModel creates a provider that talks to the given
+// model. Empty model falls back to AnthropicDefaultModel.
+func NewAnthropicProviderWithModel(apiKey, model string) *AnthropicProvider {
+	if strings.TrimSpace(model) == "" {
+		model = AnthropicDefaultModel
+	}
 	return &AnthropicProvider{
 		apiKey: apiKey,
-		model:  anthropicDefaultModel,
-		client: &http.Client{Timeout: 60 * time.Second},
+		model:  model,
+		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 

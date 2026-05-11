@@ -32,9 +32,18 @@ type ClientNode struct {
 	Namespace string       `json:"namespace"`
 	Status    string       `json:"status"`
 	Summary   string       `json:"summary"`
+	Context   string       `json:"context,omitempty"` // free-form context block from the node's markdown body
+	Source    *ClientSource `json:"source,omitempty"`
 	Tags      []string     `json:"tags"`
 	Edges     []ClientEdge `json:"edges"`
 	EdgeCount int          `json:"edge_count"`
+}
+
+// ClientSource is the JS-friendly projection of a node's source reference.
+type ClientSource struct {
+	Path  string `json:"path,omitempty"`
+	Lines [2]int `json:"lines,omitempty"`
+	Hash  string `json:"hash,omitempty"`
 }
 
 // ClientEdge mirrors a single outbound edge from a node.
@@ -305,13 +314,29 @@ func toClientNode(g *graph.Graph, n *node.Node) ClientNode {
 	if n == nil {
 		return ClientNode{}
 	}
+	// Truncate context so a node with a giant source block doesn't blow
+	// out the 8KB result cap. The LLM gets enough to read; if it needs
+	// more it can suggest `marmot view <id>` or open the detail panel.
+	ctx := n.Context
+	const maxContextChars = 2000
+	if len(ctx) > maxContextChars {
+		ctx = ctx[:maxContextChars] + "\n... (context truncated)"
+	}
 	out := ClientNode{
 		ID:        n.ID,
 		Type:      n.Type,
 		Namespace: n.Namespace,
 		Status:    n.Status,
 		Summary:   n.Summary,
+		Context:   ctx,
 		Tags:      append([]string{}, n.Tags...),
+	}
+	if n.Source.Path != "" || n.Source.Hash != "" {
+		out.Source = &ClientSource{
+			Path:  n.Source.Path,
+			Lines: n.Source.Lines,
+			Hash:  n.Source.Hash,
+		}
 	}
 	if g != nil {
 		edges := g.GetEdges(n.ID, graph.Outbound)

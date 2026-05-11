@@ -281,20 +281,20 @@ func buildEngine(dir string) (*engineResult, error) {
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			p := llm.NewOpenAIProvider(key)
+			p := llm.NewOpenAIProviderWithModel(key, vaultCfg.ClassifierModel)
 			llmProvider = p
 			engine.WithLLMClassifier(p)
-			fmt.Fprintln(os.Stderr, "classifier: using openai/"+vaultCfg.ClassifierModel)
+			fmt.Fprintln(os.Stderr, "classifier: using openai/"+p.Model())
 		} else {
 			engine.WithLLMClassifier(nil)
 			fmt.Fprintln(os.Stderr, "classifier: openai configured but OPENAI_API_KEY not found; using embedding-distance fallback")
 		}
 	case "anthropic":
 		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			p := llm.NewAnthropicProvider(key)
+			p := llm.NewAnthropicProviderWithModel(key, vaultCfg.ClassifierModel)
 			llmProvider = p
 			engine.WithLLMClassifier(p)
-			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+vaultCfg.ClassifierModel)
+			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+p.Model())
 		} else {
 			engine.WithLLMClassifier(nil)
 			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
@@ -856,11 +856,11 @@ func runSummarizePipeline(dir, ns string) error {
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			summarizer = llm.NewOpenAIProvider(key)
+			summarizer = llm.NewOpenAIProviderWithModel(key, vaultCfg.ClassifierModel)
 		}
 	case "anthropic":
 		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			summarizer = llm.NewAnthropicProvider(key)
+			summarizer = llm.NewAnthropicProviderWithModel(key, vaultCfg.ClassifierModel)
 		}
 	}
 
@@ -977,15 +977,17 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 	switch vaultCfg.ClassifierProvider {
 	case "openai":
 		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			cls.LLM = llm.NewOpenAIProvider(key)
-			fmt.Fprintln(os.Stderr, "classifier: using openai/"+vaultCfg.ClassifierModel)
+			p := llm.NewOpenAIProviderWithModel(key, vaultCfg.ClassifierModel)
+			cls.LLM = p
+			fmt.Fprintln(os.Stderr, "classifier: using openai/"+p.Model())
 		} else {
 			fmt.Fprintln(os.Stderr, "classifier: openai configured but OPENAI_API_KEY not found; using embedding-distance fallback")
 		}
 	case "anthropic":
 		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			cls.LLM = llm.NewAnthropicProvider(key)
-			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+vaultCfg.ClassifierModel)
+			p := llm.NewAnthropicProviderWithModel(key, vaultCfg.ClassifierModel)
+			cls.LLM = p
+			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+p.Model())
 		} else {
 			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
 		}

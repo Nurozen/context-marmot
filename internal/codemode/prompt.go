@@ -97,7 +97,14 @@ interface ClientNode {
   type: string;
   namespace: string;
   status: string;
-  summary: string;
+  summary: string;            // one-paragraph node summary
+  context?: string;           // free-form context / source excerpt from the node's markdown body
+                              // (truncated to ~2KB; if missing, the node simply has none)
+  source?: {                  // optional source-of-truth pointer
+    path?: string;            // e.g. "internal/mcp/engine.go"
+    lines?: [number, number]; // [start, end]
+    hash?: string;
+  };
   tags: string[];
   edges: { target: string, relation: string }[];
   edge_count: number;
@@ -146,6 +153,8 @@ func BuildPhase1Prompt(stats curator.GraphStats, selectedNodes []curator.APINode
 	sb.WriteString("If the question references ANY content in the graph (a node name, a tag, a type, \"the X\", \"my Y\") ")
 	sb.WriteString("then emit code, even if the question feels vague.\n\n")
 	sb.WriteString("Specific examples of questions that REQUIRE code:\n")
+	sb.WriteString("- \"what does the context field of X say?\" → `client.search(\"X\")` to get the ID, then ")
+	sb.WriteString("`client.getNode(id)` and READ THE `.context` PROPERTY. Quote it verbatim.\n")
 	sb.WriteString("- \"tell me about mcp engine\" → `client.search(\"mcp engine\")`. Don't ask which one — search.\n")
 	sb.WriteString("- \"please tell me about the auth module\" → `client.search(\"auth module\")`.\n")
 	sb.WriteString("- \"what's in here?\" → `client.getStats()`.\n")
