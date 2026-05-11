@@ -70,6 +70,25 @@ func (u *UndoStack) Pop(sessionID string) *UndoEntry {
 	return &entry
 }
 
+// PopByID removes and returns the entry matching undoID, regardless of its
+// position in the stack. Used by the per-row Undo button in the code-mode
+// audit trail, which references entries by their stable ID rather than
+// LIFO position. Returns nil if no entry matches.
+func (u *UndoStack) PopByID(sessionID, undoID string) *UndoEntry {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	stack := u.stacks[sessionID]
+	for i, e := range stack {
+		if e.ID == undoID {
+			entry := e
+			u.stacks[sessionID] = append(stack[:i], stack[i+1:]...)
+			return &entry
+		}
+	}
+	return nil
+}
+
 // Peek returns the most recent entry without removing it.
 // Returns nil if the stack is empty.
 func (u *UndoStack) Peek(sessionID string) *UndoEntry {

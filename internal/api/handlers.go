@@ -861,7 +861,15 @@ func (s *Server) handleChatUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry := s.undoStack.Pop(req.SessionID)
+	// Per-row undo from the code-mode audit trail passes undo_id so a
+	// specific mutation can be reversed out of LIFO order. Without an
+	// undo_id, fall back to popping the most recent entry.
+	var entry *curator.UndoEntry
+	if req.UndoID != "" {
+		entry = s.undoStack.PopByID(req.SessionID, req.UndoID)
+	} else {
+		entry = s.undoStack.Pop(req.SessionID)
+	}
 	if entry == nil {
 		writeError(w, http.StatusNotFound, "no undo entries for session")
 		return

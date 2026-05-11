@@ -8,6 +8,7 @@ import (
 
 	"github.com/dop251/goja"
 	"github.com/nurozen/context-marmot/internal/curator"
+	"github.com/nurozen/context-marmot/internal/graph"
 )
 
 // registerWrites adds tag/untag/type/link/unlink/merge/delete/verify methods
@@ -28,6 +29,21 @@ func registerWrites(rt *goja.Runtime, client *goja.Object, scope *runScope) erro
 	if scope.write == nil {
 		// No write context — leave write methods unregistered. The phase-1
 		// prompt advertises them as conditional, so the LLM will adapt.
+		return nil
+	}
+	if scope.write.ReadOnly {
+		// Read-only vault — register a single stub that throws so the LLM
+		// gets a clear error rather than silently failing.
+		throwReadOnly := func(name string) func(goja.FunctionCall) goja.Value {
+			return func(call goja.FunctionCall) goja.Value {
+				panic(rt.NewGoError(fmt.Errorf("client.%s: vault is read-only; writes are disabled", name)))
+			}
+		}
+		for _, name := range []string{"tag", "untag", "setType", "link", "unlink", "merge", "delete"} {
+			if err := client.Set(name, throwReadOnly(name)); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 
@@ -115,7 +131,7 @@ func registerWrites(rt *goja.Runtime, client *goja.Object, scope *runScope) erro
 	// command path for consistency. Doesn't count against the mutation cap.
 	mustSet("verify", func(call goja.FunctionCall) goja.Value {
 		cmd := &curator.SlashCommand{Name: "verify"}
-		result, err := curator.ExecuteCommand(context.Background(), cmd, scope.engine, scope.write.SelectedNodes)
+		result, err := curator.ExecuteCommand(scope.ctxOrBackground(), cmd, scope.engine, scope.write.SelectedNodes)
 		if err != nil {
 			panic(rt.NewGoError(err))
 		}
@@ -145,9 +161,20 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 	cmd := &curator.SlashCommand{Name: op}
 	configure(cmd)
 
-	snapshots := curator.SnapshotNodes(s.engine.NodeStore, s.write.Namespace, affectedIDs)
+	// Snapshot every node the mutation might modify. For /merge, the
+	// underlying handler rewrites edges on third-party nodes that point at
+	// `from` so they instead point at `into`; if we don't snapshot those
+	// sources, undo silently corrupts the graph. Compute the full snapshot
+	// set up front.
+	snapshotIDs := affectedIDs
+	if op == "merge" && len(affectedIDs) >= 2 {
+		fromID := affectedIDs[1] // configure() sets Args[1] = from
+		extra := inboundSourceIDs(s.engine.GetGraph(), fromID)
+		snapshotIDs = mergeIDLists(affectedIDs, extra)
+	}
+	snapshots := curator.SnapshotNodes(s.engine.NodeStore, s.write.Namespace, snapshotIDs)
 
-	result, err := curator.ExecuteCommand(context.Background(), cmd, s.engine, affectedIDs)
+	result, err := curator.ExecuteCommand(s.ctxOrBackground(), cmd, s.engine, affectedIDs)
 	if err != nil {
 		s.recordFailure(op, affectedIDs, err.Error())
 		return map[string]any{
@@ -233,6 +260,61 @@ func normalizeAffected(fromResult, fallback []string) []string {
 		return fromResult
 	}
 	return fallback
+}
+
+// ctxOrBackground returns the scope's context if non-nil, otherwise a
+// fresh context.Background(). Tests build runScope directly without
+// going through Execute so the ctx field may be unset.
+func (s *runScope) ctxOrBackground() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+// inboundSourceIDs returns the IDs of nodes that have an outbound edge
+// pointing at targetID. Used by /merge's snapshot path so undo can restore
+// every node whose edges get rewritten by the merge.
+func inboundSourceIDs(g *graph.Graph, targetID string) []string {
+	if g == nil {
+		return nil
+	}
+	edges := g.GetEdges(targetID, graph.Inbound)
+	if len(edges) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(edges))
+	seen := make(map[string]struct{}, len(edges))
+	for _, e := range edges {
+		if _, ok := seen[e.Target]; ok {
+			continue
+		}
+		seen[e.Target] = struct{}{}
+		out = append(out, e.Target)
+	}
+	return out
+}
+
+// mergeIDLists returns the union of two ID slices, preserving order from
+// the first slice and appending unique entries from the second.
+func mergeIDLists(primary, extra []string) []string {
+	seen := make(map[string]struct{}, len(primary)+len(extra))
+	out := make([]string, 0, len(primary)+len(extra))
+	for _, id := range primary {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	for _, id := range extra {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 // stringSliceArg coerces a JS argument into a []string. Accepts a single

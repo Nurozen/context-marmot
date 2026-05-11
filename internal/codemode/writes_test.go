@@ -176,10 +176,11 @@ func TestExecute_Writes_BadCommand(t *testing.T) {
 	defer rig.cleanup()
 
 	ex := NewExecutor(rig.engine)
+	stack := curator.NewUndoStack()
 	write := &WriteContext{
 		SessionID: "test-session",
 		Namespace: "default",
-		UndoStack: curator.NewUndoStack(),
+		UndoStack: stack,
 	}
 
 	// Tag a node that doesn't exist — should record a failure, not crash.
@@ -195,6 +196,54 @@ func TestExecute_Writes_BadCommand(t *testing.T) {
 	}
 	if len(r.Mutations) != 1 || r.Mutations[0].Success {
 		t.Errorf("expected one failed mutation record, got %+v", r.Mutations)
+	}
+	// Failed mutations MUST NOT push an undo entry — otherwise the user
+	// could undo a non-mutation and silently corrupt the stack.
+	if got := stack.Len("test-session"); got != 0 {
+		t.Errorf("expected empty undo stack after failed write, got len=%d", got)
+	}
+}
+
+func TestExecute_Writes_ReadOnlyGate(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.cleanup()
+
+	ex := NewExecutor(rig.engine)
+	stack := curator.NewUndoStack()
+	write := &WriteContext{
+		SessionID: "test-session",
+		Namespace: "default",
+		UndoStack: stack,
+		ReadOnly:  true, // vault is read-only
+	}
+
+	// Reads still work; writes throw.
+	r := ex.ExecuteWithWrites(context.Background(), `
+        const stats = client.getStats();
+        try {
+            client.tag("auth/login", "x");
+            return { read: stats.node_count, threw: false };
+        } catch (e) {
+            return { read: stats.node_count, threw: true, err: String(e) };
+        }
+    `, write)
+	if r.Error != "" {
+		t.Fatalf("unexpected error: %s", r.Error)
+	}
+	res := r.Value.(map[string]any)
+	if res["threw"] != true {
+		t.Errorf("expected write to throw in read-only mode, got %v", res)
+	}
+	errStr, _ := res["err"].(string)
+	if !strings.Contains(strings.ToLower(errStr), "read-only") {
+		t.Errorf("expected read-only error message, got %q", errStr)
+	}
+	// No mutation records, no undo entries.
+	if len(r.Mutations) != 0 {
+		t.Errorf("expected no mutation records in read-only mode, got %+v", r.Mutations)
+	}
+	if got := stack.Len("test-session"); got != 0 {
+		t.Errorf("expected empty undo stack in read-only mode, got len=%d", got)
 	}
 }
 

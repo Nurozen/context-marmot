@@ -55,8 +55,8 @@ type Result struct {
 }
 
 // WriteContext bundles the per-turn state required to perform mutations from
-// code-mode. When non-nil and the engine is writable, the `client` global
-// includes tag/untag/type/link/unlink/merge/delete methods.
+// code-mode. When non-nil and ReadOnly is false, the `client` global includes
+// tag/untag/type/link/unlink/merge/delete methods.
 type WriteContext struct {
 	SessionID     string
 	SelectedNodes []string
@@ -65,6 +65,10 @@ type WriteContext struct {
 	// NotifyChange, if non-nil, is invoked after every successful mutation
 	// so SSE subscribers can refresh.
 	NotifyChange func()
+	// ReadOnly, when true, suppresses write method registration even though
+	// a WriteContext was provided. Set this from VaultConfig.ReadOnly (once
+	// feat/package-docs lands) or from `marmot serve --read-only`.
+	ReadOnly bool
 }
 
 // Executor wraps a graph engine in a goja sandbox. Each call to Execute
@@ -80,6 +84,7 @@ type runScope struct {
 	rt           *goja.Runtime
 	engine       *mcpserver.Engine
 	write        *WriteContext // nil = read-only
+	ctx          context.Context
 	mutations    []curator.MutationRecord
 	mutationsCap int
 }
@@ -128,9 +133,28 @@ func (e *Executor) ExecuteWithWrites(ctx context.Context, jsCode string, write *
 	logs := make([]string, 0, 8)
 	registerConsole(rt, &logs)
 
+	// Wrap user code in an IIFE so `return` works at top level.
+	wrapped := "(function(){\n" + jsCode + "\n})()"
+
+	// Set up timeout context BEFORE registering the client so per-method
+	// Go-side calls (e.g. ExecuteCommand from a code-mode write) can honor
+	// the same deadline as the JS execution.
+	timeout := e.timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// Register `client` proxy. Nil engine is permitted for sandbox-only
 	// scenarios (tests, dry-run prompts) — `client` is simply absent.
-	scope := &runScope{rt: rt, engine: e.engine, write: write, mutationsCap: MaxMutationsPerTurn}
+	scope := &runScope{
+		rt:           rt,
+		engine:       e.engine,
+		write:        write,
+		ctx:          tctx,
+		mutationsCap: MaxMutationsPerTurn,
+	}
 	if e.engine != nil {
 		if err := registerClient(rt, scope); err != nil {
 			res.Error = "failed to wire client API: " + err.Error()
@@ -138,17 +162,6 @@ func (e *Executor) ExecuteWithWrites(ctx context.Context, jsCode string, write *
 			return res
 		}
 	}
-
-	// Wrap user code in an IIFE so `return` works at top level.
-	wrapped := "(function(){\n" + jsCode + "\n})()"
-
-	// Set up timeout via goja Interrupt + cancellable goroutine.
-	timeout := e.timeout
-	if timeout <= 0 {
-		timeout = DefaultTimeout
-	}
-	tctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 
 	timer := time.AfterFunc(timeout, func() { rt.Interrupt("execution timeout") })
 	defer timer.Stop()
