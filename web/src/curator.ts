@@ -728,11 +728,27 @@ export class Curator {
       indicator.dispose();
 
       if (!response.ok) {
-        const errText =
-          response.status === 404 || response.status === 501
-            ? 'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.'
-            : `Chat request failed (${response.status})`;
-        this.addSystemMessage(errText);
+        if (response.status === 404 || response.status === 501) {
+          this.addSystemMessage(
+            'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
+          );
+          return;
+        }
+        // Surface the server's actual error body. The chat handler returns
+        // `{ "error": "..." }`; if we can't parse JSON, fall back to text.
+        let detail = `Chat request failed (${response.status})`;
+        try {
+          const body = await response.text();
+          const parsed = JSON.parse(body) as { error?: string };
+          if (parsed.error) {
+            detail = `Chat request failed (${response.status}): ${parsed.error}`;
+          } else if (body.trim()) {
+            detail = `Chat request failed (${response.status}): ${body.slice(0, 400)}`;
+          }
+        } catch {
+          /* leave detail as-is */
+        }
+        this.addSystemMessage(detail);
         return;
       }
 
@@ -852,15 +868,99 @@ export class Curator {
     };
   }
 
-  /** Render node IDs in backticks as clickable pills. */
+  /**
+   * Render an assistant message with light markdown + node-ref pills.
+   *
+   * Supports: ### / ## / # headings, **bold**, lists (- and 1.), paragraph
+   * breaks, inline code (backticks). Inline node IDs become clickable pills.
+   * Everything is HTML-escaped first; markdown transforms operate on escaped
+   * input so the output is safe to assign to innerHTML.
+   */
   private renderMessageWithNodeRefs(text: string): string {
-    const escaped = escHtml(text);
-    return escaped.replace(/`([a-zA-Z0-9_\-\/\.]+)`/g, (_match, id: string) => {
+    const lines = escHtml(text).split('\n');
+    const blocks: string[] = [];
+    let paragraph: string[] = [];
+    let list: { type: 'ul' | 'ol'; items: string[] } | null = null;
+
+    const flushParagraph = () => {
+      if (paragraph.length) {
+        blocks.push(`<p>${paragraph.join(' ')}</p>`);
+        paragraph = [];
+      }
+    };
+    const flushList = () => {
+      if (list) {
+        blocks.push(`<${list.type}>${list.items.map((i) => `<li>${i}</li>`).join('')}</${list.type}>`);
+        list = null;
+      }
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine;
+      if (!line.trim()) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      // Headings: ### / ## / # at line start.
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        const depth = heading[1].length;
+        blocks.push(`<h${depth} class="chat-h">${this.inlineMarkdown(heading[2])}</h${depth}>`);
+        continue;
+      }
+
+      // Bullet list.
+      const bullet = line.match(/^(\s*)[-*+]\s+(.+)$/);
+      if (bullet) {
+        flushParagraph();
+        if (!list || list.type !== 'ul') {
+          flushList();
+          list = { type: 'ul', items: [] };
+        }
+        list.items.push(this.inlineMarkdown(bullet[2]));
+        continue;
+      }
+
+      // Numbered list.
+      const num = line.match(/^(\s*)\d+\.\s+(.+)$/);
+      if (num) {
+        flushParagraph();
+        if (!list || list.type !== 'ol') {
+          flushList();
+          list = { type: 'ol', items: [] };
+        }
+        list.items.push(this.inlineMarkdown(num[2]));
+        continue;
+      }
+
+      // Plain paragraph line.
+      if (list) flushList();
+      paragraph.push(this.inlineMarkdown(line));
+    }
+    flushParagraph();
+    flushList();
+    return blocks.join('');
+  }
+
+  /** Apply bold, code spans, and node-ref pill rendering to a single line. */
+  private inlineMarkdown(text: string): string {
+    // **bold** — restricted to keep regex simple. Already HTML-escaped, so
+    // ** is literal asterisks here.
+    let out = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // `code` / node refs.
+    out = out.replace(/`([a-zA-Z0-9_\-\/\.]+)`/g, (_match, id: string) => {
       if (this.nodeIds.includes(id)) {
         return `<span class="node-ref" data-node-id="${escAttr(id)}">${escHtml(shortLabel(id))}</span>`;
       }
       return `<code>${escHtml(id)}</code>`;
     });
+    // Fallback for non-node backticks (anything else inside `…`).
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    return out;
   }
 
   private scrollToBottom(): void {

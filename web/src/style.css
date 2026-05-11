@@ -1750,6 +1750,56 @@ textarea:focus-visible {
   padding-left: 10px;
 }
 
+/* Markdown blocks rendered inside chat messages — kept tight so the chat
+   doesn't grow giant headings, but visually distinct so multi-section
+   answers don't read as one wall of text. */
+.chat-message p,
+.chat-bubble p {
+  margin: 0 0 8px 0;
+}
+.chat-message p:last-child,
+.chat-bubble p:last-child {
+  margin-bottom: 0;
+}
+.chat-message .chat-h,
+.chat-bubble .chat-h {
+  margin: 12px 0 6px 0;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  text-transform: none;
+}
+.chat-message h1.chat-h,
+.chat-bubble h1.chat-h {
+  font-size: 14px;
+}
+.chat-message h2.chat-h,
+.chat-bubble h2.chat-h {
+  font-size: 13px;
+}
+.chat-message .chat-h:first-child,
+.chat-bubble .chat-h:first-child {
+  margin-top: 0;
+}
+.chat-message ul,
+.chat-message ol,
+.chat-bubble ul,
+.chat-bubble ol {
+  margin: 0 0 8px 0;
+  padding-left: 18px;
+}
+.chat-message li,
+.chat-bubble li {
+  margin-bottom: 2px;
+  line-height: 1.5;
+}
+.chat-message strong,
+.chat-bubble strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .chat-message-command {
   align-self: flex-start;
   font-family: var(--font-mono);
