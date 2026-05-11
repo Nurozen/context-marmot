@@ -406,3 +406,42 @@ func (r *testRig) reloadGraph(t *testing.T) {
 		_ = g.UpsertNode(n)
 	}
 }
+
+func TestNodeNotFound_SuggestsCandidates(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.cleanup()
+
+	ex := NewExecutor(rig.engine)
+
+	// Ask for "login" — should fail with a helpful message suggesting auth/login.
+	r := ex.Execute(context.Background(), `return client.getNode("login");`)
+	if r.Error == "" {
+		t.Fatalf("expected error, got value=%v", r.Value)
+	}
+	if !strings.Contains(r.Error, "auth/login") {
+		t.Errorf("expected error to suggest auth/login, got: %s", r.Error)
+	}
+	if !strings.Contains(strings.ToLower(r.Error), "did you mean") {
+		t.Errorf("expected 'did you mean' phrasing, got: %s", r.Error)
+	}
+}
+
+func TestNodeNotFound_NoMatches(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.cleanup()
+
+	ex := NewExecutor(rig.engine)
+
+	r := ex.Execute(context.Background(), `return client.getNode("xyzqwerty123");`)
+	if r.Error == "" {
+		t.Fatalf("expected error, got value=%v", r.Value)
+	}
+	// Should NOT include "did you mean" since no matches exist.
+	if strings.Contains(strings.ToLower(r.Error), "did you mean") {
+		t.Errorf("unexpected 'did you mean' for missing string, got: %s", r.Error)
+	}
+	// SHOULD suggest using search.
+	if !strings.Contains(r.Error, "client.search") {
+		t.Errorf("expected error to recommend client.search, got: %s", r.Error)
+	}
+}

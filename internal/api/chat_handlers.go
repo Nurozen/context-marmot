@@ -215,6 +215,38 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 	}
 	execResult := s.codeExecutor.ExecuteWithWrites(ctx, code, writeCtx)
 
+	// Recovery: if the first attempt threw a runtime error (typically
+	// "node not found" or a typo'd method name), give the model one more
+	// chance with the error fed back as context. Capped at 1 retry so the
+	// worst case is 3 LLM calls per turn (phase 1 → retry → phase 2).
+	if execResult.Error != "" {
+		retryPrompt := phase1Prompt +
+			"\n\n## Your previous attempt failed\n" +
+			"You ran this code:\n```js\n" + code + "\n```\n" +
+			"It threw:\n```\n" + execResult.Error + "\n```\n" +
+			"Try a different approach. If the error suggests a node-id mismatch, " +
+			"call `client.search(...)` first to discover the correct ID, then drill " +
+			"in with `client.getNode(...)` or `client.getNeighbors(...)`. " +
+			"Emit a fresh `js` code block.\n"
+
+		retryResp, retryErr := s.llmChat.Chat(ctx, llm.ChatRequest{
+			SystemPrompt: retryPrompt,
+			Messages:     append(history, userMsg),
+			MaxTokens:    1024,
+		})
+		if retryErr == nil {
+			if retryCode := codemode.ExtractCode(retryResp); retryCode != "" {
+				retryResult := s.codeExecutor.ExecuteWithWrites(ctx, retryCode, writeCtx)
+				// Only accept the retry result if it didn't also fail.
+				// (A successful empty result still beats a thrown error.)
+				if retryResult.Error == "" {
+					code = retryCode
+					execResult = retryResult
+				}
+			}
+		}
+	}
+
 	codeRun := &curator.CodeRunInfo{
 		Code:       code,
 		Result:     execResult.Value,

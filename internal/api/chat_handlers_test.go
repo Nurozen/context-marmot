@@ -253,7 +253,11 @@ func TestHandleChat_CodeMode_BrokenCode(t *testing.T) {
 
 	mock := &llm.MockProvider{
 		ChatResults: []string{
+			// Phase 1 — broken JS.
 			"```js\nthis is not valid javascript syntax!\n```",
+			// Recovery retry — also broken so the executor stays in error state.
+			"```js\nalso still broken !!\n```",
+			// Phase 2 — synthesizes an apology referencing the malformed run.
 			"I tried to inspect the graph but my code was malformed. Try asking again.",
 		},
 	}
@@ -280,8 +284,54 @@ func TestHandleChat_CodeMode_BrokenCode(t *testing.T) {
 	if !strings.Contains(resp.Message.Content, "malformed") {
 		t.Errorf("expected phase-2 apology, got %q", resp.Message.Content)
 	}
-	if mock.ChatCalls != 2 {
-		t.Errorf("expected 2 LLM calls even on broken code, got %d", mock.ChatCalls)
+	// 3 LLM calls: phase 1 + recovery retry + phase 2.
+	if mock.ChatCalls != 3 {
+		t.Errorf("expected 3 LLM calls (phase 1 + retry + phase 2), got %d", mock.ChatCalls)
+	}
+}
+
+// TestHandleChat_CodeMode_RetryRecovery verifies that when phase-1 code
+// throws (e.g. "node not found"), the chat handler automatically gives the
+// LLM another shot. The retry's successful code result is what feeds phase 2.
+func TestHandleChat_CodeMode_RetryRecovery(t *testing.T) {
+	server, _ := newTestServer(t)
+
+	mock := &llm.MockProvider{
+		ChatResults: []string{
+			// Phase 1 — wrong ID, will throw "node not found".
+			"```js\nreturn client.getNode(\"login\");\n```",
+			// Recovery — uses search this time.
+			"```js\nreturn client.listByType(\"function\").map(n => n.id);\n```",
+			// Phase 2 — synthesizes answer from retry result.
+			"Found the login handler at auth/login.",
+		},
+	}
+	server.WithLLMChat(mock)
+	handler := server.Handler()
+
+	body := `{"message": "tell me about login", "session_id": "code-retry"}`
+	rec := doRequest(t, handler, "POST", "/api/chat", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp curator.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.CodeRun == nil {
+		t.Fatalf("expected CodeRun in retry path")
+	}
+	// The CodeRun should reflect the *retry's* code, not the failed first.
+	if !strings.Contains(resp.CodeRun.Code, "listByType") {
+		t.Errorf("expected retry code in CodeRun.Code, got %q", resp.CodeRun.Code)
+	}
+	if resp.CodeRun.Error != "" {
+		t.Errorf("expected no error after successful retry, got %q", resp.CodeRun.Error)
+	}
+	// 3 LLM calls: phase 1 (failed) + retry (succeeded) + phase 2.
+	if mock.ChatCalls != 3 {
+		t.Errorf("expected 3 LLM calls, got %d", mock.ChatCalls)
 	}
 }
 

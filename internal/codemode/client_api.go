@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/dop251/goja"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -127,7 +128,7 @@ func registerClient(rt *goja.Runtime, scope *runScope) error {
 		}
 		n, ok := engine.ResolveNodeID(id)
 		if !ok {
-			panic(rt.NewGoError(fmt.Errorf("node %q not found", id)))
+			panic(rt.NewGoError(nodeNotFoundError(engine, id)))
 		}
 		return rt.ToValue(toClientNode(engine.GetGraph(), n))
 	})
@@ -163,6 +164,11 @@ func registerClient(rt *goja.Runtime, scope *runScope) error {
 		}
 		if depth > 5 {
 			depth = 5
+		}
+		// Confirm the start node exists; if not, throw with hints so the
+		// retry loop can recover.
+		if _, ok := engine.ResolveNodeID(id); !ok {
+			panic(rt.NewGoError(nodeNotFoundError(engine, id)))
 		}
 		out := bfsNeighbors(engine.GetGraph(), id, depth)
 		return rt.ToValue(out)
@@ -451,6 +457,42 @@ func exportObject(_ *goja.Runtime, v goja.Value) map[string]any {
 		return m
 	}
 	return map[string]any{}
+}
+
+// nodeNotFoundError builds a helpful error message for a missing node ID.
+// It searches the graph for IDs that contain the requested string as a
+// substring and suggests up to 3 candidates so the LLM (or the user) can
+// pick the right ID and retry. Falls back to a bare "not found" when no
+// substring matches exist.
+func nodeNotFoundError(engine *mcpserver.Engine, requested string) error {
+	if engine == nil {
+		return fmt.Errorf("node %q not found", requested)
+	}
+	g := engine.GetGraph()
+	if g == nil {
+		return fmt.Errorf("node %q not found", requested)
+	}
+	// Strip namespace if present so "core/mcp-engine" tail-matches "mcp-engine".
+	needle := strings.ToLower(requested)
+	if idx := strings.LastIndex(needle, "/"); idx >= 0 {
+		needle = needle[idx+1:]
+	}
+	matches := make([]string, 0, 3)
+	for _, n := range g.AllActiveNodes() {
+		id := strings.ToLower(n.ID)
+		if strings.Contains(id, needle) {
+			matches = append(matches, n.ID)
+			if len(matches) >= 3 {
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return fmt.Errorf("node %q not found; try client.search(%q) to find candidates",
+			requested, requested)
+	}
+	return fmt.Errorf("node %q not found; did you mean one of: %s (use the full ID with namespace prefix)",
+		requested, strings.Join(matches, ", "))
 }
 
 func toInt(v any) int {
