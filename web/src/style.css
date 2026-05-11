@@ -2169,6 +2169,44 @@ textarea:focus-visible {
   50%      { opacity: 1; }
 }
 
+/* Elapsed-time counter shown alongside the thinking / running indicator
+   so the user can tell a slow request apart from a stuck one. */
+.chat-thinking .thinking-elapsed,
+.chat-thinking .running-elapsed {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+/* Cancel button on the running indicator — clicking aborts the in-flight
+   chat fetch via the AbortController wired in sendNaturalLanguage(). */
+.chat-thinking .running-cancel {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 0.1s ease, border-color 0.1s ease, background 0.1s ease;
+}
+.chat-thinking .running-cancel:hover {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  background: rgba(196, 93, 75, 0.08);
+}
+.chat-thinking .running-cancel:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
 /* ── Assistant container & code-run panel ──────────────────── */
 .chat-message-assistant {
   align-self: flex-start;

@@ -707,10 +707,25 @@ export class Curator {
   /*  Natural Language Chat                                            */
   /* ================================================================ */
 
+  /**
+   * Client-side cap on a chat request. The server already enforces a 90s
+   * per-phase timeout (max ~270s for the whole turn), but the browser's
+   * fetch has no built-in deadline and can sit on a half-open TCP socket
+   * forever if a proxy / network blip drops the response without closing
+   * the connection. Set this to 5 minutes — generous for a slow Opus turn,
+   * but not infinite.
+   */
+  private static readonly CHAT_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+
   async sendNaturalLanguage(message: string): Promise<void> {
     this.addUserMessage(message);
 
-    const indicator = this.addThinkingIndicator();
+    const controller = new AbortController();
+    const indicator = this.addThinkingIndicator(controller);
+    const abortTimer = window.setTimeout(
+      () => controller.abort(new Error('client-side chat timeout (5 minutes)')),
+      Curator.CHAT_FETCH_TIMEOUT_MS,
+    );
 
     try {
       const response = await fetch('/api/chat', {
@@ -723,8 +738,10 @@ export class Curator {
           namespace: this.currentNamespace,
           session_id: this.sessionId,
         }),
+        signal: controller.signal,
       });
 
+      window.clearTimeout(abortTimer);
       indicator.dispose();
 
       if (!response.ok) {
@@ -760,11 +777,24 @@ export class Curator {
           this.processAction(action);
         }
       }
-    } catch {
+    } catch (err) {
+      window.clearTimeout(abortTimer);
       indicator.dispose();
-      this.addSystemMessage(
-        'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
-      );
+      // Distinguish "server unreachable" from "client-side timeout" so the
+      // user knows whether to retry or check connectivity.
+      const isTimeout =
+        err instanceof Error && /timeout/i.test(err.message || (err as Error).name || '');
+      if (isTimeout) {
+        this.addSystemMessage(
+          'Chat request timed out after 5 minutes — the model may be overloaded or the server got stuck. Try again, or check `marmot ui` stderr for diagnostic logs.',
+        );
+      } else if (err instanceof Error && err.name === 'AbortError') {
+        this.addSystemMessage('Chat request aborted.');
+      } else {
+        this.addSystemMessage(
+          'Chat request failed — could not reach the server. Make sure `marmot ui` is running and your LLM provider is configured (`marmot configure`).',
+        );
+      }
     }
   }
 
@@ -842,7 +872,21 @@ export class Curator {
    * is purely a UX hint that the request can take longer than a typical
    * LLM call because the server may be executing JS in goja.
    */
-  private addThinkingIndicator(): { dispose: () => void } {
+  /**
+   * Render an in-progress indicator for an active chat request.
+   *
+   * Three visual states, transitioning with elapsed wall-clock time:
+   *   - 0-1.5s   : "thinking..." with three dots
+   *   - 1.5-3s   : "thinking... (Xs)" with elapsed counter
+   *   - 3s+      : "running code... (Xs)  [Cancel]" — spinner + visible
+   *                elapsed counter + Cancel button wired to the supplied
+   *                AbortController so the user can bail on a stuck request
+   *
+   * The Cancel button only appears when an abortController is passed.
+   */
+  private addThinkingIndicator(
+    abortController?: AbortController,
+  ): { dispose: () => void } {
     const el = document.createElement('div');
     el.className = 'chat-message chat-thinking';
     el.innerHTML =
@@ -852,20 +896,78 @@ export class Curator {
     this.messagesEl.appendChild(el);
     this.scrollToBottom();
 
-    const swap = window.setTimeout(() => {
+    const start = Date.now();
+    let phase: 'thinking' | 'thinking-elapsed' | 'running' = 'thinking';
+    let elapsedEl: HTMLElement | null = null;
+
+    const renderRunning = () => {
+      phase = 'running';
       el.classList.add('chat-running-code');
-      el.innerHTML =
-        '<span class="running-spinner" aria-hidden="true"></span>' +
-        '<span class="running-label">running code...</span>';
+      el.innerHTML = '';
+      const spinner = document.createElement('span');
+      spinner.className = 'running-spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+      const label = document.createElement('span');
+      label.className = 'running-label';
+      label.textContent = 'running code...';
+      elapsedEl = document.createElement('span');
+      elapsedEl.className = 'running-elapsed';
+      el.append(spinner, label, elapsedEl);
+
+      if (abortController) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'running-cancel';
+        btn.textContent = 'Cancel';
+        btn.title = 'Abort this chat request';
+        btn.addEventListener('click', () => {
+          btn.disabled = true;
+          btn.textContent = 'Cancelling...';
+          abortController.abort(new Error('user cancelled'));
+        });
+        el.appendChild(btn);
+      }
       this.scrollToBottom();
-    }, 1500);
+    };
+
+    const renderThinkingElapsed = () => {
+      phase = 'thinking-elapsed';
+      el.innerHTML = '';
+      el.appendChild(this.makeDot());
+      el.appendChild(this.makeDot());
+      el.appendChild(this.makeDot());
+      elapsedEl = document.createElement('span');
+      elapsedEl.className = 'thinking-elapsed';
+      el.appendChild(elapsedEl);
+    };
+
+    // Update once per second so the counter and phase transitions stay live.
+    const tick = window.setInterval(() => {
+      const seconds = Math.floor((Date.now() - start) / 1000);
+      if (phase === 'thinking' && seconds >= 2) {
+        renderThinkingElapsed();
+      }
+      if (phase !== 'running' && seconds >= 3) {
+        renderRunning();
+      }
+      if (elapsedEl) {
+        elapsedEl.textContent = `${seconds}s`;
+      }
+    }, 1000);
 
     return {
       dispose: () => {
-        window.clearTimeout(swap);
+        window.clearInterval(tick);
         el.remove();
       },
     };
+  }
+
+  /** Build a single animated dot span for the "thinking" indicator. */
+  private makeDot(): HTMLElement {
+    const dot = document.createElement('span');
+    dot.className = 'thinking-dot';
+    return dot;
   }
 
   /**

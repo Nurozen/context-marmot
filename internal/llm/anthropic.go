@@ -16,7 +16,11 @@ const (
 	// in vault config. We default to the most capable family (Opus) so the
 	// curator chat works well out of the box; users can downgrade to Haiku
 	// for cheaper classifier-only setups by setting classifier_model.
-	AnthropicDefaultModel = "claude-opus-4-7-latest"
+	//
+	// Anthropic 4.6+ models use dateless pinned-snapshot IDs (no -latest
+	// evergreen alias exists for opus 4.7), so this string must match the
+	// API identifier exactly.
+	AnthropicDefaultModel = "claude-opus-4-7"
 	anthropicEndpoint     = "https://api.anthropic.com/v1/messages"
 	anthropicVersion      = "2023-06-01"
 	anthropicMaxCandidates = 3

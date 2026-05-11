@@ -190,8 +190,8 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 	// Use the request context so client disconnects abort downstream work.
 	ctx := r.Context()
 	turnStart := time.Now()
-	fmt.Fprintf(os.Stderr, "chat[%s]: turn start, history=%d msgs, msg=%q\n",
-		req.SessionID, len(history), truncatePreview(req.Message, 80))
+	fmt.Fprintf(os.Stderr, "chat[%s]: turn start, model=%s, history=%d msgs, msg=%q\n",
+		req.SessionID, s.llmChat.Model(), len(history), truncatePreview(req.Message, 80))
 
 	// Phase 1.
 	phase1Ctx, phase1Cancel := context.WithTimeout(ctx, PerPhaseChatTimeout)
