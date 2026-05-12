@@ -119,9 +119,13 @@ type NodeUpdateResponse struct {
 	Status string `json:"status"`
 }
 
-// ChatUndoRequest is the JSON body for POST /api/chat/undo.
+// ChatUndoRequest is the JSON body for POST /api/chat/undo. When UndoID is
+// empty the server pops the top of the session's undo stack (legacy LIFO
+// behavior). When UndoID is set the server finds and removes that specific
+// entry — used by the per-row Undo button in the code-mode audit trail.
 type ChatUndoRequest struct {
 	SessionID string `json:"session_id"`
+	UndoID    string `json:"undo_id,omitempty"`
 }
 
 // ChatUndoResponse is returned by POST /api/chat/undo.

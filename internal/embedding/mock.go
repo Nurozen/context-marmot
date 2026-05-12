@@ -1,6 +1,7 @@
 package embedding
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"math"
@@ -86,6 +87,14 @@ func (m *MockEmbedder) Embed(text string) ([]float32, error) {
 	}
 
 	return vec, nil
+}
+
+// EmbedContext generates a mock embedding unless the context is already done.
+func (m *MockEmbedder) EmbedContext(ctx context.Context, text string) ([]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return m.Embed(text)
 }
 
 // EmbedBatch generates embeddings for multiple texts by calling Embed for each.

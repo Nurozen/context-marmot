@@ -107,7 +107,9 @@ func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
 		}
 		// Use AllPairs() for thread-safe access to the pairs slice.
 		for _, p := range s.engine.HeatMap.AllPairs() {
-			if p.Weight < 0.06 { continue } // skip pairs at decay floor
+			if p.Weight < 0.06 {
+				continue
+			} // skip pairs at decay floor
 			if nodeIDs[p.A] || nodeIDs[p.B] {
 				resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
 					A:      p.A,
@@ -240,7 +242,9 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 	if s.engine.HeatMap != nil {
 		// Use AllPairs() for thread-safe access to the pairs slice.
 		for _, p := range s.engine.HeatMap.AllPairs() {
-			if p.Weight < 0.06 { continue } // skip pairs at decay floor
+			if p.Weight < 0.06 {
+				continue
+			} // skip pairs at decay floor
 			resp.HeatPairs = append(resp.HeatPairs, APIHeatPair{
 				A:      p.A,
 				B:      p.B,
@@ -470,7 +474,9 @@ func (s *Server) handleHeat(w http.ResponseWriter, r *http.Request) {
 
 	var pairs []APIHeatPair
 	for _, p := range s.engine.HeatMap.AllPairs() {
-		if p.Weight < 0.06 { continue } // skip pairs at decay floor
+		if p.Weight < 0.06 {
+			continue
+		} // skip pairs at decay floor
 		if nsIDs[p.A] || nsIDs[p.B] {
 			pairs = append(pairs, APIHeatPair{
 				A:      p.A,
@@ -861,7 +867,20 @@ func (s *Server) handleChatUndo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry := s.undoStack.Pop(req.SessionID)
+	// Per-row undo from the code-mode audit trail passes undo_id so a
+	// specific mutation can be reversed out of LIFO order. Without an
+	// undo_id, fall back to popping the most recent entry.
+	var entry *curator.UndoEntry
+	if req.UndoID != "" {
+		var blocked bool
+		entry, blocked = s.undoStack.PopLatestByID(req.SessionID, req.UndoID)
+		if blocked {
+			writeError(w, http.StatusConflict, "undo entry is not the most recent change; undo newer changes first")
+			return
+		}
+	} else {
+		entry = s.undoStack.Pop(req.SessionID)
+	}
 	if entry == nil {
 		writeError(w, http.StatusNotFound, "no undo entries for session")
 		return

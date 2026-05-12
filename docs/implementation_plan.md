@@ -712,6 +712,58 @@ Chat panel embedded in the web UI that lets users refine the auto-generated know
 - [x] Onboarding state: empty graph shows "Run `marmot index`" card
 - [x] Network disconnect handling: optimistic UI with rollback on error
 
+## Phase 26: Code-Mode Curator Chat — COMPLETE (2026-05-08)
+
+Give the Graph Curator's natural-language chat real graph access through Cloudflare-style code-mode: the LLM emits JavaScript that runs in a goja sandbox against a `client` global mirroring the SDK, then a second LLM call synthesizes a natural-language answer from the execution result. Spec: `docs/spec-code-mode.md`.
+
+### 26.1 — Sandbox executor (`internal/codemode`)
+- [x] goja-based JS runtime, ES5.1+
+- [x] Wall-clock timeout (default 5s) via `runtime.Interrupt`
+- [x] `eval`, `Function`, `setTimeout`, `setInterval`, `fetch`, `XMLHttpRequest` removed from globals
+- [x] `console.log/info/warn/error/debug` captured into `Result.Logs`, capped at 50 entries x 1KB
+- [x] Code length cap (4KB), result size cap (8KB JSON-serialized)
+- [x] `ExtractCode` parser pulls first JS/JavaScript/TypeScript fenced block, accepts unlabeled blocks only when content looks like JS
+- [x] IIFE wrapping so top-level `return` works
+
+### 26.2 — Client API (`internal/codemode/client_api.go`)
+- [x] `client.query`, `client.search` — semantic search via existing engine handlers
+- [x] `client.getNode`, `client.getNeighbors`, `client.getGraph` — direct graph access
+- [x] `client.listByTag/Type/Namespace`, `client.listAllTags/Types`, `client.listNamespaces`
+- [x] `client.listOrphans` — nodes with zero edges
+- [x] `client.getStats` — counts and namespaces
+- [x] All methods synchronous (no async/await) — simpler goja integration
+- [x] JS exceptions on missing data via `runtime.NewTypeError` / `NewGoError`
+- [x] `ClientNode`, `ClientEdge`, `ClientStats` JSON-friendly projections
+
+### 26.3 — Two-phase chat handler
+- [x] Phase 1: code-mode system prompt + user message → LLM → optional code block
+- [x] Code extracted, executed in fresh sandbox, `CodeRunInfo` populated
+- [x] Phase 2: original question + code + result → LLM → final NL answer
+- [x] If phase 1 returns no code → skip phase 2, treat phase 1 as final answer (saves a round-trip)
+- [x] If phase 2 fails → return phase 1 message + CodeRunInfo so user still sees something
+
+### 26.4 — Prompt builders (`internal/codemode/prompt.go`)
+- [x] `BuildPhase1Prompt` — describes API surface, includes graph context, three example code blocks
+- [x] `BuildPhase2Prompt` — packages user question + code + result/error/logs for synthesis
+- [x] Read-only flag flows through phase-1 prompt (engine-side flag wired separately on package-docs branch)
+
+### 26.5 — ChatResponse extension
+- [x] `curator.CodeRunInfo` struct with `Code`, `Result`, `Logs`, `Error`, `DurationMS`
+- [x] Optional `code_run` field on `ChatResponse`
+- [x] `MockProvider.ChatResults` queue for scripting multi-phase responses in tests
+
+### 26.6 — Frontend rendering (`web/src/curator.ts`)
+- [x] Collapsible code panel above assistant message bubble
+- [x] Auto-expand on error, red header when error
+- [x] Copy-to-clipboard button on code panel header
+- [x] Two-stage thinking indicator: "thinking..." → "running code..." after 1.5s
+- [x] Result block with JSON formatting, scrollable max-height 200px
+- [x] Logs section, only rendered when non-empty
+
+### 26.7 — Tests
+- [x] `executor_test.go`: timeout, eval/Function blocked, no fs/network, console capture, return value, large-result truncation, code length cap, parse error, ExtractCode (5 variants)
+- [x] `chat_handlers_test.go`: code-mode roundtrip, no-code direct answer, broken code apology, real graph query
+
 ## Future Enhancements (Research-Informed, Deferred)
 
 These enhancements are architecturally compatible but deferred until the core is stable.

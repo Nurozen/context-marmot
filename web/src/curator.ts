@@ -11,7 +11,7 @@ import type { APINode, GraphResponse } from './types';
 /* ------------------------------------------------------------------ */
 
 interface ChatMessage {
-  role: 'user' | 'system';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
 }
@@ -26,6 +26,26 @@ interface ChatResponse {
     content: string;
     actions?: ChatAction[];
   };
+  undo_id?: string;
+  code_run?: CodeRunInfo;
+}
+
+export interface MutationRecord {
+  op: string; // "tag" | "untag" | "type" | "link" | "unlink" | "merge" | "delete" | "verify"
+  message: string;
+  nodes?: string[];
+  undo_id?: string;
+  success: boolean;
+}
+
+export interface CodeRunInfo {
+  code: string;
+  result: unknown;
+  logs: string[];
+  error?: string;
+  duration_ms: number;
+  truncated?: boolean;
+  mutations?: MutationRecord[];
 }
 
 /** Shape returned by /api/verify/:ns */
@@ -100,6 +120,7 @@ export class Curator {
   private expanded = false;
   private drawerHeight = 320;
   private inputFocused = false;
+  private chatInFlight = false;
 
   /* Command mode */
   private commandMode = false;
@@ -331,6 +352,10 @@ export class Curator {
   private submit(): void {
     const raw = this.input.value.trim();
     if (!raw) return;
+    if (!raw.startsWith('/') && this.chatInFlight) {
+      this.addCommandResult('A chat response is still in progress. Use Cancel before sending another message.', false);
+      return;
+    }
 
     this.inputHistory.push(raw);
     this.historyIdx = -1;
@@ -656,6 +681,8 @@ export class Curator {
           },
         },
       ],
+      undefined,
+      'system',
     );
   }
 
@@ -687,10 +714,31 @@ export class Curator {
   /*  Natural Language Chat                                            */
   /* ================================================================ */
 
+  /**
+   * Client-side cap on a chat request. The server already enforces a 90s
+   * per-phase timeout (max ~270s for the whole turn), but the browser's
+   * fetch has no built-in deadline and can sit on a half-open TCP socket
+   * forever if a proxy / network blip drops the response without closing
+   * the connection. Set this to 5 minutes — generous for a slow Opus turn,
+   * but not infinite.
+   */
+  private static readonly CHAT_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+
   async sendNaturalLanguage(message: string): Promise<void> {
+    if (this.chatInFlight) return;
+    this.chatInFlight = true;
+    this.setChatControlsEnabled(false);
     this.addUserMessage(message);
 
-    const thinkingEl = this.addThinkingIndicator();
+    const controller = new AbortController();
+    let cancelledByUser = false;
+    const indicator = this.addThinkingIndicator(controller, () => {
+      cancelledByUser = true;
+    });
+    const abortTimer = window.setTimeout(
+      () => controller.abort(new Error('client-side chat timeout (5 minutes)')),
+      Curator.CHAT_FETCH_TIMEOUT_MS,
+    );
 
     try {
       const response = await fetch('/api/chat', {
@@ -703,33 +751,80 @@ export class Curator {
           namespace: this.currentNamespace,
           session_id: this.sessionId,
         }),
+        signal: controller.signal,
       });
 
-      thinkingEl.remove();
-
       if (!response.ok) {
-        const errText =
-          response.status === 404 || response.status === 501
-            ? 'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.'
-            : `Chat request failed (${response.status})`;
-        this.addSystemMessage(errText);
+        if (response.status === 404 || response.status === 501) {
+          this.addSystemMessage(
+            'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
+            undefined,
+            undefined,
+            'system',
+          );
+          return;
+        }
+        // Surface the server's actual error body. The chat handler returns
+        // `{ "error": "..." }`; if we can't parse JSON, fall back to text.
+        let detail = `Chat request failed (${response.status})`;
+        try {
+          const body = await response.text();
+          const parsed = JSON.parse(body) as { error?: string };
+          if (parsed.error) {
+            detail = `Chat request failed (${response.status}): ${parsed.error}`;
+          } else if (body.trim()) {
+            detail = `Chat request failed (${response.status}): ${body.slice(0, 400)}`;
+          }
+        } catch {
+          /* leave detail as-is */
+        }
+        this.addSystemMessage(detail, undefined, undefined, 'system');
         return;
       }
 
       const data = (await response.json()) as ChatResponse;
-      this.addSystemMessage(data.message.content);
+      this.addSystemMessage(data.message.content, undefined, data.code_run);
 
       if (data.message.actions) {
         for (const action of data.message.actions) {
           this.processAction(action);
         }
       }
-    } catch {
-      thinkingEl.remove();
-      this.addSystemMessage(
-        'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
-      );
+    } catch (err) {
+      // Distinguish "server unreachable" from "client-side timeout" so the
+      // user knows whether to retry or check connectivity.
+      const isTimeout =
+        err instanceof Error && /timeout/i.test(err.message || (err as Error).name || '');
+      if (cancelledByUser) {
+        this.addSystemMessage('Chat request cancelled.', undefined, undefined, 'system');
+      } else if (isTimeout) {
+        this.addSystemMessage(
+          'Chat request timed out after 5 minutes — the model may be overloaded or the server got stuck. Try again, or check `marmot ui` stderr for diagnostic logs.',
+          undefined,
+          undefined,
+          'system',
+        );
+      } else if (err instanceof Error && err.name === 'AbortError') {
+        this.addSystemMessage('Chat request aborted.', undefined, undefined, 'system');
+      } else {
+        this.addSystemMessage(
+          'Chat request failed — could not reach the server. Make sure `marmot ui` is running and your LLM provider is configured (`marmot configure`).',
+          undefined,
+          undefined,
+          'system',
+        );
+      }
+    } finally {
+      window.clearTimeout(abortTimer);
+      indicator.dispose();
+      this.chatInFlight = false;
+      this.setChatControlsEnabled(true);
     }
+  }
+
+  private setChatControlsEnabled(enabled: boolean): void {
+    this.input.disabled = !enabled;
+    (this.sendBtn as HTMLButtonElement).disabled = !enabled;
   }
 
   /* ================================================================ */
@@ -750,14 +845,25 @@ export class Curator {
   addSystemMessage(
     text: string,
     actions?: Array<{ label: string; onClick: () => void }>,
+    codeRun?: CodeRunInfo,
+    historyRole: 'assistant' | 'system' = 'assistant',
   ): void {
-    const msg: ChatMessage = { role: 'system', content: text, timestamp: Date.now() };
+    const msg: ChatMessage = { role: historyRole, content: text, timestamp: Date.now() };
     this.chatHistory.push(msg);
+
+    /* Wrap in an assistant container so an optional code-run panel can
+       sit ABOVE the bubble while keeping left-alignment. */
+    const container = document.createElement('div');
+    container.className = 'chat-message-assistant';
+
+    if (codeRun) {
+      container.appendChild(renderCodeRunPanel(codeRun, this.sessionId, this.nodeIds));
+    }
 
     const el = document.createElement('div');
     el.className = 'chat-message chat-message-system';
     el.innerHTML = this.renderMessageWithNodeRefs(text);
-    this.messagesEl.appendChild(el);
+    container.appendChild(el);
 
     if (actions && actions.length > 0) {
       const bar = document.createElement('div');
@@ -776,6 +882,7 @@ export class Curator {
       el.appendChild(bar);
     }
 
+    this.messagesEl.appendChild(container);
     this.scrollToBottom();
   }
 
@@ -787,25 +894,207 @@ export class Curator {
     this.scrollToBottom();
   }
 
-  private addThinkingIndicator(): HTMLElement {
+  /**
+   * Show an in-flight indicator. Two stages:
+   *  - 0..1500ms: thinking dots
+   *  - 1500ms+:   elapsed work indicator with a small spinner
+   * The frontend doesn't know the actual phase (no streaming in v1) -- this
+   * is purely a UX hint that the request can take longer than a typical
+   * LLM call because the server may be executing JS in goja.
+   */
+  /**
+   * Render an in-progress indicator for an active chat request.
+   *
+   * Three visual states, transitioning with elapsed wall-clock time:
+   *   - 0-1.5s   : "thinking..." with three dots
+   *   - 1.5-3s   : "thinking... (Xs)" with elapsed counter
+   *   - 3s+      : "working... (Xs)  [Cancel]" — spinner + visible
+   *                elapsed counter + Cancel button wired to the supplied
+   *                AbortController so the user can bail on a stuck request
+   *
+   * The Cancel button only appears when an abortController is passed.
+   */
+  private addThinkingIndicator(
+    abortController?: AbortController,
+    onCancel?: () => void,
+  ): { dispose: () => void } {
     const el = document.createElement('div');
     el.className = 'chat-message chat-thinking';
     el.innerHTML =
-      '<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>';
+      '<span class="thinking-dot"></span>' +
+      '<span class="thinking-dot"></span>' +
+      '<span class="thinking-dot"></span>';
     this.messagesEl.appendChild(el);
     this.scrollToBottom();
-    return el;
+
+    const start = Date.now();
+    let phase: 'thinking' | 'thinking-elapsed' | 'running' = 'thinking';
+    let elapsedEl: HTMLElement | null = null;
+
+    const renderRunning = () => {
+      phase = 'running';
+      el.classList.add('chat-running-code');
+      el.innerHTML = '';
+      const spinner = document.createElement('span');
+      spinner.className = 'running-spinner';
+      spinner.setAttribute('aria-hidden', 'true');
+      const label = document.createElement('span');
+      label.className = 'running-label';
+      label.textContent = 'working...';
+      elapsedEl = document.createElement('span');
+      elapsedEl.className = 'running-elapsed';
+      el.append(spinner, label, elapsedEl);
+
+      if (abortController) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'running-cancel';
+        btn.textContent = 'Cancel';
+        btn.title = 'Abort this chat request';
+        btn.addEventListener('click', () => {
+          btn.disabled = true;
+          btn.textContent = 'Cancelling...';
+          onCancel?.();
+          abortController.abort(new DOMException('user cancelled', 'AbortError'));
+        });
+        el.appendChild(btn);
+      }
+      this.scrollToBottom();
+    };
+
+    const renderThinkingElapsed = () => {
+      phase = 'thinking-elapsed';
+      el.innerHTML = '';
+      el.appendChild(this.makeDot());
+      el.appendChild(this.makeDot());
+      el.appendChild(this.makeDot());
+      elapsedEl = document.createElement('span');
+      elapsedEl.className = 'thinking-elapsed';
+      el.appendChild(elapsedEl);
+    };
+
+    // Update once per second so the counter and phase transitions stay live.
+    const tick = window.setInterval(() => {
+      const seconds = Math.floor((Date.now() - start) / 1000);
+      if (phase === 'thinking' && seconds >= 2) {
+        renderThinkingElapsed();
+      }
+      if (phase !== 'running' && seconds >= 3) {
+        renderRunning();
+      }
+      if (elapsedEl) {
+        elapsedEl.textContent = `${seconds}s`;
+      }
+    }, 1000);
+
+    return {
+      dispose: () => {
+        window.clearInterval(tick);
+        el.remove();
+      },
+    };
   }
 
-  /** Render node IDs in backticks as clickable pills. */
+  /** Build a single animated dot span for the "thinking" indicator. */
+  private makeDot(): HTMLElement {
+    const dot = document.createElement('span');
+    dot.className = 'thinking-dot';
+    return dot;
+  }
+
+  /**
+   * Render an assistant message with light markdown + node-ref pills.
+   *
+   * Supports: ### / ## / # headings, **bold**, lists (- and 1.), paragraph
+   * breaks, inline code (backticks). Inline node IDs become clickable pills.
+   * Everything is HTML-escaped first; markdown transforms operate on escaped
+   * input so the output is safe to assign to innerHTML.
+   */
   private renderMessageWithNodeRefs(text: string): string {
-    const escaped = escHtml(text);
-    return escaped.replace(/`([a-zA-Z0-9_\-\/\.]+)`/g, (_match, id: string) => {
+    const lines = escHtml(text).split('\n');
+    const blocks: string[] = [];
+    let paragraph: string[] = [];
+    let list: { type: 'ul' | 'ol'; items: string[] } | null = null;
+
+    const flushParagraph = () => {
+      if (paragraph.length) {
+        blocks.push(`<p>${paragraph.join(' ')}</p>`);
+        paragraph = [];
+      }
+    };
+    const flushList = () => {
+      if (list) {
+        blocks.push(`<${list.type}>${list.items.map((i) => `<li>${i}</li>`).join('')}</${list.type}>`);
+        list = null;
+      }
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine;
+      if (!line.trim()) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      // Headings: ### / ## / # at line start.
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        const depth = heading[1].length;
+        blocks.push(`<h${depth} class="chat-h">${this.inlineMarkdown(heading[2])}</h${depth}>`);
+        continue;
+      }
+
+      // Bullet list.
+      const bullet = line.match(/^(\s*)[-*+]\s+(.+)$/);
+      if (bullet) {
+        flushParagraph();
+        if (!list || list.type !== 'ul') {
+          flushList();
+          list = { type: 'ul', items: [] };
+        }
+        list.items.push(this.inlineMarkdown(bullet[2]));
+        continue;
+      }
+
+      // Numbered list.
+      const num = line.match(/^(\s*)\d+\.\s+(.+)$/);
+      if (num) {
+        flushParagraph();
+        if (!list || list.type !== 'ol') {
+          flushList();
+          list = { type: 'ol', items: [] };
+        }
+        list.items.push(this.inlineMarkdown(num[2]));
+        continue;
+      }
+
+      // Plain paragraph line.
+      if (list) flushList();
+      paragraph.push(this.inlineMarkdown(line));
+    }
+    flushParagraph();
+    flushList();
+    return blocks.join('');
+  }
+
+  /** Apply bold, code spans, and node-ref pill rendering to a single line. */
+  private inlineMarkdown(text: string): string {
+    // **bold** — restricted to keep regex simple. Already HTML-escaped, so
+    // ** is literal asterisks here.
+    let out = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    // `code` / node refs.
+    out = out.replace(/`([a-zA-Z0-9_\-\/\.]+)`/g, (_match, id: string) => {
       if (this.nodeIds.includes(id)) {
         return `<span class="node-ref" data-node-id="${escAttr(id)}">${escHtml(shortLabel(id))}</span>`;
       }
       return `<code>${escHtml(id)}</code>`;
     });
+    // Fallback for non-node backticks (anything else inside `…`).
+    out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+    return out;
   }
 
   private scrollToBottom(): void {
@@ -1175,4 +1464,402 @@ function escHtml(s: string): string {
 
 function escAttr(s: string): string {
   return s.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* ------------------------------------------------------------------ */
+/*  Code-run panel                                                     */
+/* ------------------------------------------------------------------ */
+
+/** Build the collapsible code/result panel rendered above an assistant
+ *  message when the backend executed code on the user's behalf. */
+function renderCodeRunPanel(
+  run: CodeRunInfo,
+  sessionId: string,
+  knownNodeIds: string[],
+): HTMLElement {
+  const panel = document.createElement('div');
+  panel.className = 'code-run-panel';
+  const hasError = !!run.error;
+  if (hasError) panel.classList.add('has-error');
+
+  const mutations = run.mutations ?? [];
+  const hasMutations = mutations.length > 0;
+
+  /* Header */
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'code-run-header';
+  const chevron = document.createElement('span');
+  chevron.className = 'code-run-chevron';
+  chevron.textContent = '▶'; /* right-pointing triangle */
+  const label = document.createElement('span');
+  label.className = 'code-run-label';
+  if (hasError) {
+    label.innerHTML = `Code &middot; <span class="code-run-err-tag">Error</span>`;
+  } else {
+    label.innerHTML = `Code &middot; <span class="code-run-duration">${run.duration_ms}ms</span>`;
+  }
+
+  /* Copy button (lives in header, but doesn't toggle expand) */
+  const copyBtn = document.createElement('span');
+  copyBtn.className = 'code-run-copy';
+  copyBtn.setAttribute('role', 'button');
+  copyBtn.setAttribute('tabindex', '0');
+  copyBtn.title = 'Copy code';
+  copyBtn.textContent = 'copy';
+  const doCopy = (ev: Event) => {
+    ev.stopPropagation();
+    void navigator.clipboard?.writeText(run.code).then(
+      () => {
+        const prev = copyBtn.textContent;
+        copyBtn.textContent = 'copied!';
+        copyBtn.classList.add('copied');
+        window.setTimeout(() => {
+          copyBtn.textContent = prev;
+          copyBtn.classList.remove('copied');
+        }, 1200);
+      },
+      () => {
+        copyBtn.textContent = 'failed';
+      },
+    );
+  };
+  copyBtn.addEventListener('click', doCopy);
+  copyBtn.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      doCopy(e);
+    }
+  });
+
+  header.appendChild(chevron);
+  header.appendChild(label);
+  header.appendChild(copyBtn);
+
+  /* Body */
+  const body = document.createElement('div');
+  body.className = 'code-run-body';
+
+  /* Code block */
+  const codeBlock = document.createElement('pre');
+  codeBlock.className = 'code-run-code';
+  const codeEl = document.createElement('code');
+  codeEl.textContent = run.code;
+  codeBlock.appendChild(codeEl);
+  body.appendChild(codeBlock);
+
+  /* Error or result section */
+  if (hasError) {
+    const errLabel = document.createElement('div');
+    errLabel.className = 'code-run-section-label';
+    errLabel.textContent = 'Error:';
+    body.appendChild(errLabel);
+    const errBlock = document.createElement('pre');
+    errBlock.className = 'code-run-error';
+    errBlock.textContent = run.error ?? '';
+    body.appendChild(errBlock);
+  } else {
+    const resultLabel = document.createElement('div');
+    resultLabel.className = 'code-run-section-label';
+    const count = arrayLikeCount(run.result);
+    const baseText =
+      count !== null ? `Result (${count} item${count === 1 ? '' : 's'}):` : 'Result:';
+    resultLabel.textContent = baseText;
+    if (run.truncated) {
+      const truncBadge = document.createElement('span');
+      truncBadge.className = 'code-run-truncated-badge';
+      truncBadge.textContent = '(truncated)';
+      resultLabel.appendChild(document.createTextNode(' '));
+      resultLabel.appendChild(truncBadge);
+    }
+    body.appendChild(resultLabel);
+
+    if (run.result === null || run.result === undefined) {
+      const muted = document.createElement('div');
+      muted.className = 'code-run-result-muted';
+      muted.textContent = '(no return value)';
+      body.appendChild(muted);
+    } else {
+      const resultBlock = document.createElement('pre');
+      resultBlock.className = 'code-run-result';
+      let pretty: string;
+      try {
+        pretty = JSON.stringify(run.result, null, 2);
+      } catch {
+        pretty = String(run.result);
+      }
+      resultBlock.textContent = pretty;
+      body.appendChild(resultBlock);
+    }
+  }
+
+  /* Mutations audit trail (above logs, below result/error) */
+  if (hasMutations) {
+    body.appendChild(renderMutationsSection(mutations, sessionId, knownNodeIds));
+  }
+
+  /* Logs */
+  if (run.logs && run.logs.length > 0) {
+    const logsLabel = document.createElement('div');
+    logsLabel.className = 'code-run-section-label';
+    logsLabel.textContent = 'Logs:';
+    body.appendChild(logsLabel);
+    const ul = document.createElement('ul');
+    ul.className = 'code-run-logs';
+    for (const line of run.logs) {
+      const li = document.createElement('li');
+      li.textContent = line;
+      ul.appendChild(li);
+    }
+    body.appendChild(ul);
+  }
+
+  /* Default expanded state: collapsed unless error or there are mutations */
+  let expanded = hasError || hasMutations;
+  const applyExpanded = () => {
+    panel.classList.toggle('expanded', expanded);
+    chevron.textContent = expanded ? '▼' : '▶';
+  };
+  applyExpanded();
+
+  header.addEventListener('click', () => {
+    expanded = !expanded;
+    applyExpanded();
+  });
+
+  panel.appendChild(header);
+  panel.appendChild(body);
+  return panel;
+}
+
+/** Return array length for arrays, otherwise null. Used to label result
+ *  blocks like "Result (3 items)". */
+function arrayLikeCount(v: unknown): number | null {
+  return Array.isArray(v) ? v.length : null;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Mutations audit-trail section                                      */
+/* ------------------------------------------------------------------ */
+
+/** POST /api/chat/undo for a specific undo_id. Returns true on success. */
+async function postUndo(sessionId: string, undoId: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/chat/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, undo_id: undoId }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function reloadCuratorGraph(): void {
+  document.dispatchEvent(new CustomEvent('curator-reload-graph'));
+}
+
+interface RowHandle {
+  row: HTMLElement;
+  undoBtn: HTMLButtonElement | null;
+  undoId: string | null;
+  applied: boolean; // success === true
+  done: boolean; // already undone
+  markUndone: () => void;
+}
+
+/** Build the mutations audit-trail section. Sits between the result/error
+ *  block and the logs block inside .code-run-body. */
+function renderMutationsSection(
+  mutations: MutationRecord[],
+  sessionId: string,
+  knownNodeIds: string[],
+): HTMLElement {
+  const section = document.createElement('div');
+  section.className = 'code-run-mutations';
+
+  const appliedCount = mutations.filter((m) => m.success).length;
+  const rejectedCount = mutations.length - appliedCount;
+
+  /* Header line */
+  const head = document.createElement('div');
+  head.className = 'code-run-mutations-head';
+
+  const title = document.createElement('div');
+  title.className = 'code-run-mutations-title';
+  if (rejectedCount > 0) {
+    title.innerHTML =
+      `Changes (${appliedCount} applied, ` +
+      `<span class="code-run-mutations-rejected">${rejectedCount} rejected</span>)`;
+  } else {
+    title.textContent = `Changes (${appliedCount})`;
+  }
+  head.appendChild(title);
+
+  /* Build row handles first so "Undo all" can iterate them */
+  const handles: RowHandle[] = [];
+  const list = document.createElement('div');
+  list.className = 'code-run-mutations-list';
+
+  let refreshUndoAvailability = () => {};
+  for (const m of mutations) {
+    const handle = renderMutationRow(m, sessionId, knownNodeIds, () => {
+      refreshUndoAvailability();
+    });
+    handles.push(handle);
+    list.appendChild(handle.row);
+  }
+
+  /* Undo all (only if at least one applied mutation with an undo_id) */
+  const undoableHandles = handles.filter((h) => h.applied && h.undoId);
+  refreshUndoAvailability = () => {
+    let active: RowHandle | null = null;
+    for (let i = undoableHandles.length - 1; i >= 0; i--) {
+      if (!undoableHandles[i].done) {
+        active = undoableHandles[i];
+        break;
+      }
+    }
+    for (const h of undoableHandles) {
+      if (!h.undoBtn) continue;
+      const enabled = h === active;
+      h.undoBtn.disabled = !enabled;
+      h.undoBtn.title = enabled
+        ? 'Undo this change'
+        : 'Undo newer changes first';
+    }
+  };
+  refreshUndoAvailability();
+  if (undoableHandles.length > 0) {
+    const undoAll = document.createElement('button');
+    undoAll.type = 'button';
+    undoAll.className = 'code-run-mutations-undo-all';
+    undoAll.textContent = 'Undo all';
+    undoAll.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      undoAll.disabled = true;
+      /* Reverse order so the undo stack stays consistent. Sequential, not
+         parallel. */
+      const reversed = undoableHandles.slice().reverse();
+      let didUndo = false;
+      for (const h of reversed) {
+        if (h.done || !h.undoId) continue;
+        const ok = await postUndo(sessionId, h.undoId);
+        if (ok) {
+          h.markUndone();
+          refreshUndoAvailability();
+          didUndo = true;
+        }
+      }
+      if (didUndo) reloadCuratorGraph();
+      /* Hide the button once all rows have been processed */
+      const remaining = handles.some((h) => h.applied && h.undoId && !h.done);
+      if (!remaining) undoAll.remove();
+      else undoAll.disabled = false;
+    });
+    head.appendChild(undoAll);
+  }
+
+  section.appendChild(head);
+  section.appendChild(list);
+  return section;
+}
+
+function renderMutationRow(
+  m: MutationRecord,
+  sessionId: string,
+  knownNodeIds: string[],
+  onUndoStateChanged: () => void,
+): RowHandle {
+  const row = document.createElement('div');
+  row.className = 'code-run-mutation-row';
+  if (!m.success) row.classList.add('failed');
+
+  /* Status icon */
+  const icon = document.createElement('span');
+  icon.className = 'code-run-mutation-icon';
+  icon.textContent = m.success ? '✓' : '✗';
+  row.appendChild(icon);
+
+  /* Op tag */
+  const op = document.createElement('span');
+  op.className = 'code-run-mutation-op';
+  op.textContent = `[${m.op}]`;
+  row.appendChild(op);
+
+  /* Message + inline node pills */
+  const msg = document.createElement('span');
+  msg.className = 'code-run-mutation-msg';
+  msg.textContent = m.message;
+  row.appendChild(msg);
+
+  if (m.nodes && m.nodes.length > 0) {
+    const pills = document.createElement('span');
+    pills.className = 'code-run-mutation-nodes';
+    for (const id of m.nodes) {
+      const pill = document.createElement('span');
+      pill.className = 'node-ref';
+      pill.dataset.nodeId = id;
+      pill.textContent = shortLabel(id);
+      if (!knownNodeIds.includes(id)) {
+        pill.classList.add('unknown');
+      }
+      pills.appendChild(pill);
+    }
+    row.appendChild(pills);
+  }
+
+  /* Right-edge: Undo button or nothing */
+  const trailing = document.createElement('span');
+  trailing.className = 'code-run-mutation-trailing';
+  row.appendChild(trailing);
+
+  let undoBtn: HTMLButtonElement | null = null;
+  const undoId = m.undo_id ?? null;
+  const applied = m.success === true;
+
+  const handle: RowHandle = {
+    row,
+    undoBtn: null,
+    undoId,
+    applied,
+    done: false,
+    markUndone: () => {
+      handle.done = true;
+      row.classList.add('undone');
+      if (undoBtn) {
+        const chip = document.createElement('span');
+        chip.className = 'code-run-mutation-undone-chip';
+        chip.textContent = 'Undone';
+        undoBtn.replaceWith(chip);
+        undoBtn = null;
+        handle.undoBtn = null;
+      }
+    },
+  };
+
+  if (applied && undoId) {
+    undoBtn = document.createElement('button');
+    undoBtn.type = 'button';
+    undoBtn.className = 'code-run-mutation-undo';
+    undoBtn.textContent = 'Undo';
+    undoBtn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (handle.done || !handle.undoId) return;
+      undoBtn!.disabled = true;
+      const ok = await postUndo(sessionId, handle.undoId);
+      if (ok) {
+        handle.markUndone();
+        reloadCuratorGraph();
+        onUndoStateChanged();
+      } else {
+        undoBtn!.disabled = false;
+      }
+    });
+    trailing.appendChild(undoBtn);
+    handle.undoBtn = undoBtn;
+  }
+
+  return handle;
 }

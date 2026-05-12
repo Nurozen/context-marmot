@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -17,8 +18,12 @@ var (
 )
 
 const (
-	openaiLLMDefaultModel = "gpt-5.1-codex-mini"
-	openaiResponsesURL    = "https://api.openai.com/v1/responses"
+	// OpenAIDefaultModel is the model used when classifier_model is unset
+	// in vault config. We default to the most capable conversational model
+	// so the curator chat works well out of the box; users can downgrade
+	// to a mini/nano model in config for cheaper classifier-only setups.
+	OpenAIDefaultModel = "gpt-5.5"
+	openaiResponsesURL = "https://api.openai.com/v1/responses"
 )
 
 // OpenAIProvider classifies/summarises nodes using the OpenAI Responses API.
@@ -29,11 +34,22 @@ type OpenAIProvider struct {
 }
 
 // NewOpenAIProvider creates a new OpenAIProvider using the given API key.
+// Uses OpenAIDefaultModel — callers that want to honor a vault-configured
+// model should construct via NewOpenAIProviderWithModel.
 func NewOpenAIProvider(apiKey string) *OpenAIProvider {
+	return NewOpenAIProviderWithModel(apiKey, OpenAIDefaultModel)
+}
+
+// NewOpenAIProviderWithModel creates a provider talking to the given model.
+// Empty model falls back to OpenAIDefaultModel.
+func NewOpenAIProviderWithModel(apiKey, model string) *OpenAIProvider {
+	if strings.TrimSpace(model) == "" {
+		model = OpenAIDefaultModel
+	}
 	return &OpenAIProvider{
 		apiKey: apiKey,
-		model:  openaiLLMDefaultModel,
-		client: &http.Client{Timeout: 60 * time.Second},
+		model:  model,
+		client: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -94,6 +110,23 @@ func (r *openaiResponsesResponse) extractText() string {
 		}
 	}
 	return ""
+}
+
+// hasReasoningOnly reports whether the response contains reasoning output
+// items but no final message — the signature of a reasoning model that
+// burned its entire max_output_tokens budget on thinking.
+func (r *openaiResponsesResponse) hasReasoningOnly() bool {
+	sawReasoning := false
+	sawMessage := false
+	for _, item := range r.Output {
+		switch item.Type {
+		case "reasoning":
+			sawReasoning = true
+		case "message":
+			sawMessage = true
+		}
+	}
+	return sawReasoning && !sawMessage
 }
 
 // ── Public methods ──────────────────────────────────────────
@@ -176,7 +209,12 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, apiReq openaiResponsesRe
 
 	text := apiResp.extractText()
 	if text == "" {
-		return "", fmt.Errorf("openai: empty output in %s response", label)
+		if apiResp.hasReasoningOnly() {
+			return "", fmt.Errorf(
+				"openai: model %q used the entire max_output_tokens budget on reasoning and emitted no text response — raise the budget or switch to a non-reasoning model (e.g. gpt-4.1, gpt-5.5)",
+				p.model)
+		}
+		return "", fmt.Errorf("openai: empty output in %s response (model: %s)", label, p.model)
 	}
 
 	return text, nil

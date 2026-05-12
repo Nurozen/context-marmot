@@ -150,6 +150,9 @@ html, body {
 }
 
 .logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 14px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -161,6 +164,22 @@ html, body {
 .logo .logo-mark {
   color: var(--accent);
   font-weight: 700;
+}
+
+/* PNG logo replacement for the marmot emoji. The source asset has a light
+   marmot silhouette with black graph nodes. On the dark UI background the
+   black parts vanish, so we render the logo on a light circular chip
+   that keeps both layers readable at toolbar size. */
+.logo-mark-img {
+  width: 26px;
+  height: 26px;
+  display: inline-block;
+  flex: 0 0 auto;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 50%;
+  box-sizing: border-box;
+  object-fit: contain;
 }
 
 /* ── Form Controls (shared) ───────────────────────────────────── */
@@ -1731,6 +1750,56 @@ textarea:focus-visible {
   padding-left: 10px;
 }
 
+/* Markdown blocks rendered inside chat messages — kept tight so the chat
+   doesn't grow giant headings, but visually distinct so multi-section
+   answers don't read as one wall of text. */
+.chat-message p,
+.chat-bubble p {
+  margin: 0 0 8px 0;
+}
+.chat-message p:last-child,
+.chat-bubble p:last-child {
+  margin-bottom: 0;
+}
+.chat-message .chat-h,
+.chat-bubble .chat-h {
+  margin: 12px 0 6px 0;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  text-transform: none;
+}
+.chat-message h1.chat-h,
+.chat-bubble h1.chat-h {
+  font-size: 14px;
+}
+.chat-message h2.chat-h,
+.chat-bubble h2.chat-h {
+  font-size: 13px;
+}
+.chat-message .chat-h:first-child,
+.chat-bubble .chat-h:first-child {
+  margin-top: 0;
+}
+.chat-message ul,
+.chat-message ol,
+.chat-bubble ul,
+.chat-bubble ol {
+  margin: 0 0 8px 0;
+  padding-left: 18px;
+}
+.chat-message li,
+.chat-bubble li {
+  margin-bottom: 2px;
+  line-height: 1.5;
+}
+.chat-message strong,
+.chat-bubble strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
 .chat-message-command {
   align-self: flex-start;
   font-family: var(--font-mono);
@@ -2066,6 +2135,507 @@ textarea:focus-visible {
     opacity: 1;
     transform: scale(1);
   }
+}
+
+/* ── Running-code indicator (post-1.5s swap from thinking) ──── */
+.chat-thinking.chat-running-code {
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.chat-thinking .running-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-medium);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+
+.chat-thinking .running-label {
+  color: var(--accent);
+  opacity: 0.85;
+  animation: runningPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes runningPulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+
+/* Elapsed-time counter shown alongside the thinking / running indicator
+   so the user can tell a slow request apart from a stuck one. */
+.chat-thinking .thinking-elapsed,
+.chat-thinking .running-elapsed {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  margin-left: 2px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
+/* Cancel button on the running indicator — clicking aborts the in-flight
+   chat fetch via the AbortController wired in sendNaturalLanguage(). */
+.chat-thinking .running-cancel {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: color 0.1s ease, border-color 0.1s ease, background 0.1s ease;
+}
+.chat-thinking .running-cancel:hover {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  background: rgba(196, 93, 75, 0.08);
+}
+.chat-thinking .running-cancel:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* ── Assistant container & code-run panel ──────────────────── */
+.chat-message-assistant {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 85%;
+  animation: fadeSlideIn 200ms var(--ease-out) both;
+}
+
+/* Bubble inside the container should not double-animate or claim its
+   own max-width -- the container owns those. */
+.chat-message-assistant > .chat-message {
+  max-width: 100%;
+  animation: none;
+}
+
+.code-run-panel {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  font-family: var(--font-mono);
+}
+
+.code-run-panel.has-error {
+  border-color: rgba(196, 93, 75, 0.35);
+}
+
+.code-run-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.code-run-header:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.code-run-panel.expanded .code-run-header {
+  border-bottom-color: var(--border-subtle);
+}
+
+.code-run-chevron {
+  display: inline-block;
+  width: 10px;
+  font-size: 9px;
+  color: var(--text-muted);
+  transition: color var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.code-run-header:hover .code-run-chevron {
+  color: var(--accent);
+}
+
+.code-run-label {
+  flex: 1;
+  letter-spacing: 0.02em;
+}
+
+.code-run-duration {
+  color: var(--text-muted);
+}
+
+.code-run-err-tag {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.code-run-copy {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  user-select: none;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.code-run-copy:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+.code-run-copy.copied {
+  color: var(--color-success);
+  border-color: rgba(123, 168, 123, 0.35);
+  background: rgba(123, 168, 123, 0.12);
+}
+
+.code-run-body {
+  display: none;
+  padding: 10px 12px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.code-run-panel.expanded .code-run-body {
+  display: flex;
+}
+
+.code-run-section-label {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+
+.code-run-code,
+.code-run-result,
+.code-run-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  background: var(--bg-void);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre;
+  word-break: normal;
+}
+
+.code-run-code {
+  color: var(--text-primary);
+}
+
+.code-run-code code {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.code-run-result {
+  max-height: 200px;
+  color: var(--secondary);
+}
+
+.code-run-result-muted {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 2px;
+}
+
+.code-run-error {
+  color: var(--color-danger);
+  background: rgba(196, 93, 75, 0.08);
+  border-color: rgba(196, 93, 75, 0.25);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-run-logs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.code-run-logs li {
+  padding-left: 14px;
+  position: relative;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-run-logs li::before {
+  content: '\2022';
+  position: absolute;
+  left: 4px;
+  color: var(--text-muted);
+}
+
+/* ── Code-run: "(truncated)" badge on result label ──────────── */
+.code-run-truncated-badge {
+  display: inline-block;
+  margin-left: 2px;
+  padding: 0 6px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: rgba(212, 168, 83, 0.10);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  vertical-align: 1px;
+}
+
+/* ── Code-run: Mutations audit trail ────────────────────────── */
+.code-run-mutations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin: 2px -2px;
+  background: rgba(255, 255, 255, 0.025);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.code-run-mutations-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.code-run-mutations-title {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.code-run-mutations-rejected {
+  color: var(--color-danger);
+  opacity: 0.85;
+  font-weight: 600;
+}
+
+.code-run-mutations-undo-all {
+  padding: 2px 10px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.code-run-mutations-undo-all:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.code-run-mutations-undo-all:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.code-run-mutations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.code-run-mutation-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  background: var(--bg-void);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  transition: opacity var(--transition-fast);
+}
+
+.code-run-mutation-row.failed {
+  border-color: rgba(196, 93, 75, 0.25);
+  background: rgba(196, 93, 75, 0.05);
+}
+
+.code-run-mutation-row.undone {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.code-run-mutation-row.undone .code-run-mutation-undone-chip {
+  text-decoration: none;
+}
+
+.code-run-mutation-icon {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--color-success, var(--accent));
+  text-align: center;
+}
+
+.code-run-mutation-row.failed .code-run-mutation-icon {
+  color: var(--color-danger);
+}
+
+.code-run-mutation-op {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--secondary);
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
+}
+
+.code-run-mutation-row.failed .code-run-mutation-op {
+  color: var(--color-danger);
+}
+
+.code-run-mutation-msg {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-sans, inherit);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.code-run-mutation-nodes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.code-run-mutation-nodes .node-ref {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--accent);
+  background: rgba(212, 168, 83, 0.15);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.code-run-mutation-nodes .node-ref:hover {
+  background: var(--accent-glow);
+  color: var(--accent-hover);
+}
+
+.code-run-mutation-nodes .node-ref.unknown {
+  color: var(--text-muted);
+  background: rgba(94, 90, 84, 0.12);
+  cursor: default;
+}
+
+.code-run-mutation-trailing {
+  display: inline-flex;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.code-run-mutation-undo {
+  padding: 1px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.code-run-mutation-undo:hover {
+  color: var(--accent-hover);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.code-run-mutation-undo:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.code-run-mutation-undone-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  color: var(--text-muted);
+  background: rgba(94, 90, 84, 0.10);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.02em;
+  filter: saturate(0.5);
 }
 
 /* ── Node Pulse Ring (SVG) ──────────────────────────────────── */
