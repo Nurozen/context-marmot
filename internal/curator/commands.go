@@ -162,7 +162,10 @@ func executeTag(_ context.Context, cmd *SlashCommand, engine *mcp.Engine, select
 	if len(cmd.Args) < 1 {
 		return &CommandResult{Success: false, Message: "/tag requires a tag name"}, nil
 	}
-	tag := cmd.Args[0]
+	tags := uniqueNonEmpty(cmd.Args)
+	if len(tags) == 0 {
+		return &CommandResult{Success: false, Message: "/tag requires a tag name"}, nil
+	}
 	if len(selectedNodes) == 0 {
 		return &CommandResult{Success: false, Message: "/tag requires at least one selected node"}, nil
 	}
@@ -177,29 +180,33 @@ func executeTag(_ context.Context, cmd *SlashCommand, engine *mcp.Engine, select
 		if err != nil {
 			continue
 		}
-		// Skip if tag already present.
-		hasTag := false
-		for _, t := range diskNode.Tags {
-			if t == tag {
-				hasTag = true
-				break
+		changed := false
+		for _, tag := range tags {
+			hasTag := false
+			for _, t := range diskNode.Tags {
+				if t == tag {
+					hasTag = true
+					break
+				}
+			}
+			if !hasTag {
+				diskNode.Tags = append(diskNode.Tags, tag)
+				changed = true
 			}
 		}
-		if hasTag {
-			mutated = append(mutated, diskNode.ID)
-			continue
+		if changed {
+			if err := engine.NodeStore.SaveNode(diskNode); err != nil {
+				continue
+			}
+			_ = engine.GetGraph().UpsertNode(diskNode)
 		}
-		diskNode.Tags = append(diskNode.Tags, tag)
-		if err := engine.NodeStore.SaveNode(diskNode); err != nil {
-			continue
-		}
-		_ = engine.GetGraph().UpsertNode(diskNode)
 		mutated = append(mutated, diskNode.ID)
 	}
 
+	tagLabel := strings.Join(tags, ", ")
 	return &CommandResult{
 		Success:      true,
-		Message:      fmt.Sprintf("tagged %d node(s) with %q", len(mutated), tag),
+		Message:      fmt.Sprintf("tagged %d node(s) with %q", len(mutated), tagLabel),
 		MutatedNodes: mutated,
 	}, nil
 }
@@ -209,9 +216,16 @@ func executeUntag(_ context.Context, cmd *SlashCommand, engine *mcp.Engine, sele
 	if len(cmd.Args) < 1 {
 		return &CommandResult{Success: false, Message: "/untag requires a tag name"}, nil
 	}
-	tag := cmd.Args[0]
+	tags := uniqueNonEmpty(cmd.Args)
+	if len(tags) == 0 {
+		return &CommandResult{Success: false, Message: "/untag requires a tag name"}, nil
+	}
 	if len(selectedNodes) == 0 {
 		return &CommandResult{Success: false, Message: "/untag requires at least one selected node"}, nil
+	}
+	removeTags := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		removeTags[tag] = true
 	}
 
 	var mutated []string
@@ -227,7 +241,7 @@ func executeUntag(_ context.Context, cmd *SlashCommand, engine *mcp.Engine, sele
 		newTags := make([]string, 0, len(diskNode.Tags))
 		removed := false
 		for _, t := range diskNode.Tags {
-			if t == tag && !removed {
+			if removeTags[t] {
 				removed = true
 				continue
 			}
@@ -244,9 +258,10 @@ func executeUntag(_ context.Context, cmd *SlashCommand, engine *mcp.Engine, sele
 		mutated = append(mutated, diskNode.ID)
 	}
 
+	tagLabel := strings.Join(tags, ", ")
 	return &CommandResult{
 		Success:      true,
-		Message:      fmt.Sprintf("removed tag %q from %d node(s)", tag, len(mutated)),
+		Message:      fmt.Sprintf("removed tag %q from %d node(s)", tagLabel, len(mutated)),
 		MutatedNodes: mutated,
 	}, nil
 }
@@ -485,6 +500,12 @@ func executeLink(_ context.Context, cmd *SlashCommand, engine *mcp.Engine) (*Com
 		Relation: rel,
 		Class:    node.ClassifyRelation(relation),
 	}
+	if newEdge.Class == node.Structural && engine.GetGraph().WouldCreateCycle(srcNode.ID, tgtNode.ID) {
+		return &CommandResult{
+			Success: false,
+			Message: fmt.Sprintf("structural edge %s -[%s]-> %s would create a cycle", srcNode.ID, relation, tgtNode.ID),
+		}, nil
+	}
 	diskNode.Edges = append(diskNode.Edges, newEdge)
 
 	if err := engine.NodeStore.SaveNode(diskNode); err != nil {
@@ -497,6 +518,20 @@ func executeLink(_ context.Context, cmd *SlashCommand, engine *mcp.Engine) (*Com
 		Message:      fmt.Sprintf("linked %s -[%s]-> %s", srcNode.ID, relation, tgtNode.ID),
 		MutatedNodes: []string{srcNode.ID},
 	}, nil
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
 }
 
 // executeUnlink removes an edge from source to target matching the given relation.

@@ -2,6 +2,7 @@ package embedding
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -89,7 +90,12 @@ type openaiError struct {
 
 // Embed generates an embedding for a single text.
 func (o *OpenAIEmbedder) Embed(text string) ([]float32, error) {
-	results, err := o.callAPI([]string{text})
+	return o.EmbedContext(context.Background(), text)
+}
+
+// EmbedContext generates an embedding for a single text, honoring cancellation.
+func (o *OpenAIEmbedder) EmbedContext(ctx context.Context, text string) ([]float32, error) {
+	results, err := o.callAPI(ctx, []string{text})
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +120,7 @@ func (o *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 		}
 		chunk := texts[start:end]
 
-		chunkResults, err := o.callAPI(chunk)
+		chunkResults, err := o.callAPI(context.Background(), chunk)
 		if err != nil {
 			return nil, fmt.Errorf("openai: batch chunk [%d:%d]: %w", start, end, err)
 		}
@@ -128,7 +134,7 @@ func (o *OpenAIEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
 }
 
 // callAPI sends a request to the OpenAI embeddings endpoint with retry on 429.
-func (o *OpenAIEmbedder) callAPI(inputs []string) ([][]float32, error) {
+func (o *OpenAIEmbedder) callAPI(ctx context.Context, inputs []string) ([][]float32, error) {
 	var input interface{}
 	if len(inputs) == 1 {
 		input = inputs[0]
@@ -150,11 +156,17 @@ func (o *OpenAIEmbedder) callAPI(inputs []string) ([][]float32, error) {
 
 	for attempt := 0; attempt < openaiMaxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(backoff)
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 			backoff *= 2
 		}
 
-		req, err := http.NewRequest("POST", openaiEndpoint, bytes.NewReader(bodyBytes))
+		req, err := http.NewRequestWithContext(ctx, "POST", openaiEndpoint, bytes.NewReader(bodyBytes))
 		if err != nil {
 			return nil, fmt.Errorf("openai: create request: %w", err)
 		}

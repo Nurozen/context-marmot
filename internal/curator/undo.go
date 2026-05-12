@@ -89,6 +89,25 @@ func (u *UndoStack) PopByID(sessionID, undoID string) *UndoEntry {
 	return nil
 }
 
+// PopLatestByID removes and returns undoID only when it is the latest entry
+// for the session. The boolean reports whether an entry existed but was not
+// the latest, which lets callers reject unsafe out-of-order snapshot restores.
+func (u *UndoStack) PopLatestByID(sessionID, undoID string) (*UndoEntry, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	stack := u.stacks[sessionID]
+	if len(stack) == 0 {
+		return nil, false
+	}
+	if stack[len(stack)-1].ID != undoID {
+		return nil, true
+	}
+	entry := stack[len(stack)-1]
+	u.stacks[sessionID] = stack[:len(stack)-1]
+	return &entry, false
+}
+
 // Peek returns the most recent entry without removing it.
 // Returns nil if the stack is empty.
 func (u *UndoStack) Peek(sessionID string) *UndoEntry {

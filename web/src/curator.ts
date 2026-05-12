@@ -11,7 +11,7 @@ import type { APINode, GraphResponse } from './types';
 /* ------------------------------------------------------------------ */
 
 interface ChatMessage {
-  role: 'user' | 'system';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
 }
@@ -120,6 +120,7 @@ export class Curator {
   private expanded = false;
   private drawerHeight = 320;
   private inputFocused = false;
+  private chatInFlight = false;
 
   /* Command mode */
   private commandMode = false;
@@ -351,6 +352,10 @@ export class Curator {
   private submit(): void {
     const raw = this.input.value.trim();
     if (!raw) return;
+    if (!raw.startsWith('/') && this.chatInFlight) {
+      this.addCommandResult('A chat response is still in progress. Use Cancel before sending another message.', false);
+      return;
+    }
 
     this.inputHistory.push(raw);
     this.historyIdx = -1;
@@ -676,6 +681,8 @@ export class Curator {
           },
         },
       ],
+      undefined,
+      'system',
     );
   }
 
@@ -718,10 +725,16 @@ export class Curator {
   private static readonly CHAT_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
 
   async sendNaturalLanguage(message: string): Promise<void> {
+    if (this.chatInFlight) return;
+    this.chatInFlight = true;
+    this.setChatControlsEnabled(false);
     this.addUserMessage(message);
 
     const controller = new AbortController();
-    const indicator = this.addThinkingIndicator(controller);
+    let cancelledByUser = false;
+    const indicator = this.addThinkingIndicator(controller, () => {
+      cancelledByUser = true;
+    });
     const abortTimer = window.setTimeout(
       () => controller.abort(new Error('client-side chat timeout (5 minutes)')),
       Curator.CHAT_FETCH_TIMEOUT_MS,
@@ -741,13 +754,13 @@ export class Curator {
         signal: controller.signal,
       });
 
-      window.clearTimeout(abortTimer);
-      indicator.dispose();
-
       if (!response.ok) {
         if (response.status === 404 || response.status === 501) {
           this.addSystemMessage(
             'LLM not configured -- slash commands are available. Run `marmot configure` and pick OpenAI or Anthropic as the classifier provider to enable NL chat.',
+            undefined,
+            undefined,
+            'system',
           );
           return;
         }
@@ -765,7 +778,7 @@ export class Curator {
         } catch {
           /* leave detail as-is */
         }
-        this.addSystemMessage(detail);
+        this.addSystemMessage(detail, undefined, undefined, 'system');
         return;
       }
 
@@ -778,24 +791,40 @@ export class Curator {
         }
       }
     } catch (err) {
-      window.clearTimeout(abortTimer);
-      indicator.dispose();
       // Distinguish "server unreachable" from "client-side timeout" so the
       // user knows whether to retry or check connectivity.
       const isTimeout =
         err instanceof Error && /timeout/i.test(err.message || (err as Error).name || '');
-      if (isTimeout) {
+      if (cancelledByUser) {
+        this.addSystemMessage('Chat request cancelled.', undefined, undefined, 'system');
+      } else if (isTimeout) {
         this.addSystemMessage(
           'Chat request timed out after 5 minutes — the model may be overloaded or the server got stuck. Try again, or check `marmot ui` stderr for diagnostic logs.',
+          undefined,
+          undefined,
+          'system',
         );
       } else if (err instanceof Error && err.name === 'AbortError') {
-        this.addSystemMessage('Chat request aborted.');
+        this.addSystemMessage('Chat request aborted.', undefined, undefined, 'system');
       } else {
         this.addSystemMessage(
           'Chat request failed — could not reach the server. Make sure `marmot ui` is running and your LLM provider is configured (`marmot configure`).',
+          undefined,
+          undefined,
+          'system',
         );
       }
+    } finally {
+      window.clearTimeout(abortTimer);
+      indicator.dispose();
+      this.chatInFlight = false;
+      this.setChatControlsEnabled(true);
     }
+  }
+
+  private setChatControlsEnabled(enabled: boolean): void {
+    this.input.disabled = !enabled;
+    (this.sendBtn as HTMLButtonElement).disabled = !enabled;
   }
 
   /* ================================================================ */
@@ -817,8 +846,9 @@ export class Curator {
     text: string,
     actions?: Array<{ label: string; onClick: () => void }>,
     codeRun?: CodeRunInfo,
+    historyRole: 'assistant' | 'system' = 'assistant',
   ): void {
-    const msg: ChatMessage = { role: 'system', content: text, timestamp: Date.now() };
+    const msg: ChatMessage = { role: historyRole, content: text, timestamp: Date.now() };
     this.chatHistory.push(msg);
 
     /* Wrap in an assistant container so an optional code-run panel can
@@ -867,7 +897,7 @@ export class Curator {
   /**
    * Show an in-flight indicator. Two stages:
    *  - 0..1500ms: thinking dots
-   *  - 1500ms+:   "running code..." with a small spinner
+   *  - 1500ms+:   elapsed work indicator with a small spinner
    * The frontend doesn't know the actual phase (no streaming in v1) -- this
    * is purely a UX hint that the request can take longer than a typical
    * LLM call because the server may be executing JS in goja.
@@ -878,7 +908,7 @@ export class Curator {
    * Three visual states, transitioning with elapsed wall-clock time:
    *   - 0-1.5s   : "thinking..." with three dots
    *   - 1.5-3s   : "thinking... (Xs)" with elapsed counter
-   *   - 3s+      : "running code... (Xs)  [Cancel]" — spinner + visible
+   *   - 3s+      : "working... (Xs)  [Cancel]" — spinner + visible
    *                elapsed counter + Cancel button wired to the supplied
    *                AbortController so the user can bail on a stuck request
    *
@@ -886,6 +916,7 @@ export class Curator {
    */
   private addThinkingIndicator(
     abortController?: AbortController,
+    onCancel?: () => void,
   ): { dispose: () => void } {
     const el = document.createElement('div');
     el.className = 'chat-message chat-thinking';
@@ -909,7 +940,7 @@ export class Curator {
       spinner.setAttribute('aria-hidden', 'true');
       const label = document.createElement('span');
       label.className = 'running-label';
-      label.textContent = 'running code...';
+      label.textContent = 'working...';
       elapsedEl = document.createElement('span');
       elapsedEl.className = 'running-elapsed';
       el.append(spinner, label, elapsedEl);
@@ -923,7 +954,8 @@ export class Curator {
         btn.addEventListener('click', () => {
           btn.disabled = true;
           btn.textContent = 'Cancelling...';
-          abortController.abort(new Error('user cancelled'));
+          onCancel?.();
+          abortController.abort(new DOMException('user cancelled', 'AbortError'));
         });
         el.appendChild(btn);
       }
@@ -1624,6 +1656,10 @@ async function postUndo(sessionId: string, undoId: string): Promise<boolean> {
   }
 }
 
+function reloadCuratorGraph(): void {
+  document.dispatchEvent(new CustomEvent('curator-reload-graph'));
+}
+
 interface RowHandle {
   row: HTMLElement;
   undoBtn: HTMLButtonElement | null;
@@ -1666,14 +1702,35 @@ function renderMutationsSection(
   const list = document.createElement('div');
   list.className = 'code-run-mutations-list';
 
+  let refreshUndoAvailability = () => {};
   for (const m of mutations) {
-    const handle = renderMutationRow(m, sessionId, knownNodeIds);
+    const handle = renderMutationRow(m, sessionId, knownNodeIds, () => {
+      refreshUndoAvailability();
+    });
     handles.push(handle);
     list.appendChild(handle.row);
   }
 
   /* Undo all (only if at least one applied mutation with an undo_id) */
   const undoableHandles = handles.filter((h) => h.applied && h.undoId);
+  refreshUndoAvailability = () => {
+    let active: RowHandle | null = null;
+    for (let i = undoableHandles.length - 1; i >= 0; i--) {
+      if (!undoableHandles[i].done) {
+        active = undoableHandles[i];
+        break;
+      }
+    }
+    for (const h of undoableHandles) {
+      if (!h.undoBtn) continue;
+      const enabled = h === active;
+      h.undoBtn.disabled = !enabled;
+      h.undoBtn.title = enabled
+        ? 'Undo this change'
+        : 'Undo newer changes first';
+    }
+  };
+  refreshUndoAvailability();
   if (undoableHandles.length > 0) {
     const undoAll = document.createElement('button');
     undoAll.type = 'button';
@@ -1685,11 +1742,17 @@ function renderMutationsSection(
       /* Reverse order so the undo stack stays consistent. Sequential, not
          parallel. */
       const reversed = undoableHandles.slice().reverse();
+      let didUndo = false;
       for (const h of reversed) {
         if (h.done || !h.undoId) continue;
         const ok = await postUndo(sessionId, h.undoId);
-        if (ok) h.markUndone();
+        if (ok) {
+          h.markUndone();
+          refreshUndoAvailability();
+          didUndo = true;
+        }
       }
+      if (didUndo) reloadCuratorGraph();
       /* Hide the button once all rows have been processed */
       const remaining = handles.some((h) => h.applied && h.undoId && !h.done);
       if (!remaining) undoAll.remove();
@@ -1707,6 +1770,7 @@ function renderMutationRow(
   m: MutationRecord,
   sessionId: string,
   knownNodeIds: string[],
+  onUndoStateChanged: () => void,
 ): RowHandle {
   const row = document.createElement('div');
   row.className = 'code-run-mutation-row';
@@ -1787,6 +1851,8 @@ function renderMutationRow(
       const ok = await postUndo(sessionId, handle.undoId);
       if (ok) {
         handle.markUndone();
+        reloadCuratorGraph();
+        onUndoStateChanged();
       } else {
         undoBtn!.disabled = false;
       }

@@ -26,7 +26,7 @@ import (
 // HandleContextQuery is the handler for the context_query MCP tool.
 // It embeds the query, searches the embedding index for entry nodes,
 // traverses the graph from those nodes, and returns compacted XML.
-func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	query := req.GetString("query", "")
 	if query == "" {
 		return mcp.NewToolResultError("query parameter is required"), nil
@@ -47,9 +47,12 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 	includeSuperseded := req.GetBool("include_superseded", false)
 
 	// Step 1: Embed the query.
-	queryVec, err := e.Embedder.Embed(query)
+	queryVec, err := embedWithContext(ctx, e.Embedder, query)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("embed query: %v", err)), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("query cancelled: %v", err)), nil
 	}
 
 	// Step 2: Search embedding index for top-k entry nodes.
@@ -138,6 +141,29 @@ func (e *Engine) HandleContextQuery(_ context.Context, req mcp.CallToolRequest) 
 	}
 
 	return mcp.NewToolResultText(compacted.XML), nil
+}
+
+type contextEmbedder interface {
+	EmbedContext(context.Context, string) ([]float32, error)
+}
+
+func embedWithContext(ctx context.Context, embedder interface {
+	Embed(string) ([]float32, error)
+}, text string) ([]float32, error) {
+	if ce, ok := embedder.(contextEmbedder); ok {
+		return ce.EmbedContext(ctx, text)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	vec, err := embedder.Embed(text)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return vec, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +392,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 					}
 					_ = e.EmbeddingStore.UpdateStatus(classResult.TargetNodeID, node.StatusSuperseded)
 				}
-			// ADD and UPDATE both proceed with the normal write path below.
+				// ADD and UPDATE both proceed with the normal write path below.
 			}
 		}
 		// On classifier error: fall through to normal write (safe degradation).
@@ -409,7 +435,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		embedText = embedText + "\n\n" + ctxSnip
 	}
 	if embedText != "" {
-		vec, err := e.Embedder.Embed(embedText)
+		vec, err := embedWithContext(ctx, e.Embedder, embedText)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("embed summary: %v", err)), nil
 		}
@@ -451,10 +477,10 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 
 // VerifyIssue is a single issue in the verify response.
 type VerifyIssue struct {
-	NodeID    string `json:"node_id"`
-	Type      string `json:"type"`
-	Message   string `json:"message"`
-	Severity  string `json:"severity"`
+	NodeID   string `json:"node_id"`
+	Type     string `json:"type"`
+	Message  string `json:"message"`
+	Severity string `json:"severity"`
 }
 
 // VerifyResult is the JSON response from context_verify.
@@ -634,13 +660,13 @@ func (e *Engine) HandleContextDelete(_ context.Context, req mcp.CallToolRequest)
 
 // TagResult is the JSON response from context_tag.
 type TagResult struct {
-	Tag      string   `json:"tag"`
+	Tag       string   `json:"tag"`
 	TaggedIDs []string `json:"tagged_ids"`
-	Count    int      `json:"count"`
+	Count     int      `json:"count"`
 }
 
 // HandleContextTag bulk-tags nodes matching a semantic search query.
-func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (e *Engine) HandleContextTag(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	query := req.GetString("query", "")
 	if query == "" {
 		return mcp.NewToolResultError("query parameter is required"), nil
@@ -656,7 +682,7 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 	}
 
 	// Embed the query.
-	queryVec, err := e.Embedder.Embed(query)
+	queryVec, err := embedWithContext(ctx, e.Embedder, query)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("embed query: %v", err)), nil
 	}
@@ -673,6 +699,10 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 
 	var taggedIDs []string
 	for _, r := range results {
+		if err := ctx.Err(); err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
 		n, ok := e.GetGraph().GetNode(r.NodeID)
 		if !ok {
 			continue
@@ -730,7 +760,7 @@ func (e *Engine) HandleContextTag(_ context.Context, req mcp.CallToolRequest) (*
 				embedText = embedText + "\n\n" + ctxSnip
 			}
 			if embedText != "" {
-				if vec, embErr := e.Embedder.Embed(embedText); embErr == nil {
+				if vec, embErr := embedWithContext(ctx, e.Embedder, embedText); embErr == nil {
 					summaryHash := sha256Hex(embedText)
 					_ = e.EmbeddingStore.Upsert(diskNode.ID, vec, summaryHash, e.Embedder.Model())
 				}

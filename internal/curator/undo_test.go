@@ -99,6 +99,25 @@ func TestPeek(t *testing.T) {
 	}
 }
 
+func TestPopLatestByIDRejectsOutOfOrder(t *testing.T) {
+	us := NewUndoStack()
+	us.Push("s1", UndoEntry{ID: "older", SessionID: "s1"})
+	us.Push("s1", UndoEntry{ID: "newer", SessionID: "s1"})
+
+	entry, blocked := us.PopLatestByID("s1", "older")
+	if entry != nil || !blocked {
+		t.Fatalf("expected older entry to be blocked, got entry=%+v blocked=%v", entry, blocked)
+	}
+	if us.Len("s1") != 2 {
+		t.Fatalf("blocked pop should leave stack intact, got len=%d", us.Len("s1"))
+	}
+
+	entry, blocked = us.PopLatestByID("s1", "newer")
+	if blocked || entry == nil || entry.ID != "newer" {
+		t.Fatalf("expected newer entry to pop, got entry=%+v blocked=%v", entry, blocked)
+	}
+}
+
 func TestSnapshotNodesExistingAndMissing(t *testing.T) {
 	dir := t.TempDir()
 	store := node.NewStore(dir)

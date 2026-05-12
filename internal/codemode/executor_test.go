@@ -3,8 +3,11 @@ package codemode
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 )
 
 // ---------------------------------------------------------------------------
@@ -131,6 +134,64 @@ func TestExecute_LargeResult_Truncated(t *testing.T) {
 	if !ok || !strings.Contains(s, "TRUNCATED") {
 		t.Fatalf("expected truncated string marker, got %T %v", r.Value, r.Value)
 	}
+}
+
+func TestExecute_ClientQueryHonorsSandboxTimeoutDuringEmbedding(t *testing.T) {
+	emb := &blockingContextEmbedder{block: 500 * time.Millisecond}
+	engine, err := mcpserver.NewEngine(t.TempDir(), emb)
+	if err != nil {
+		t.Fatalf("create engine: %v", err)
+	}
+	defer engine.Close()
+
+	ex := NewExecutor(engine).WithTimeout(25 * time.Millisecond)
+	start := time.Now()
+	r := ex.Execute(context.Background(), `return client.query({query: "mcp-engine"});`)
+	elapsed := time.Since(start)
+
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("client.query ignored sandbox timeout; elapsed=%s error=%q value=%v", elapsed, r.Error, r.Value)
+	}
+	if emb.contextCalls.Load() == 0 {
+		t.Fatal("expected EmbedContext to be used for cancellable code-mode query")
+	}
+	if emb.embedCalls.Load() != 0 {
+		t.Fatalf("non-cancellable Embed was called %d times", emb.embedCalls.Load())
+	}
+}
+
+type blockingContextEmbedder struct {
+	block        time.Duration
+	embedCalls   atomic.Int32
+	contextCalls atomic.Int32
+}
+
+func (b *blockingContextEmbedder) Embed(string) ([]float32, error) {
+	b.embedCalls.Add(1)
+	time.Sleep(b.block)
+	return []float32{1, 0, 0}, nil
+}
+
+func (b *blockingContextEmbedder) EmbedContext(ctx context.Context, _ string) ([]float32, error) {
+	b.contextCalls.Add(1)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (b *blockingContextEmbedder) EmbedBatch(texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{1, 0, 0}
+	}
+	return out, nil
+}
+
+func (b *blockingContextEmbedder) Model() string {
+	return "blocking-context-test"
+}
+
+func (b *blockingContextEmbedder) Dimension() int {
+	return 3
 }
 
 // ---------------------------------------------------------------------------

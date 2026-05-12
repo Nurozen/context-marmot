@@ -27,16 +27,16 @@ var truncatedMarkerNode = ClientNode{ID: "<TRUNCATED at 500 items>", Status: "tr
 // `client` API. Edges are resolved into the node-id-plus-relation pairs the
 // LLM most often wants to look at.
 type ClientNode struct {
-	ID        string       `json:"id"`
-	Type      string       `json:"type"`
-	Namespace string       `json:"namespace"`
-	Status    string       `json:"status"`
-	Summary   string       `json:"summary"`
-	Context   string       `json:"context,omitempty"` // free-form context block from the node's markdown body
+	ID        string        `json:"id"`
+	Type      string        `json:"type"`
+	Namespace string        `json:"namespace"`
+	Status    string        `json:"status"`
+	Summary   string        `json:"summary"`
+	Context   string        `json:"context,omitempty"` // free-form context block from the node's markdown body
 	Source    *ClientSource `json:"source,omitempty"`
-	Tags      []string     `json:"tags"`
-	Edges     []ClientEdge `json:"edges"`
-	EdgeCount int          `json:"edge_count"`
+	Tags      []string      `json:"tags"`
+	Edges     []ClientEdge  `json:"edges"`
+	EdgeCount int           `json:"edge_count"`
 }
 
 // ClientSource is the JS-friendly projection of a node's source reference.
@@ -97,14 +97,14 @@ func registerClient(rt *goja.Runtime, scope *runScope) error {
 			args["budget"] = toInt(v)
 		}
 		req := mcp.CallToolRequest{Params: mcp.CallToolParams{Name: "context_query", Arguments: args}}
-		result, err := engine.HandleContextQuery(context.Background(), req)
+		result, err := engine.HandleContextQuery(scope.ctxOrBackground(), req)
 		if err != nil {
 			panic(rt.NewGoError(err))
 		}
 		return rt.ToValue(map[string]any{
 			"xml":   extractText(result),
 			"error": isErr(result),
-			"nodes": searchEntryNodes(engine, q, 10),
+			"nodes": searchEntryNodes(scope.ctxOrBackground(), engine, q, 10),
 		})
 	})
 
@@ -114,7 +114,7 @@ func registerClient(rt *goja.Runtime, scope *runScope) error {
 		if q == "" {
 			panic(rt.NewTypeError("client.search: query is required"))
 		}
-		return rt.ToValue(searchEntryNodes(engine, q, 20))
+		return rt.ToValue(searchEntryNodes(scope.ctxOrBackground(), engine, q, 20))
 	})
 
 	// getNode — fetch a single node by ID. Accepts either ("ns", "id") or
@@ -413,13 +413,19 @@ func bfsNeighbors(g *graph.Graph, startID string, depth int) []ClientNode {
 // projecting the embedding store's top-K hits back into ClientNode shape.
 // When the embedder is unusable (no API key, mock with no matches), returns
 // an empty slice — the LLM gets the empty array and can pick another tool.
-func searchEntryNodes(engine *mcpserver.Engine, query string, limit int) []ClientNode {
+func searchEntryNodes(ctx context.Context, engine *mcpserver.Engine, query string, limit int) []ClientNode {
 	if engine == nil || engine.Embedder == nil || engine.EmbeddingStore == nil {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
 	g := engine.GetGraph()
-	vec, err := engine.Embedder.Embed(query)
+	vec, err := embedWithContext(ctx, engine.Embedder, query)
 	if err != nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
 		return nil
 	}
 	results, err := engine.EmbeddingStore.SearchActive(vec, limit, engine.Embedder.Model())
@@ -433,6 +439,29 @@ func searchEntryNodes(engine *mcpserver.Engine, query string, limit int) []Clien
 		}
 	}
 	return out
+}
+
+type contextEmbedder interface {
+	EmbedContext(context.Context, string) ([]float32, error)
+}
+
+func embedWithContext(ctx context.Context, embedder interface {
+	Embed(string) ([]float32, error)
+}, text string) ([]float32, error) {
+	if ce, ok := embedder.(contextEmbedder); ok {
+		return ce.EmbedContext(ctx, text)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	vec, err := embedder.Embed(text)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return vec, nil
 }
 
 // collectCapped iterates the graph's active nodes, filters by `keep`, and

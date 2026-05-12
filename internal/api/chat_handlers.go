@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,7 +71,9 @@ func (s *Server) handleSlashCommand(w http.ResponseWriter, req curator.ChatReque
 	}
 
 	// Collect potentially affected node IDs for undo snapshot.
-	affectedIDs := collectAffectedNodeIDs(cmd, req.SelectedNodes)
+	affectedIDs := s.collectAffectedNodeIDs(cmd, req.SelectedNodes)
+	unlock := s.lockNamespacesForIDs(affectedIDs, req.Namespace)
+	defer unlock()
 
 	// Snapshot nodes before mutation.
 	snapshots := curator.SnapshotNodes(s.engine.NodeStore, req.Namespace, affectedIDs)
@@ -91,7 +94,7 @@ func (s *Server) handleSlashCommand(w http.ResponseWriter, req curator.ChatReque
 
 	// If the command mutated nodes, push undo entry and notify SSE clients.
 	if result.Success && len(result.MutatedNodes) > 0 {
-		undoID := fmt.Sprintf("undo-%d", time.Now().UnixMilli())
+		undoID := fmt.Sprintf("undo-%d", time.Now().UnixNano())
 		entry := curator.UndoEntry{
 			ID:        undoID,
 			SessionID: req.SessionID,
@@ -108,16 +111,25 @@ func (s *Server) handleSlashCommand(w http.ResponseWriter, req curator.ChatReque
 
 // collectAffectedNodeIDs gathers all node IDs that might be mutated by a command.
 // This includes selected nodes plus any node IDs referenced in command args.
-func collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) []string {
+func (s *Server) collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) []string {
 	seen := make(map[string]bool)
 	var ids []string
-
-	// Selected nodes (used by tag, untag, type, delete).
-	for _, id := range selectedNodes {
+	add := func(id string) {
+		if id == "" {
+			return
+		}
+		if n, ok := s.engine.ResolveNodeID(id); ok {
+			id = n.ID
+		}
 		if !seen[id] {
 			seen[id] = true
 			ids = append(ids, id)
 		}
+	}
+
+	// Selected nodes (used by tag, untag, type, delete).
+	for _, id := range selectedNodes {
+		add(id)
 	}
 
 	// Command args that might be node IDs (used by link, unlink, merge).
@@ -126,24 +138,53 @@ func collectAffectedNodeIDs(cmd *curator.SlashCommand, selectedNodes []string) [
 		// /link <source> <relation> <target>
 		if len(cmd.Args) >= 3 {
 			for _, idx := range []int{0, 2} {
-				id := cmd.Args[idx]
-				if !seen[id] {
-					seen[id] = true
-					ids = append(ids, id)
-				}
+				add(cmd.Args[idx])
 			}
 		}
 	case "merge":
 		// /merge <A> <B>
 		for _, arg := range cmd.Args {
-			if !seen[arg] {
-				seen[arg] = true
-				ids = append(ids, arg)
+			add(arg)
+		}
+		if len(cmd.Args) >= 2 {
+			fromID := cmd.Args[1]
+			if n, ok := s.engine.ResolveNodeID(fromID); ok {
+				fromID = n.ID
+			}
+			for _, e := range s.engine.GetGraph().GetEdges(fromID, graph.Inbound) {
+				add(e.Target)
 			}
 		}
 	}
 
 	return ids
+}
+
+func (s *Server) lockNamespacesForIDs(ids []string, fallbackNamespace string) func() {
+	namespaces := make(map[string]struct{})
+	for _, id := range ids {
+		ns := fallbackNamespace
+		if n, ok := s.engine.ResolveNodeID(id); ok {
+			ns = n.Namespace
+		}
+		if ns == "" {
+			ns = "default"
+		}
+		namespaces[ns] = struct{}{}
+	}
+	ordered := make([]string, 0, len(namespaces))
+	for ns := range namespaces {
+		ordered = append(ordered, ns)
+	}
+	sort.Strings(ordered)
+	for _, ns := range ordered {
+		s.engine.NamespaceLock(ns).Lock()
+	}
+	return func() {
+		for i := len(ordered) - 1; i >= 0; i-- {
+			s.engine.NamespaceLock(ordered[i]).Unlock()
+		}
+	}
 }
 
 // PerPhaseChatTimeout caps how long a single LLM call may take. The
@@ -240,7 +281,7 @@ func (s *Server) handleLLMChat(w http.ResponseWriter, r *http.Request, req curat
 	// "node not found" or a typo'd method name), give the model one more
 	// chance with the error fed back as context. Capped at 1 retry so the
 	// worst case is 3 LLM calls per turn (phase 1 → retry → phase 2).
-	if execResult.Error != "" {
+	if execResult.Error != "" && len(execResult.Mutations) == 0 {
 		retryPrompt := phase1Prompt +
 			"\n\n## Your previous attempt failed\n" +
 			"You ran this code:\n```js\n" + code + "\n```\n" +

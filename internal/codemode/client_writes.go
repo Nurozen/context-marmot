@@ -3,6 +3,7 @@ package codemode
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -160,6 +161,7 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 	// code-mode doesn't depend on UI selection state.
 	cmd := &curator.SlashCommand{Name: op}
 	configure(cmd)
+	affectedIDs = s.canonicalizeCommandIDs(op, affectedIDs, cmd)
 
 	// Snapshot every node the mutation might modify. For /merge, the
 	// underlying handler rewrites edges on third-party nodes that point at
@@ -172,6 +174,10 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 		extra := inboundSourceIDs(s.engine.GetGraph(), fromID)
 		snapshotIDs = mergeIDLists(affectedIDs, extra)
 	}
+
+	unlock := s.lockNamespaces(snapshotIDs)
+	defer unlock()
+
 	snapshots := curator.SnapshotNodes(s.engine.NodeStore, s.write.Namespace, snapshotIDs)
 
 	result, err := curator.ExecuteCommand(s.ctxOrBackground(), cmd, s.engine, affectedIDs)
@@ -241,6 +247,64 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 		"message":  result.Message,
 		"affected": rec.Nodes,
 		"undo_id":  undoID,
+	}
+}
+
+func (s *runScope) canonicalizeCommandIDs(op string, affectedIDs []string, cmd *curator.SlashCommand) []string {
+	canonical := func(id string) string {
+		if n, ok := s.engine.ResolveNodeID(id); ok {
+			return n.ID
+		}
+		return id
+	}
+	out := make([]string, len(affectedIDs))
+	for i, id := range affectedIDs {
+		out[i] = canonical(id)
+	}
+	switch op {
+	case "link", "unlink":
+		if len(cmd.Args) >= 3 {
+			cmd.Args[0] = canonical(cmd.Args[0])
+			cmd.Args[2] = canonical(cmd.Args[2])
+			out = []string{cmd.Args[0], cmd.Args[2]}
+		}
+	case "merge":
+		if len(cmd.Args) >= 2 {
+			cmd.Args[0] = canonical(cmd.Args[0])
+			cmd.Args[1] = canonical(cmd.Args[1])
+			out = []string{cmd.Args[0], cmd.Args[1]}
+		}
+	}
+	return out
+}
+
+func (s *runScope) lockNamespaces(ids []string) func() {
+	if s.engine == nil {
+		return func() {}
+	}
+	namespaces := make(map[string]struct{})
+	for _, id := range ids {
+		ns := s.write.Namespace
+		if n, ok := s.engine.ResolveNodeID(id); ok {
+			ns = n.Namespace
+		}
+		if ns == "" {
+			ns = "default"
+		}
+		namespaces[ns] = struct{}{}
+	}
+	ordered := make([]string, 0, len(namespaces))
+	for ns := range namespaces {
+		ordered = append(ordered, ns)
+	}
+	sort.Strings(ordered)
+	for _, ns := range ordered {
+		s.engine.NamespaceLock(ns).Lock()
+	}
+	return func() {
+		for i := len(ordered) - 1; i >= 0; i-- {
+			s.engine.NamespaceLock(ordered[i]).Unlock()
+		}
 	}
 }
 

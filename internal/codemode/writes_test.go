@@ -13,6 +13,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
+	"github.com/nurozen/context-marmot/internal/namespace"
 )
 
 // ---------------------------------------------------------------------------
@@ -267,6 +268,109 @@ func TestExecute_Writes_TypeChange(t *testing.T) {
 	res := r.Value.(map[string]any)
 	if res["applied"] != true {
 		t.Errorf("expected applied=true, got %v", res)
+	}
+}
+
+func TestExecute_Writes_MultipleTags(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.cleanup()
+
+	ex := NewExecutor(rig.engine)
+	write := &WriteContext{
+		SessionID: "test-session",
+		Namespace: "default",
+		UndoStack: curator.NewUndoStack(),
+	}
+
+	r := ex.ExecuteWithWrites(context.Background(), `
+        return client.tag("auth/login", ["critical", "reviewed"]);
+    `, write)
+	if r.Error != "" {
+		t.Fatalf("unexpected error: %s", r.Error)
+	}
+	res := r.Value.(map[string]any)
+	if res["applied"] != true {
+		t.Fatalf("expected applied=true, got %v", res)
+	}
+	n, ok := rig.engine.ResolveNodeID("auth/login")
+	if !ok {
+		t.Fatal("auth/login not found")
+	}
+	tags := map[string]bool{}
+	for _, tag := range n.Tags {
+		tags[tag] = true
+	}
+	if !tags["critical"] || !tags["reviewed"] {
+		t.Fatalf("expected both tags to be applied, got %v", n.Tags)
+	}
+}
+
+func TestExecute_Writes_LinkRejectsStructuralCycle(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.cleanup()
+
+	rig.writeNode(t, "cycle", "a", "module", "A", [][2]string{{"cycle/b", "contains"}})
+	rig.writeNode(t, "cycle", "b", "module", "B", nil)
+	rig.reloadGraph(t)
+
+	ex := NewExecutor(rig.engine)
+	write := &WriteContext{
+		SessionID: "test-session",
+		Namespace: "default",
+		UndoStack: curator.NewUndoStack(),
+	}
+
+	r := ex.ExecuteWithWrites(context.Background(), `
+        return client.link("cycle/b", "contains", "cycle/a");
+    `, write)
+	if r.Error != "" {
+		t.Fatalf("unexpected error: %s", r.Error)
+	}
+	res := r.Value.(map[string]any)
+	if res["applied"] != false {
+		t.Fatalf("expected cycle link to be rejected, got %v", res)
+	}
+	if rig.engine.GetGraph().WouldCreateCycle("cycle/b", "cycle/a") != true {
+		t.Fatal("test fixture should still contain the original structural chain")
+	}
+	if got := write.UndoStack.Len("test-session"); got != 0 {
+		t.Fatalf("expected no undo entry for rejected link, got %d", got)
+	}
+}
+
+func TestExecute_Writes_UndoSnapshotUsesCanonicalID(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.cleanup()
+
+	rig.engine.WithNamespaceManager(&namespace.Manager{
+		Namespaces: map[string]*namespace.Namespace{
+			"auth": {Name: "auth"},
+		},
+	})
+
+	stack := curator.NewUndoStack()
+	ex := NewExecutor(rig.engine)
+	write := &WriteContext{
+		SessionID: "test-session",
+		Namespace: "default",
+		UndoStack: stack,
+	}
+
+	r := ex.ExecuteWithWrites(context.Background(), `
+        return client.tag("login", "canonical");
+    `, write)
+	if r.Error != "" {
+		t.Fatalf("unexpected error: %s", r.Error)
+	}
+	entry := stack.Pop("test-session")
+	if entry == nil {
+		t.Fatal("expected undo entry")
+	}
+	if len(entry.Snapshots) != 1 || entry.Snapshots[0].Node == nil {
+		t.Fatalf("expected one concrete snapshot, got %+v", entry.Snapshots)
+	}
+	if entry.Snapshots[0].Node.ID != "auth/login" {
+		t.Fatalf("expected canonical auth/login snapshot, got %q", entry.Snapshots[0].Node.ID)
 	}
 }
 
