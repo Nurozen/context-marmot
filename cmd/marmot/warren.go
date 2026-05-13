@@ -112,6 +112,8 @@ func warrenProject(args []string) int {
 	switch sub {
 	case "add":
 		return warrenProjectAdd(subArgs)
+	case "import":
+		return warrenProjectImport(subArgs)
 	case "list":
 		return warrenProjectList(subArgs)
 	case "remove":
@@ -126,7 +128,7 @@ func warrenProject(args []string) int {
 }
 
 func warrenProjectUsage() {
-	fmt.Fprintln(os.Stderr, "usage: marmot warren project <add|list|remove|rename> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: marmot warren project <add|import|list|remove|rename> [flags]")
 }
 
 func warrenProjectAdd(args []string) int {
@@ -224,6 +226,91 @@ func generatedProjectID(root, projectPath string) string {
 		return warren.GenerateProjectID(filepath.Base(clean))
 	}
 	return "project"
+}
+
+func warrenProjectImport(args []string) int {
+	args = reorderInterspersedFlags(args,
+		map[string]bool{"warren-dir": true, "root": true, "path": true, "vault-id": true, "id": true, "aliases": true, "alias": true},
+		map[string]bool{"generate-id": true, "include-heat": true, "no-obsidian": true},
+	)
+	fs := flag.NewFlagSet("warren project import", flag.ContinueOnError)
+	root := fs.String("warren-dir", ".", "Warren repository root")
+	rootCompat := fs.String("root", "", "Warren repository root")
+	path := fs.String("path", "", "destination .marmot path inside the Warren")
+	vaultID := fs.String("vault-id", "", "vault ID (default: source vault_id or project ID)")
+	idCompat := fs.String("id", "", "project ID")
+	aliasesCompat := fs.String("aliases", "", "comma-separated aliases")
+	generateID := fs.Bool("generate-id", false, "generate the project ID from existing metadata or source path")
+	includeHeat := fs.Bool("include-heat", false, "include _heat/ files")
+	noObsidian := fs.Bool("no-obsidian", false, "exclude .obsidian/ files")
+	var aliases repeatedStringFlag
+	fs.Var(&aliases, "alias", "project alias (repeatable)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if *rootCompat != "" {
+		*root = *rootCompat
+	}
+	*root = resolveWarrenRoot(*root)
+	aliases = append(aliases, splitCSV(*aliasesCompat)...)
+
+	var projectID, source string
+	switch fs.NArg() {
+	case 1:
+		source = fs.Arg(0)
+	case 2:
+		projectID = fs.Arg(0)
+		source = fs.Arg(1)
+	default:
+		fmt.Fprintln(os.Stderr, "usage: marmot warren project import <project-id> <source-.marmot> [--warren-dir .] [--path projects/<project-id>/.marmot] [--vault-id <id>] [--alias <name>]...")
+		return 1
+	}
+	if *idCompat != "" {
+		projectID = *idCompat
+	}
+	if *generateID {
+		projectID = ""
+	}
+	if projectID == "" {
+		if !*generateID {
+			fmt.Fprintln(os.Stderr, "usage: marmot warren project import <project-id> <source-.marmot> [--warren-dir .] [--path projects/<project-id>/.marmot] [--vault-id <id>] [--alias <name>]...")
+			return 1
+		}
+		projectID = generatedImportProjectID(source)
+	}
+	if *path == "" {
+		*path = filepath.ToSlash(filepath.Join("projects", projectID, ".marmot"))
+	}
+	project := warren.Project{
+		ProjectID: projectID,
+		Path:      filepath.ToSlash(*path),
+		Aliases:   aliases,
+	}
+	opts := warren.ImportOptions{
+		IncludeHeat: *includeHeat,
+		NoObsidian:  *noObsidian,
+		VaultID:     *vaultID,
+	}
+	if _, err := warren.ImportProject(*root, source, project, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "warren project import: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Imported project %q from %s -> %s\n", project.ProjectID, source, project.Path)
+	return 0
+}
+
+func generatedImportProjectID(source string) string {
+	if meta, _, err := warren.LoadProjectMetadata(source); err == nil && meta.ProjectID != "" {
+		return meta.ProjectID
+	}
+	clean := filepath.Clean(source)
+	if filepath.Base(clean) == ".marmot" {
+		return warren.GenerateProjectID(filepath.Base(filepath.Dir(clean)))
+	}
+	return warren.GenerateProjectID(filepath.Base(clean))
 }
 
 func warrenProjectList(args []string) int {

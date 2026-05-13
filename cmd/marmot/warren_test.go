@@ -183,6 +183,94 @@ func TestWarrenProjectAddInvalidVaultIDDoesNotRegisterProject(t *testing.T) {
 	}
 }
 
+func TestWarrenProjectImportCommand(t *testing.T) {
+	root := t.TempDir()
+	source := writeCLIImportSourceVault(t, filepath.Join(t.TempDir(), "api", ".marmot"), "source-vault")
+
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "import", "project-a", source, "--warren-dir", root, "--vault-id", "project-a-vault", "--alias", "api"}); code != 0 {
+		t.Fatalf("project import exit code = %d", code)
+	}
+	meta, _, err := warrenpkg.LoadProjectMetadata(filepath.Join(root, "projects", "project-a", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata: %v", err)
+	}
+	if meta.ProjectID != "project-a" || meta.WarrenID != "product-platform" || meta.VaultID != "project-a-vault" || strings.Join(meta.Aliases, ",") != "api" {
+		t.Fatalf("unexpected imported metadata: %+v", meta)
+	}
+	output, code := captureRun([]string{"warren", "project", "list", "--warren-dir", root, "--json"})
+	if code != 0 {
+		t.Fatalf("project list --json exit code = %d output=%s", code, output)
+	}
+	var listed []warrenpkg.Project
+	if err := json.Unmarshal([]byte(output), &listed); err != nil {
+		t.Fatalf("project list --json invalid JSON: %v\n%s", err, output)
+	}
+	if len(listed) != 1 || listed[0].ProjectID != "project-a" || !strings.Contains(output, "project_id") || strings.Contains(output, "ProjectID") {
+		t.Fatalf("unexpected project list JSON: %s", output)
+	}
+}
+
+func TestWarrenProjectImportGenerateID(t *testing.T) {
+	root := t.TempDir()
+	source := writeCLIImportSourceVault(t, filepath.Join(t.TempDir(), "billing", ".marmot"), "")
+	if err := warrenpkg.SaveProjectMetadata(source, &warrenpkg.ProjectMetadata{
+		ProjectID: "billing-svc",
+		WarrenID:  "product-platform",
+		VaultID:   "billing-vault",
+	}, ""); err != nil {
+		t.Fatalf("SaveProjectMetadata source: %v", err)
+	}
+
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "import", "--generate-id", source, "--warren-dir", root}); code != 0 {
+		t.Fatalf("project import --generate-id exit code = %d", code)
+	}
+	manifest, _, err := warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Projects) != 1 || manifest.Projects[0].ProjectID != "billing-svc" {
+		t.Fatalf("expected generated ID billing-svc, got %+v", manifest.Projects)
+	}
+}
+
+func TestWarrenProjectImportInvalidInputDoesNotRegisterProject(t *testing.T) {
+	root := t.TempDir()
+	source := writeCLIImportSourceVault(t, filepath.Join(t.TempDir(), "api", ".marmot"), "")
+
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "import", "api", source, "--warren-dir", root, "--vault-id", "../bad"}); code == 0 {
+		t.Fatal("expected invalid vault ID import to fail")
+	}
+	if code := run([]string{"warren", "project", "import", "--warren-dir", root}); code == 0 {
+		t.Fatal("expected missing args to fail")
+	}
+	if code := run([]string{"warren", "project", "import", "--help"}); code != 0 {
+		t.Fatalf("project import --help exit code = %d, want 0", code)
+	}
+	output, code := captureRun([]string{"warren", "project", "list", "--warren-dir", root, "--json"})
+	if code != 0 {
+		t.Fatalf("project list --json exit code = %d output=%s", code, output)
+	}
+	if strings.TrimSpace(output) != "[]" {
+		t.Fatalf("empty project list JSON = %q, want []", output)
+	}
+	manifest, _, err := warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Projects) != 0 {
+		t.Fatalf("invalid import should not register project, got %+v", manifest.Projects)
+	}
+}
+
 func TestWarrenAuthoringBridgeDoctorAndFormatCommands(t *testing.T) {
 	root := t.TempDir()
 
@@ -341,6 +429,31 @@ func testWarrenRoot(t *testing.T, warrenID string, projects ...string) string {
 		t.Fatalf("SaveManifest: %v", err)
 	}
 	return root
+}
+
+func writeCLIImportSourceVault(t *testing.T, marmotDir, vaultID string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(marmotDir, "service"), 0o755); err != nil {
+		t.Fatalf("mkdir service: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	vaultLine := ""
+	if vaultID != "" {
+		vaultLine = "vault_id: " + vaultID + "\n"
+	}
+	config := "---\nversion: \"1\"\n" + vaultLine + "namespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write _config.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "service", "api.md"), []byte("---\nid: service/api\ntype: function\nsummary: API\n---\nbody\n"), 0o644); err != nil {
+		t.Fatalf("write node: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, ".marmot-data", "embeddings.db"), []byte("db"), 0o644); err != nil {
+		t.Fatalf("write embeddings: %v", err)
+	}
+	return marmotDir
 }
 
 func captureRun(args []string) (string, int) {

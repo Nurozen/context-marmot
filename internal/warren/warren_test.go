@@ -172,6 +172,221 @@ func TestAuthoringInitAddRenameRemoveProjectPreservesBody(t *testing.T) {
 	}
 }
 
+func TestImportProjectCopiesFilteredVaultAndRegisters(t *testing.T) {
+	root := t.TempDir()
+	body := "# Product Warren\n\nKeep body text.\n"
+	manifest, err := Init(root, "product-platform")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		t.Fatalf("SaveManifest body: %v", err)
+	}
+	source := writeImportSourceVault(t, filepath.Join(t.TempDir(), "Project A", ".marmot"), "source-vault")
+	if err := os.WriteFile(filepath.Join(source, "_warren.md"), []byte("---\nproject_id: old-project\nwarren_id: old-warren\nvault_id: old-vault\n---\n"), 0o644); err != nil {
+		t.Fatalf("write old _warren.md: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(source, "service", "api.md"), filepath.Join(source, "service", "api-link.md")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if _, err := ImportProject(root, source, Project{ProjectID: "project-a", Aliases: []string{"api"}}, ImportOptions{}); err != nil {
+		t.Fatalf("ImportProject: %v", err)
+	}
+
+	manifest, gotBody, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if gotBody != body {
+		t.Fatalf("manifest body = %q, want %q", gotBody, body)
+	}
+	if len(manifest.Projects) != 1 || manifest.Projects[0].ProjectID != "project-a" || manifest.Projects[0].Path != "projects/project-a/.marmot" {
+		t.Fatalf("unexpected projects: %+v", manifest.Projects)
+	}
+	dest := filepath.Join(root, "projects", "project-a", ".marmot")
+	meta, _, err := LoadProjectMetadata(dest)
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata: %v", err)
+	}
+	if meta.ProjectID != "project-a" || meta.WarrenID != "product-platform" || meta.VaultID != "source-vault" || strings.Join(meta.Aliases, ",") != "api" {
+		t.Fatalf("unexpected imported metadata: %+v", meta)
+	}
+	mustExist(t, filepath.Join(dest, "service", "api.md"))
+	mustExist(t, filepath.Join(dest, ".marmot-data", "embeddings.db"))
+	mustExist(t, filepath.Join(dest, ".obsidian", "app.json"))
+	mustNotExist(t, filepath.Join(dest, ".marmot-data", ".env"))
+	mustNotExist(t, filepath.Join(dest, ".marmot-data", "embeddings.db-wal"))
+	mustNotExist(t, filepath.Join(dest, ".marmot-data", "embeddings.db-shm"))
+	mustNotExist(t, filepath.Join(dest, ".obsidian", "workspace.json"))
+	mustNotExist(t, filepath.Join(dest, ".obsidian", "workspace-mobile.json"))
+	mustNotExist(t, filepath.Join(dest, "_heat", "pair.md"))
+	mustNotExist(t, filepath.Join(dest, "service", "api-link.md"))
+	configBytes, err := os.ReadFile(filepath.Join(dest, "_config.md"))
+	if err != nil {
+		t.Fatalf("read imported _config.md: %v", err)
+	}
+	configText := string(configBytes)
+	if strings.Contains(configText, "openai_api_key") || strings.Contains(configText, "nested_secret") || strings.Contains(configText, "sk-test-secret") || strings.Contains(configText, "read_only: true") {
+		t.Fatalf("_config.md was not sanitized correctly:\n%s", configText)
+	}
+	if !strings.Contains(configText, "token_budget: 4096") || !strings.Contains(configText, "normal_field: kept") {
+		t.Fatalf("_config.md lost normal fields:\n%s", configText)
+	}
+}
+
+func TestImportProjectCopyOptions(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root, "product-platform"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	source := writeImportSourceVault(t, filepath.Join(t.TempDir(), "payments", ".marmot"), "")
+
+	if _, err := ImportProject(root, source, Project{ProjectID: "payments"}, ImportOptions{IncludeHeat: true, NoObsidian: true, VaultID: "payments-vault"}); err != nil {
+		t.Fatalf("ImportProject: %v", err)
+	}
+	dest := filepath.Join(root, "projects", "payments", ".marmot")
+	mustExist(t, filepath.Join(dest, "_heat", "pair.md"))
+	mustNotExist(t, filepath.Join(dest, ".obsidian", "app.json"))
+	meta, _, err := LoadProjectMetadata(dest)
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata: %v", err)
+	}
+	if meta.VaultID != "payments-vault" {
+		t.Fatalf("VaultID = %q, want payments-vault", meta.VaultID)
+	}
+}
+
+func TestImportProjectFailuresDoNotMutateManifest(t *testing.T) {
+	root := t.TempDir()
+	body := "body remains\n"
+	manifest, err := Init(root, "product-platform")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		t.Fatalf("SaveManifest body: %v", err)
+	}
+	source := writeImportSourceVault(t, filepath.Join(t.TempDir(), "api", ".marmot"), "")
+
+	cases := []struct {
+		name    string
+		source  string
+		project Project
+		opts    ImportOptions
+	}{
+		{name: "missing source", source: filepath.Join(t.TempDir(), "missing", ".marmot"), project: Project{ProjectID: "missing"}},
+		{name: "missing config", source: filepath.Join(t.TempDir(), ".marmot"), project: Project{ProjectID: "no-config"}},
+		{name: "unsafe project id", source: source, project: Project{ProjectID: "../bad"}},
+		{name: "unsafe destination", source: source, project: Project{ProjectID: "escape", Path: "../escape/.marmot"}},
+		{name: "destination under source", source: filepath.Join(root, "local", ".marmot"), project: Project{ProjectID: "nested", Path: "local/.marmot/projects/nested/.marmot"}},
+		{name: "invalid vault id", source: source, project: Project{ProjectID: "bad-vault"}, opts: ImportOptions{VaultID: "../bad"}},
+	}
+	if err := os.MkdirAll(cases[1].source, 0o755); err != nil {
+		t.Fatalf("mkdir missing config source: %v", err)
+	}
+	writeImportSourceVault(t, cases[4].source, "")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ImportProject(root, tc.source, tc.project, tc.opts); err == nil {
+				t.Fatal("expected ImportProject to fail")
+			}
+			manifest, gotBody, err := LoadManifest(root)
+			if err != nil {
+				t.Fatalf("LoadManifest after failure: %v", err)
+			}
+			if gotBody != body || len(manifest.Projects) != 0 {
+				t.Fatalf("manifest mutated after failure: body=%q projects=%+v", gotBody, manifest.Projects)
+			}
+		})
+	}
+
+	if err := os.MkdirAll(filepath.Join(root, "projects", "exists", ".marmot"), 0o755); err != nil {
+		t.Fatalf("mkdir existing destination: %v", err)
+	}
+	if _, err := ImportProject(root, source, Project{ProjectID: "exists"}, ImportOptions{}); err == nil {
+		t.Fatal("expected existing destination to fail")
+	}
+	if _, err := ImportProject(root, source, Project{ProjectID: "api"}, ImportOptions{}); err != nil {
+		t.Fatalf("ImportProject api: %v", err)
+	}
+	if _, err := ImportProject(root, source, Project{ProjectID: "api-copy", Path: "projects/api/.marmot"}, ImportOptions{}); err == nil {
+		t.Fatal("expected duplicate project path to fail")
+	}
+}
+
+func TestImportProjectRejectsSymlinkedDestinationParent(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root, "product-platform"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	source := writeImportSourceVault(t, filepath.Join(t.TempDir(), "api", ".marmot"), "")
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "projects")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if _, err := ImportProject(root, source, Project{ProjectID: "api"}, ImportOptions{}); err == nil {
+		t.Fatal("expected symlinked destination parent to fail")
+	}
+	mustNotExist(t, filepath.Join(outside, "api", ".marmot"))
+	manifest, _, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Projects) != 0 {
+		t.Fatalf("project should not be registered after symlink escape: %+v", manifest.Projects)
+	}
+}
+
+func TestImportProjectRejectsSymlinkedDestinationIntoSource(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root, "product-platform"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	source := writeImportSourceVault(t, filepath.Join(root, "local", ".marmot"), "")
+	if err := os.MkdirAll(filepath.Join(source, "projects"), 0o755); err != nil {
+		t.Fatalf("mkdir source projects: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(source, "projects"), filepath.Join(root, "projects")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if _, err := ImportProject(root, source, Project{ProjectID: "api"}, ImportOptions{}); err == nil {
+		t.Fatal("expected symlinked destination into source to fail")
+	}
+	mustNotExist(t, filepath.Join(source, "projects", "api", ".marmot"))
+	manifest, _, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Projects) != 0 {
+		t.Fatalf("project should not be registered after source overlap: %+v", manifest.Projects)
+	}
+}
+
+func TestImportProjectRejectsDuplicateManifestPathWithoutDestination(t *testing.T) {
+	root := t.TempDir()
+	if err := SaveManifest(root, &Manifest{
+		WarrenID: "product-platform",
+		Projects: []Project{{ProjectID: "api", Path: "projects/api/.marmot"}},
+	}, ""); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	source := writeImportSourceVault(t, filepath.Join(t.TempDir(), "api-copy", ".marmot"), "")
+
+	if _, err := ImportProject(root, source, Project{ProjectID: "api-copy", Path: "projects/api/.marmot"}, ImportOptions{}); err == nil {
+		t.Fatal("expected duplicate manifest path to fail")
+	}
+	manifest, _, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Projects) != 1 || manifest.Projects[0].ProjectID != "api" {
+		t.Fatalf("manifest should remain unchanged, got %+v", manifest.Projects)
+	}
+}
+
 func TestGenerateProjectID(t *testing.T) {
 	tests := map[string]string{
 		" Product Platform API ": "product-platform-api",
@@ -501,6 +716,65 @@ func writeWarrenFixture(t *testing.T, root, warrenID string, projects ...string)
 	}
 	if err := SaveManifest(root, manifest, ""); err != nil {
 		t.Fatalf("SaveManifest fixture: %v", err)
+	}
+}
+
+func writeImportSourceVault(t *testing.T, marmotDir, vaultID string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(marmotDir, "service"), 0o755); err != nil {
+		t.Fatalf("mkdir service: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".obsidian"), 0o755); err != nil {
+		t.Fatalf("mkdir obsidian: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(marmotDir, "_heat"), 0o755); err != nil {
+		t.Fatalf("mkdir heat: %v", err)
+	}
+	vaultLine := ""
+	if vaultID != "" {
+		vaultLine = "vault_id: " + vaultID + "\n"
+	}
+	config := "---\nversion: \"1\"\n" + vaultLine + "namespace: default\nembedding_provider: mock\nembedding_model: test-model\ntoken_budget: 4096\nnormal_field: kept\nopenai_api_key: sk-test-secret-value-123456\nother_value: sk-test-secret-value-123456\nproviders:\n  openai:\n    api_key: sk-test-secret-value-123456\n    normal_nested: kept\nclassifier:\n  nested_secret: hidden\nvalues:\n  - sk-test-secret-value-123456\n  - safe-value\n---\n# Config body\n"
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(config), 0o644); err != nil {
+		t.Fatalf("write _config.md: %v", err)
+	}
+	files := map[string]string{
+		"service/api.md":                  "---\nid: service/api\ntype: function\nsummary: API\n---\nbody\n",
+		".marmot-data/embeddings.db":      "db",
+		".marmot-data/.env":               "OPENAI_API_KEY=secret\n",
+		".marmot-data/embeddings.db-wal":  "wal",
+		".marmot-data/embeddings.db-shm":  "shm",
+		".obsidian/app.json":              "{}\n",
+		".obsidian/workspace.json":        "{}\n",
+		".obsidian/workspace-mobile.json": "{}\n",
+		"_heat/pair.md":                   "hot\n",
+	}
+	for rel, content := range files {
+		path := filepath.Join(marmotDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	return marmotDir
+}
+
+func mustExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+}
+
+func mustNotExist(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be absent, stat err=%v", path, err)
 	}
 }
 

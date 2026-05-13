@@ -104,6 +104,41 @@ marmot warren init --id product-platform
 Add projects explicitly:
 
 ```bash
+marmot warren project import project-a ../project-a/.marmot \
+  --vault-id project-a-vault \
+  --alias payments-api
+```
+
+Use `project import` when a project already has a local `.marmot/` vault and
+you want to copy it into the Warren under `projects/<project-id>/.marmot`.
+Import copies regular files only, skips symlinks and device/socket files, strips
+obvious inline secret fields or API-key-looking values from `_config.md`, and
+always excludes transient or sensitive files:
+
+- `.marmot-data/.env`
+- `.marmot-data/embeddings.db-wal`
+- `.marmot-data/embeddings.db-shm`
+- `.obsidian/workspace.json`
+- `.obsidian/workspace-mobile.json`
+
+`_heat/` is excluded by default; pass `--include-heat` to keep it. Harmless
+`.obsidian/` configuration is copied by default; pass `--no-obsidian` to omit
+the whole directory. Import rewrites the copied project `.marmot/_warren.md` to
+the target Warren/project identity, but it does not make the project read-only,
+create package metadata, register the Warren in your workspace, mount projects,
+commit changes, or push to git.
+
+If you want Marmot to choose the import project ID from the source
+`.marmot/_warren.md` metadata or the source folder name, use:
+
+```bash
+marmot warren project import --generate-id ../payments/.marmot
+```
+
+Use `project add` when the vault is already placed in the Warren and you only
+need to register it in the manifest:
+
+```bash
 marmot warren project add project-a \
   --path projects/project-a/.marmot \
   --vault-id project-a-vault \

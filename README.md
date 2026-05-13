@@ -160,7 +160,7 @@ graph into the local vault.
 ```bash
 # From the Warren repository
 marmot warren init --id product-platform
-marmot warren project add project-a --path projects/project-a/.marmot --vault-id project-a-vault
+marmot warren project import project-a ../project-a/.marmot --vault-id project-a-vault
 marmot warren bridge add project-a project-b --relations calls,reads,references
 marmot warren doctor
 
@@ -210,7 +210,8 @@ Once connected, agents get five tools:
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
 | `marmot bridge <ns-a> <ns-b> [--relations ...]` | Create bridge manifest between two namespaces |
 | `marmot warren init --id <id> [--warren-dir .]` | Create a Warren repository manifest |
-| `marmot warren project add <project-id> --path <project-.marmot> [--vault-id <id>]` | Add a project vault to a Warren |
+| `marmot warren project import <project-id> <source-.marmot> [--vault-id <id>]` | Copy an existing project vault into a Warren |
+| `marmot warren project add <project-id> --path <project-.marmot> [--vault-id <id>]` | Register an already placed project vault in a Warren |
 | `marmot warren project list/remove/rename ...` | List or maintain Warren project entries |
 | `marmot warren bridge add/list/remove ...` | Maintain Warren-owned project bridge policy |
 | `marmot warren doctor [--json]` | Validate a Warren repository |

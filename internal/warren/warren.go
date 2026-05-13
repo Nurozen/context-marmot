@@ -113,6 +113,13 @@ type DoctorIssue struct {
 	Path      string `json:"path,omitempty"`
 }
 
+// ImportOptions controls how an existing local .marmot vault is copied into a Warren.
+type ImportOptions struct {
+	IncludeHeat bool
+	NoObsidian  bool
+	VaultID     string
+}
+
 // Init creates or normalizes the root Warren manifest.
 func Init(root, warrenID string) (*Manifest, error) {
 	if warrenID == "" {
@@ -172,11 +179,142 @@ func AddProject(root string, project Project) (*Manifest, error) {
 	return manifest, nil
 }
 
+// ImportProject copies a local .marmot vault into the Warren and registers it.
+func ImportProject(root, sourceMarmotDir string, project Project, opts ImportOptions) (*Manifest, error) {
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	source, err := filepath.Abs(sourceMarmotDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source .marmot path: %w", err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return nil, fmt.Errorf("stat source .marmot: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("source %q is not a directory", sourceMarmotDir)
+	}
+	sourceReal, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		return nil, fmt.Errorf("resolve source .marmot symlinks: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "_config.md")); err != nil {
+		return nil, fmt.Errorf("source .marmot is missing _config.md: %w", err)
+	}
+	project.ProjectID = strings.TrimSpace(project.ProjectID)
+	if project.ProjectID == "" {
+		project.ProjectID = generateProjectIDFromPath(source)
+	}
+	if project.Path == "" {
+		project.Path = defaultProjectPath(project.ProjectID)
+	}
+	project.Path = filepath.ToSlash(filepath.Clean(project.Path))
+	project.Aliases = uniqueSorted(project.Aliases)
+	if err := ValidateProjectID(project.ProjectID); err != nil {
+		return nil, err
+	}
+	for _, existing := range manifest.Projects {
+		if existing.ProjectID == project.ProjectID {
+			return nil, fmt.Errorf("project %q already exists", project.ProjectID)
+		}
+		if filepath.ToSlash(filepath.Clean(existing.Path)) == project.Path {
+			return nil, fmt.Errorf("project path %q is already registered to project %q", project.Path, existing.ProjectID)
+		}
+	}
+	targetRel, err := validateProjectPath(root, project.Path)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.IsAbs(targetRel) {
+		return nil, fmt.Errorf("import destination path %q must stay inside the Warren root", project.Path)
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Warren root: %w", err)
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Warren root symlinks: %w", err)
+	}
+	target := filepath.Join(rootAbs, targetRel)
+	if samePath(source, target) {
+		return nil, fmt.Errorf("source and destination must differ")
+	}
+	if pathContains(sourceReal, target) || pathContains(target, sourceReal) {
+		return nil, fmt.Errorf("source and destination paths must not overlap")
+	}
+	if _, err := os.Lstat(target); err == nil {
+		return nil, fmt.Errorf("destination %q already exists", project.Path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat destination: %w", err)
+	}
+	vaultID := strings.TrimSpace(opts.VaultID)
+	if vaultID == "" {
+		vaultID = sourceVaultID(source)
+	}
+	if vaultID == "" {
+		vaultID = project.ProjectID
+	}
+	if err := ValidateProjectID(vaultID); err != nil {
+		return nil, err
+	}
+	parent := filepath.Dir(target)
+	parentReal, err := ensureImportParent(rootAbs, rootReal, parent)
+	if err != nil {
+		return nil, err
+	}
+	targetReal := filepath.Join(parentReal, filepath.Base(target))
+	if pathContains(sourceReal, targetReal) || pathContains(targetReal, sourceReal) {
+		return nil, fmt.Errorf("source and destination paths must not overlap")
+	}
+	tmp, err := os.MkdirTemp(parent, ".warren-import-*.tmp")
+	if err != nil {
+		return nil, fmt.Errorf("create import temp dir: %w", err)
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = os.RemoveAll(tmp)
+		}
+	}()
+	if err := copyMarmotVault(source, tmp, opts); err != nil {
+		return nil, err
+	}
+	meta := &ProjectMetadata{
+		ProjectID: project.ProjectID,
+		WarrenID:  manifest.WarrenID,
+		VaultID:   vaultID,
+		Aliases:   project.Aliases,
+	}
+	if err := SaveProjectMetadata(tmp, meta, ""); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		return nil, fmt.Errorf("commit imported project: %w", err)
+	}
+	success = true
+	manifest.Projects = append(manifest.Projects, project)
+	if err := SaveManifest(rootAbs, manifest, body); err != nil {
+		_ = os.RemoveAll(target)
+		return nil, err
+	}
+	saved, _, err := LoadManifest(rootAbs)
+	if err != nil {
+		return nil, err
+	}
+	return saved, nil
+}
+
 // ListProjects returns normalized Warren projects.
 func ListProjects(root string) ([]Project, error) {
 	manifest, _, err := LoadManifest(root)
 	if err != nil {
 		return nil, err
+	}
+	if len(manifest.Projects) == 0 {
+		return []Project{}, nil
 	}
 	return append([]Project(nil), manifest.Projects...), nil
 }
@@ -302,6 +440,9 @@ func ListBridges(root string) ([]Bridge, error) {
 	manifest, _, err := LoadManifest(root)
 	if err != nil {
 		return nil, err
+	}
+	if len(manifest.Bridges) == 0 {
+		return []Bridge{}, nil
 	}
 	return append([]Bridge(nil), manifest.Bridges...), nil
 }
@@ -1185,6 +1326,308 @@ func copyDir(source, target string) error {
 		_, err = io.Copy(dst, src)
 		return err
 	})
+}
+
+var importAlwaysExcluded = map[string]bool{
+	".marmot-data/.env":               true,
+	".marmot-data/embeddings.db-wal":  true,
+	".marmot-data/embeddings.db-shm":  true,
+	".obsidian/workspace.json":        true,
+	".obsidian/workspace-mobile.json": true,
+}
+
+func copyMarmotVault(source, target string, opts ImportOptions) error {
+	root := filepath.Clean(source)
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		if d.IsDir() {
+			if shouldSkipImportDir(relSlash, opts) {
+				return filepath.SkipDir
+			}
+			return os.MkdirAll(filepath.Join(target, rel), 0o755)
+		}
+		if shouldSkipImportFile(relSlash, opts) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		dest := filepath.Join(target, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		if relSlash == "_config.md" {
+			data, err := sanitizedConfigBytes(path)
+			if err != nil {
+				return fmt.Errorf("sanitize _config.md: %w", err)
+			}
+			return os.WriteFile(dest, data, info.Mode().Perm())
+		}
+		return copyRegularFile(path, dest, info.Mode().Perm())
+	})
+}
+
+func shouldSkipImportDir(relSlash string, opts ImportOptions) bool {
+	if opts.NoObsidian && (relSlash == ".obsidian" || strings.HasPrefix(relSlash, ".obsidian/")) {
+		return true
+	}
+	if !opts.IncludeHeat && (relSlash == "_heat" || strings.HasPrefix(relSlash, "_heat/")) {
+		return true
+	}
+	return false
+}
+
+func shouldSkipImportFile(relSlash string, opts ImportOptions) bool {
+	if importAlwaysExcluded[relSlash] {
+		return true
+	}
+	if opts.NoObsidian && strings.HasPrefix(relSlash, ".obsidian/") {
+		return true
+	}
+	if !opts.IncludeHeat && strings.HasPrefix(relSlash, "_heat/") {
+		return true
+	}
+	return false
+}
+
+func copyRegularFile(source, target string, mode os.FileMode) error {
+	src, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+	_, err = io.Copy(dst, src)
+	return err
+}
+
+func sanitizedConfigBytes(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{}
+	body, err := parseMarkdownYAML(data, &out)
+	if err != nil {
+		return sanitizePlainConfig(data), nil
+	}
+	out = sanitizeConfigMap(out)
+	yamlBytes, err := yaml.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	var buf strings.Builder
+	buf.WriteString("---\n")
+	buf.Write(yamlBytes)
+	buf.WriteString("---\n")
+	if body != "" {
+		buf.WriteString(body)
+	}
+	return []byte(buf.String()), nil
+}
+
+func sanitizePlainConfig(data []byte) []byte {
+	lines := strings.Split(string(data), "\n")
+	out := lines[:0]
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		value := strings.TrimSpace(line)
+		if _, after, ok := strings.Cut(line, ":"); ok {
+			value = strings.TrimSpace(after)
+		}
+		if isSecretConfigKey(lower) || looksLikeAPIKey(value) {
+			continue
+		}
+		out = append(out, line)
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
+func sanitizeConfigMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		if isSecretConfigKey(key) {
+			continue
+		}
+		if sanitized, ok := sanitizeConfigValue(value); ok {
+			out[key] = sanitized
+		}
+	}
+	return out
+}
+
+func sanitizeConfigValue(value any) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		if looksLikeAPIKey(strings.TrimSpace(typed)) {
+			return nil, false
+		}
+		return typed, true
+	case map[string]any:
+		return sanitizeConfigMap(typed), true
+	case map[any]any:
+		out := make(map[string]any, len(typed))
+		for rawKey, rawValue := range typed {
+			key, ok := rawKey.(string)
+			if !ok {
+				continue
+			}
+			if isSecretConfigKey(key) {
+				continue
+			}
+			if sanitized, ok := sanitizeConfigValue(rawValue); ok {
+				out[key] = sanitized
+			}
+		}
+		return out, true
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			if sanitized, ok := sanitizeConfigValue(item); ok {
+				out = append(out, sanitized)
+			}
+		}
+		return out, true
+	default:
+		return value, true
+	}
+}
+
+func sourceVaultID(marmotDir string) string {
+	data, err := os.ReadFile(filepath.Join(marmotDir, "_config.md"))
+	if err != nil {
+		return ""
+	}
+	out := map[string]any{}
+	if _, err := parseMarkdownYAML(data, &out); err != nil {
+		return ""
+	}
+	if value, ok := out["vault_id"].(string); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func isSecretConfigKey(key string) bool {
+	lower := strings.ToLower(key)
+	switch lower {
+	case "openai_api_key", "anthropic_api_key", "voyage_api_key":
+		return true
+	}
+	if strings.Contains(lower, "api_key") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") {
+		return true
+	}
+	return strings.Contains(lower, "token") && !strings.Contains(lower, "budget")
+}
+
+func looksLikeAPIKey(value string) bool {
+	if len(value) < 20 {
+		return false
+	}
+	for _, prefix := range []string{"sk-", "sk_", "pk-", "pk_", "Bearer ", "voyage-"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func samePath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	return absA == absB
+}
+
+func pathContains(parent, child string) bool {
+	parentAbs, err := filepath.Abs(parent)
+	if err != nil {
+		parentAbs = filepath.Clean(parent)
+	}
+	childAbs, err := filepath.Abs(child)
+	if err != nil {
+		childAbs = filepath.Clean(child)
+	}
+	parentAbs = filepath.Clean(parentAbs)
+	childAbs = filepath.Clean(childAbs)
+	if parentAbs == childAbs {
+		return true
+	}
+	rel, err := filepath.Rel(parentAbs, childAbs)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(filepath.ToSlash(rel), "../")
+}
+
+func ensureImportParent(rootAbs, rootReal, parent string) (string, error) {
+	if !pathContains(rootAbs, parent) {
+		return "", fmt.Errorf("destination parent %q escapes Warren root", parent)
+	}
+	rel, err := filepath.Rel(rootAbs, parent)
+	if err != nil {
+		return "", fmt.Errorf("resolve destination parent: %w", err)
+	}
+	current := rootAbs
+	if rel != "." {
+		for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+			if part == "" || part == "." {
+				continue
+			}
+			current = filepath.Join(current, filepath.FromSlash(part))
+			info, err := os.Lstat(current)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return "", fmt.Errorf("stat destination parent: %w", err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				real, err := filepath.EvalSymlinks(current)
+				if err != nil {
+					return "", fmt.Errorf("resolve destination parent symlink: %w", err)
+				}
+				if !pathContains(rootReal, real) {
+					return "", fmt.Errorf("destination parent %q escapes Warren root through symlink", current)
+				}
+				continue
+			}
+			if !info.IsDir() {
+				return "", fmt.Errorf("destination parent %q is not a directory", current)
+			}
+		}
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", fmt.Errorf("create destination parent: %w", err)
+	}
+	parentReal, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", fmt.Errorf("resolve destination parent symlinks: %w", err)
+	}
+	if !pathContains(rootReal, parentReal) {
+		return "", fmt.Errorf("destination parent %q escapes Warren root through symlink", parent)
+	}
+	return parentReal, nil
 }
 
 func dirExists(path string) bool {
