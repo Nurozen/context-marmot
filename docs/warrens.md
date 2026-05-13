@@ -1,0 +1,222 @@
+# Warrens
+
+A Warren is a git-backed collection of project Marmot vaults. It is useful when
+several repositories belong to the same product, platform, or organization and
+agents need cross-project context without cloning every codebase into one
+repository.
+
+Warrens are mounted explicitly. Registered projects stay dormant until activated
+with `marmot warren mount`, so large company graphs do not become queryable by
+accident.
+
+## Repository layout
+
+A Warren has a top-level `_warren.md` manifest and project vaults below
+`projects/<project-id>/.marmot/`.
+
+```text
+product-warren/
+  _warren.md
+  projects/
+    project-a/
+      .marmot/
+        _config.md
+        _warren.md
+        ...
+    project-b/
+      .marmot/
+        _config.md
+        _warren.md
+        ...
+```
+
+Example top-level manifest:
+
+```yaml
+---
+warren_id: product-platform
+version: 1
+projects:
+  - project_id: project-a
+    path: projects/project-a/.marmot
+  - project_id: project-b
+    path: projects/project-b/.marmot
+bridges:
+  - source: project-a
+    target: project-b
+    relations: [calls, reads, references, cross_project]
+---
+
+# Product Platform Warren
+```
+
+Each project has its own `.marmot/_warren.md` identity file:
+
+```yaml
+---
+project_id: project-a
+warren_id: product-platform
+vault_id: project-a-vault
+aliases:
+  - payments-api
+---
+```
+
+`vault_id` is the ID used in qualified node references such as
+`@project-a-vault/service/api`.
+
+## Workspace layout
+
+Warren state is local to the workspace and stored in the workspace `.marmot`
+directory:
+
+```text
+virtual-mono/
+  .marmot/
+    _config.md
+    _warren.md
+    .marmot-data/
+      warrens/
+        product-platform/
+          projects/
+            project-b/
+              .marmot/
+                ...
+  project-a/
+  project-b/
+```
+
+The workspace `_warren.md` records registered Warren paths, active projects,
+editable projects, and whether materialized caches are enabled. This is local
+workspace configuration; keep the Warren repo itself in git.
+
+## Commands
+
+Register a Warren in the current workspace:
+
+```bash
+marmot warren register product-platform /path/to/product-warren
+```
+
+List registered Warrens:
+
+```bash
+marmot warren list
+marmot warren list --json
+```
+
+Activate selected projects:
+
+```bash
+marmot warren mount --warren product-platform project-a project-b
+```
+
+Show project state:
+
+```bash
+marmot warren status --warren product-platform
+marmot warren status --warren product-platform --json
+```
+
+Enable writes for one project:
+
+```bash
+marmot warren edit --warren product-platform project-a
+```
+
+Disable writes again:
+
+```bash
+marmot warren edit --off --warren product-platform project-a
+```
+
+Materialize selected project graphs into the local `.marmot-data/` cache:
+
+```bash
+marmot warren burrow --materialize --warren product-platform project-b
+```
+
+`burrow --materialize` is useful when you want offline graph access or want a
+stable local snapshot while the Warren git checkout changes elsewhere.
+
+## Read and write policy
+
+Mounted Warren projects are read-only by default. They can be queried and viewed,
+but Marmot will reject writes to mounted nodes unless that project has been made
+editable in the local workspace:
+
+```bash
+marmot warren edit --warren product-platform project-a
+```
+
+Editability is per project, not per Warren. This supports virtual monorepo
+workflows where an agent can reference many services but should only update graph
+knowledge for repositories the user is actively editing.
+
+When a Warren node is editable, API/UI updates write back to that project's own
+`.marmot/` vault and embedding database. Read-only Warren nodes show provenance
+in the detail panel and the save button is disabled.
+
+MCP `context_write` does not accept `@vault-id/...` node IDs directly. Use the
+Warren-aware API/UI path for editable mounted nodes, or write local nodes as
+usual.
+
+## Query behavior
+
+Active Warren projects are included in MCP and CLI graph queries. Results from
+mounted projects use qualified node IDs:
+
+```xml
+<node id="@project-a-vault/service/api" ...>
+```
+
+Plain local graph views stay local:
+
+- `GET /api/graph/default` returns only local `default` nodes.
+- `GET /api/search?q=...&ns=default` returns only local `default` results.
+- `GET /api/warren/product-platform/graph` returns active mounted Warren nodes.
+- `GET /api/search?q=...&ns=_warren/product-platform` returns Warren-scoped results.
+
+The web UI exposes active Warrens in the graph selector as `Warren <id>`.
+
+## Embeddings and materialization
+
+Each mounted project uses its own embedding database from that project's
+`.marmot/.marmot-data/embeddings.db`. The local workspace does not merge all
+Warren embeddings into one global database.
+
+When a project is materialized, Marmot reads that project's graph from:
+
+```text
+.marmot/.marmot-data/warrens/<warren-id>/projects/<project-id>/.marmot/
+```
+
+If no materialized cache exists, Marmot reads the project directly from the
+registered Warren checkout.
+
+## Provenance
+
+Warren API and UI responses include provenance for mounted nodes:
+
+```json
+{
+  "source": "warren_mount",
+  "warren_id": "product-platform",
+  "project_id": "project-a",
+  "vault_id": "project-a-vault",
+  "qualified_id": "@project-a-vault/service/api",
+  "editable": true
+}
+```
+
+This lets users and agents distinguish local nodes from mounted Warren nodes and
+see whether a selected node can be edited from the current workspace.
+
+## Warrens vs bridges
+
+Use a bridge when two vaults or namespaces need an explicit relationship.
+
+Use a Warren when you want a curated set of many project graphs that can be
+mounted on demand. Warrens can still contain bridge intent in their manifest, but
+the primary behavior is mounting project vaults into the active query/UI context.
+

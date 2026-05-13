@@ -1,5 +1,9 @@
 # Bridges
 
+For many-project workflows, also see [Warrens](warrens.md). A bridge connects
+specific namespaces or vaults. A Warren registers a curated set of project vaults
+that can be mounted on demand.
+
 Bridges allow edges and queries to cross namespace or vault boundaries. Two types are supported.
 
 ## Namespace bridges (same vault)

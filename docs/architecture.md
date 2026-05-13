@@ -93,6 +93,7 @@ consumers are swappable frontends that read it in different ways.
 | **Custom UI** | Hits HTTP API served by `marmot ui`. Gets structured JSON. | When you need a bespoke frontend or integration surface. |
 | **Agents (MCP)** | Calls `context_query` / `context_write` / `context_verify`. Gets XML-structured compacted output. | Primary programmatic interface. |
 | **CLI** | Runs `marmot` commands. Gets text output. | Scripting, CI/CD, manual operations. |
+| **Warren mount** | Registers external project `.marmot/` vaults from a git-backed Warren and routes active projects through the same query engine. | Multi-repo and virtual-monorepo context without copying all project graphs into one local vault. |
 
 The core engine never depends on any consumer. Obsidian compatibility is a property
 of the file format, not an integration.
@@ -361,6 +362,45 @@ in Obsidian or through the built-in web UI (`marmot ui`).
 - `.obsidian/` is auto-generated and gitignored. Users can customize their own Obsidian settings without affecting the project.
 - Superseded nodes remain on disk with `status: superseded` in frontmatter. Visible in Obsidian, excluded from queries by default.
 
+## Warren Mounts
+
+Warrens are git-backed collections of project vaults. They sit beside ordinary
+single-vault and cross-vault bridge workflows:
+
+- A Warren repository has a top-level `_warren.md` manifest.
+- Each project lives under `projects/<project-id>/.marmot/`.
+- Each project has its own `.marmot/_warren.md` identity file with `project_id`,
+  `warren_id`, and `vault_id`.
+- Local workspace mount state lives in `.marmot/_warren.md`.
+- Materialized snapshots live under
+  `.marmot/.marmot-data/warrens/<warren-id>/projects/<project-id>/.marmot/`.
+
+Only active mounts are added to the engine. Registered but unmounted projects are
+dormant and do not participate in query or UI results. Each active project keeps
+using its own embedding database; the local vault does not merge all Warren
+embeddings into one store.
+
+Warren nodes are exposed with cross-vault-style qualified IDs:
+
+```text
+@project-a-vault/service/api
+```
+
+The read/write model is local-workspace controlled. Mounted projects are
+read-only by default, and `marmot warren edit --warren <id> <project-id>` enables
+writes for exactly one project in the current workspace. Editable Warren writes
+go to that project's mounted or materialized `.marmot/` directory and refresh its
+embedding store.
+
+The REST/UI layer keeps local and Warren scopes separate:
+
+- `/api/graph/default` and `/api/search?...&ns=default` stay local-scoped.
+- `/api/warren/<id>/graph` and `/api/search?...&ns=_warren/<id>` are
+  Warren-scoped.
+- The UI exposes active Warrens as separate graph selector entries.
+
+See [Warrens](warrens.md) for user-facing setup and command examples.
+
 ## Component Responsibilities
 
 | Component | Responsibility |
@@ -375,6 +415,7 @@ in Obsidian or through the built-in web UI (`marmot ui`).
 | **Graph Manager** | Core graph operations: add/remove/update/soft-delete nodes and edges. Maintains in-memory adjacency list. Enforces structural acyclicity (behavioral cycles allowed). Atomic file writes. |
 | **Verifier** | Structural acyclicity enforcement (topological sort on structural edges only). Content hash computation. Staleness detection via source hash comparison. Behavioral edges skip cycle checks. |
 | **Namespace Manager** | Project isolation via `internal/namespace/`. Auto-discovers namespace directories at startup. Parses `_namespace.md` per-namespace config and `_bridges/*.md` relation whitelists. Resolves qualified cross-namespace references (`Manager.ParseQualifiedID`). Validates cross-namespace edges against bridge manifests on `context_write`. Auto-discovers cross-namespace edges by scanning node files. |
+| **Warren Manager** | Git-backed multi-project mount state via `internal/warren/`. Loads top-level Warren manifests, project identity files, local workspace activation/editability state, and optional materialized caches. Active mounts are registered as vault routes so MCP/CLI/UI queries can resolve `@vault-id/...` nodes. |
 | **Update Engine** | Hash-based change detection (`internal/update/`). Compares stored source hashes to current file state via `verify.ComputeSourceHash`. Propagates staleness through reverse edges (BFS with configurable depth). Reindexes affected nodes (re-reads source, updates hash, re-embeds). File watcher mode via fsnotify with debounced event batching. Batch update mode for on-demand scans. Triggers summary regeneration via OnChange callback. |
 | **Summary Engine** | Async generation of `_summary.md` per namespace (`internal/summary/`). Uses LLM `Summarizer` interface to synthesize from active nodes. Background scheduler with configurable interval (default 30min) and delta threshold (20% node count change). Triggered by `context_write` and `context_delete`. Runs outside the critical path — never blocks read/write operations. Degrades gracefully when LLM unavailable (existing summaries go stale, not broken). |
 | **Node Store** | File I/O layer. Reads/writes markdown node files. Parses YAML frontmatter (including temporal fields) + wikilinks + markdown sections. Atomic writes via temp-file-then-rename. |

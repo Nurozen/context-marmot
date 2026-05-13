@@ -53,6 +53,7 @@ Nodes are Obsidian-compatible markdown files with YAML frontmatter and `[[wikili
 - **MCP server** --- 5 tools over stdio (`context_query`, `context_write`, `context_tag`, `context_verify`, `context_delete`)
 - **CRUD classifier** --- auto-classifies writes as ADD/UPDATE/SUPERSEDE/NOOP using embeddings + optional LLM
 - **Multi-namespace** --- project isolation with bridge manifests for cross-namespace and cross-vault edges
+- **Warrens** --- mount selected project graphs from a shared git-backed Warren for multi-repo context
 - **Domain tags** --- many-to-many semantic categorization; bulk-tag via search query; graph clustering by tag
 - **Static analysis indexer** --- parses Go (full AST), TypeScript, and 30+ languages into graph nodes with typed edges
 - **Graph visualization** --- embedded D3 web UI with filters, search, heat overlay, folder grouping, and bridge arcs
@@ -150,6 +151,32 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
+### Mount a Warren for multi-project context
+
+A Warren is a git-backed collection of project `.marmot/` vaults. It lets a local
+workspace query selected upstream project graphs without copying every project
+graph into the local vault.
+
+```bash
+# From your local project or virtual monorepo
+marmot warren register product-platform /path/to/product-warren
+marmot warren mount --warren product-platform project-a project-b
+
+# Make one mounted project editable in this workspace
+marmot warren edit --warren product-platform project-a
+
+# Cache selected project graphs locally for offline use
+marmot warren burrow --materialize --warren product-platform project-b
+```
+
+Mounted projects are dormant until `marmot warren mount` activates them. Active
+Warren projects are included in MCP/CLI graph queries and appear as a separate
+`Warren <id>` view in `marmot ui`. Local namespace views such as `default` remain
+local-scoped.
+
+See [docs/warrens.md](docs/warrens.md) for Warren layout, read/write policy,
+materialization, and UI/API behavior.
+
 ## MCP Tools
 
 Once connected, agents get five tools:
@@ -176,6 +203,14 @@ Once connected, agents get five tools:
 | `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, namespaces, heat map |
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
 | `marmot bridge <ns-a> <ns-b> [--relations ...]` | Create bridge manifest between two namespaces |
+| `marmot warren register <id> <path>` | Register a git-backed Warren repository in this workspace |
+| `marmot warren list [--json]` | List registered Warrens and local mount state |
+| `marmot warren mount --warren <id> <project-id>...` | Activate selected Warren projects for query/UI use |
+| `marmot warren burrow --materialize --warren <id> <project-id>...` | Activate and cache selected Warren projects under `.marmot-data/` |
+| `marmot warren status --warren <id> [--json]` | Show registered/active/editable/materialized project state |
+| `marmot warren edit [--off] --warren <id> <project-id>` | Toggle write access for one mounted Warren project |
+| `marmot warren refresh --warren <id>` | Refresh git-backed Warren state from disk |
+| `marmot warren propose --warren <id>` | Print a proposal-oriented summary for Warren changes |
 | `marmot summarize [--namespace ...]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
 | `marmot sdk [--out ./marmot-sdk.ts]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
@@ -195,6 +230,7 @@ internal/
   llm/                   LLM provider interface (OpenAI, Anthropic, mock)
   classifier/            CRUD classifier: embedding + LLM + distance fallback
   namespace/             Namespace manager, bridge manifests, qualified ID resolution
+  warren/                Git-backed multi-project Warren manifests and local mount state
   summary/               Namespace summary generation, async scheduler
   update/                Source change detection, staleness propagation, file watcher
   indexer/               Static analysis: Go AST, TypeScript regex, generic, runner
@@ -233,6 +269,7 @@ See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Full system design and component interactions |
 | [Bridges](docs/bridges.md) | Namespace and cross-vault bridge configuration |
+| [Warrens](docs/warrens.md) | Git-backed multi-project graph mounting and edit policy |
 | [Embedding Providers](docs/embedding-providers.md) | Embedding provider setup and fallback behavior |
 | [CRUD Classifier](docs/crud-classifier.md) | Write classification (ADD/UPDATE/SUPERSEDE/NOOP) |
 | [TypeScript SDK](docs/typescript-sdk.md) | Type-safe SDK generation and usage |
