@@ -371,6 +371,8 @@ single-vault and cross-vault bridge workflows:
 - Each project lives under `projects/<project-id>/.marmot/`.
 - Each project has its own `.marmot/_warren.md` identity file with `project_id`,
   `warren_id`, and `vault_id`.
+- Warren repository authoring commands maintain projects, bridge policy,
+  `doctor` validation, and manifest formatting.
 - Local workspace mount state lives in `.marmot/_warren.md`.
 - Materialized snapshots live under
   `.marmot/.marmot-data/warrens/<warren-id>/projects/<project-id>/.marmot/`.
@@ -385,6 +387,12 @@ Warren nodes are exposed with cross-vault-style qualified IDs:
 ```text
 @project-a-vault/service/api
 ```
+
+Warren bridge policy is owned by the top-level Warren manifest. During engine
+startup, active and available Warren project bridge endpoints are converted from
+project IDs to vault IDs and fed into the same cross-vault validation and vault
+registry path used by ordinary cross-vault bridges. Dormant endpoints are kept
+out of the registry until mounted.
 
 The read/write model is local-workspace controlled. Mounted projects are
 read-only by default, and `marmot warren edit --warren <id> <project-id>` enables
@@ -415,7 +423,7 @@ See [Warrens](warrens.md) for user-facing setup and command examples.
 | **Graph Manager** | Core graph operations: add/remove/update/soft-delete nodes and edges. Maintains in-memory adjacency list. Enforces structural acyclicity (behavioral cycles allowed). Atomic file writes. |
 | **Verifier** | Structural acyclicity enforcement (topological sort on structural edges only). Content hash computation. Staleness detection via source hash comparison. Behavioral edges skip cycle checks. |
 | **Namespace Manager** | Project isolation via `internal/namespace/`. Auto-discovers namespace directories at startup. Parses `_namespace.md` per-namespace config and `_bridges/*.md` relation whitelists. Resolves qualified cross-namespace references (`Manager.ParseQualifiedID`). Validates cross-namespace edges against bridge manifests on `context_write`. Auto-discovers cross-namespace edges by scanning node files. |
-| **Warren Manager** | Git-backed multi-project mount state via `internal/warren/`. Loads top-level Warren manifests, project identity files, local workspace activation/editability state, and optional materialized caches. Active mounts are registered as vault routes so MCP/CLI/UI queries can resolve `@vault-id/...` nodes. |
+| **Warren Manager** | Git-backed multi-project graph management via `internal/warren/`. Creates and formats Warren manifests, maintains project identity and Warren-owned bridge policy, loads local workspace activation/editability state, and resolves optional materialized caches. Active mounts are registered as vault routes so MCP/CLI/UI queries can resolve `@vault-id/...` nodes. |
 | **Update Engine** | Hash-based change detection (`internal/update/`). Compares stored source hashes to current file state via `verify.ComputeSourceHash`. Propagates staleness through reverse edges (BFS with configurable depth). Reindexes affected nodes (re-reads source, updates hash, re-embeds). File watcher mode via fsnotify with debounced event batching. Batch update mode for on-demand scans. Triggers summary regeneration via OnChange callback. |
 | **Summary Engine** | Async generation of `_summary.md` per namespace (`internal/summary/`). Uses LLM `Summarizer` interface to synthesize from active nodes. Background scheduler with configurable interval (default 30min) and delta threshold (20% node count change). Triggered by `context_write` and `context_delete`. Runs outside the critical path — never blocks read/write operations. Degrades gracefully when LLM unavailable (existing summaries go stale, not broken). |
 | **Node Store** | File I/O layer. Reads/writes markdown node files. Parses YAML frontmatter (including temporal fields) + wikilinks + markdown sections. Atomic writes via temp-file-then-rename. |

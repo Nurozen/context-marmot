@@ -158,6 +158,12 @@ workspace query selected upstream project graphs without copying every project
 graph into the local vault.
 
 ```bash
+# From the Warren repository
+marmot warren init --id product-platform
+marmot warren project add project-a --path projects/project-a/.marmot --vault-id project-a-vault
+marmot warren bridge add project-a project-b --relations calls,reads,references
+marmot warren doctor
+
 # From your local project or virtual monorepo
 marmot warren register product-platform /path/to/product-warren
 marmot warren mount --warren product-platform project-a project-b
@@ -175,7 +181,7 @@ Warren projects are included in MCP/CLI graph queries and appear as a separate
 local-scoped.
 
 See [docs/warrens.md](docs/warrens.md) for Warren layout, read/write policy,
-materialization, and UI/API behavior.
+authoring commands, bridge policy, materialization, and UI/API behavior.
 
 ## MCP Tools
 
@@ -203,6 +209,12 @@ Once connected, agents get five tools:
 | `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, namespaces, heat map |
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
 | `marmot bridge <ns-a> <ns-b> [--relations ...]` | Create bridge manifest between two namespaces |
+| `marmot warren init --id <id> [--warren-dir .]` | Create a Warren repository manifest |
+| `marmot warren project add <project-id> --path <project-.marmot> [--vault-id <id>]` | Add a project vault to a Warren |
+| `marmot warren project list/remove/rename ...` | List or maintain Warren project entries |
+| `marmot warren bridge add/list/remove ...` | Maintain Warren-owned project bridge policy |
+| `marmot warren doctor [--json]` | Validate a Warren repository |
+| `marmot warren format` | Normalize a Warren manifest |
 | `marmot warren register <id> <path>` | Register a git-backed Warren repository in this workspace |
 | `marmot warren list [--json]` | List registered Warrens and local mount state |
 | `marmot warren mount --warren <id> <project-id>...` | Activate selected Warren projects for query/UI use |

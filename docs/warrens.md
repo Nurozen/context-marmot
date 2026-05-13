@@ -90,7 +90,68 @@ The workspace `_warren.md` records registered Warren paths, active projects,
 editable projects, and whether materialized caches are enabled. This is local
 workspace configuration; keep the Warren repo itself in git.
 
-## Commands
+## Build and maintain a Warren
+
+Run authoring commands inside a Warren repository, or pass `--warren-dir` to
+point at one.
+
+Create the top-level manifest:
+
+```bash
+marmot warren init --id product-platform
+```
+
+Add projects explicitly:
+
+```bash
+marmot warren project add project-a \
+  --path projects/project-a/.marmot \
+  --vault-id project-a-vault \
+  --alias payments-api
+```
+
+`project_id` is durable command and UI identity. It is explicit by default so it
+can outlive folder renames. If you want Marmot to choose a conservative ID from
+existing project metadata or the path folder name, use:
+
+```bash
+marmot warren project add --generate-id --path projects/payments/.marmot
+```
+
+Maintain project entries:
+
+```bash
+marmot warren project list
+marmot warren project list --json
+marmot warren project rename project-a payments-api
+marmot warren project remove payments-api
+```
+
+Add Warren-owned bridge policy between projects:
+
+```bash
+marmot warren bridge add project-a project-b --relations calls,reads,references
+marmot warren bridge list
+marmot warren bridge remove project-a project-b
+```
+
+Validate and normalize the Warren:
+
+```bash
+marmot warren doctor
+marmot warren doctor --json
+marmot warren format
+```
+
+`doctor` checks the top-level manifest, project paths, project identity files,
+ID consistency, duplicate vault IDs, bridge endpoints, bridge relations,
+accidental materialized cache folders, and missing embedding databases. Missing
+embeddings are warnings because a graph can be valid before it is indexed.
+
+These commands edit Warren files atomically but never commit, push, pull, or
+open PRs. Use normal git workflow to review and publish Warren changes.
+
+## Consume a Warren
 
 Register a Warren in the current workspace:
 
@@ -138,6 +199,31 @@ marmot warren burrow --materialize --warren product-platform project-b
 
 `burrow --materialize` is useful when you want offline graph access or want a
 stable local snapshot while the Warren git checkout changes elsewhere.
+
+## Bridge policy
+
+Warren bridges are owned by the top-level Warren manifest:
+
+```yaml
+bridges:
+  - source: project-a
+    target: project-b
+    relations: [calls, reads, references, cross_project]
+```
+
+At runtime, Marmot converts active Warren bridge endpoints from `project_id` to
+their project `vault_id`s and uses the existing cross-vault validation path.
+Edges between mounted Warren projects use qualified node IDs:
+
+```yaml
+edges:
+  - target: "@project-b-vault/service/api"
+    relation: calls
+```
+
+Both bridge endpoints must be active mounted projects. Dormant projects stay out
+of the queryable graph even if a bridge references them, and relations not listed
+in the Warren bridge are rejected on write.
 
 ## Read and write policy
 
@@ -214,9 +300,10 @@ see whether a selected node can be edited from the current workspace.
 
 ## Warrens vs bridges
 
-Use a bridge when two vaults or namespaces need an explicit relationship.
+Use a namespace bridge when two namespaces in the same vault need an explicit
+relationship. Use a cross-vault bridge when two independent vaults own their own
+bridge files.
 
 Use a Warren when you want a curated set of many project graphs that can be
-mounted on demand. Warrens can still contain bridge intent in their manifest, but
-the primary behavior is mounting project vaults into the active query/UI context.
-
+mounted on demand. Warren project bridges are managed in the Warren repo, not in
+each project vault's `_bridges/` folder.

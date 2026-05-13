@@ -16,7 +16,7 @@
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve]                         Manage vault routing table
-//	marmot warren     [register|list|mount|burrow|status|edit|refresh|propose] Manage Warren mounts
+//	marmot warren     [init|project|bridge|doctor|format|register|mount|...] Manage Warrens
 //	marmot ui         [--dir .marmot] [--port 3274] [--no-open]    Start graph UI server
 //	marmot sdk        [--out <path>] [--base-url <url>]           Generate TypeScript SDK
 package main

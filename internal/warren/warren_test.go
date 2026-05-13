@@ -47,6 +47,28 @@ func TestManifestRoundTripPreservesBody(t *testing.T) {
 	}
 }
 
+func TestLoadManifestBackfillsLegacyFields(t *testing.T) {
+	root := t.TempDir()
+	data := []byte("---\nversion: 1\nprojects:\n  - project_id: api\n---\nlegacy body\n")
+	if err := os.WriteFile(filepath.Join(root, "_warren.md"), data, 0o644); err != nil {
+		t.Fatalf("write legacy manifest: %v", err)
+	}
+
+	got, body, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest legacy: %v", err)
+	}
+	if got.WarrenID != GenerateProjectID(filepath.Base(root)) {
+		t.Fatalf("WarrenID = %q, want slug from root", got.WarrenID)
+	}
+	if len(got.Projects) != 1 || got.Projects[0].Path != "projects/api/.marmot" {
+		t.Fatalf("project path was not backfilled: %+v", got.Projects)
+	}
+	if body != "legacy body\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 func TestProjectMetadataRoundTripDefaultsVaultID(t *testing.T) {
 	marmotDir := filepath.Join(t.TempDir(), ".marmot")
 	meta := &ProjectMetadata{
@@ -66,6 +88,236 @@ func TestProjectMetadataRoundTripDefaultsVaultID(t *testing.T) {
 	}
 	if body != "project body\n" {
 		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestAuthoringInitAddRenameRemoveProjectPreservesBody(t *testing.T) {
+	root := t.TempDir()
+	body := "# Product Platform\n\nKeep this prose intact.\n"
+
+	manifest, err := Init(root, "product-platform")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if manifest.WarrenID != "product-platform" || manifest.Version != 1 {
+		t.Fatalf("unexpected init manifest: %+v", manifest)
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		t.Fatalf("SaveManifest body: %v", err)
+	}
+
+	if _, err := AddProject(root, Project{
+		ProjectID: "api",
+		Aliases:   []string{" service-api ", "service-api", "backend"},
+	}); err != nil {
+		t.Fatalf("AddProject api: %v", err)
+	}
+	if _, err := AddProject(root, Project{ProjectID: "web"}); err != nil {
+		t.Fatalf("AddProject web: %v", err)
+	}
+	projects, err := ListProjects(root)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 2 || projects[0].ProjectID != "api" || projects[0].Path != "projects/api/.marmot" {
+		t.Fatalf("projects not normalized: %+v", projects)
+	}
+	if strings.Join(projects[0].Aliases, ",") != "backend,service-api" {
+		t.Fatalf("aliases not normalized: %+v", projects[0].Aliases)
+	}
+	meta, metaBody, err := LoadProjectMetadata(filepath.Join(root, "projects", "api", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata api: %v", err)
+	}
+	if meta.ProjectID != "api" || meta.WarrenID != "product-platform" || meta.VaultID != "api" || metaBody != "" {
+		t.Fatalf("unexpected project metadata: %+v body=%q", meta, metaBody)
+	}
+
+	if _, err := AddBridge(root, Bridge{Source: "api", Target: "web", Relations: []string{"references", "calls", "calls"}}); err != nil {
+		t.Fatalf("AddBridge: %v", err)
+	}
+	if _, err := RenameProject(root, "api", "api-service"); err != nil {
+		t.Fatalf("RenameProject: %v", err)
+	}
+	bridges, err := ListBridges(root)
+	if err != nil {
+		t.Fatalf("ListBridges: %v", err)
+	}
+	if len(bridges) != 1 || bridges[0].Source != "api-service" || strings.Join(bridges[0].Relations, ",") != "calls,references" {
+		t.Fatalf("bridge not renamed/normalized: %+v", bridges)
+	}
+	meta, _, err = LoadProjectMetadata(filepath.Join(root, "projects", "api", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata renamed: %v", err)
+	}
+	if meta.ProjectID != "api-service" {
+		t.Fatalf("renamed metadata project ID = %q", meta.ProjectID)
+	}
+
+	if _, err := RemoveProject(root, "api-service"); err != nil {
+		t.Fatalf("RemoveProject: %v", err)
+	}
+	manifest, gotBody, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest after remove: %v", err)
+	}
+	if gotBody != body {
+		t.Fatalf("body = %q, want %q", gotBody, body)
+	}
+	if len(manifest.Projects) != 1 || manifest.Projects[0].ProjectID != "web" {
+		t.Fatalf("unexpected projects after remove: %+v", manifest.Projects)
+	}
+	if len(manifest.Bridges) != 0 {
+		t.Fatalf("bridges should be pruned after project remove: %+v", manifest.Bridges)
+	}
+}
+
+func TestGenerateProjectID(t *testing.T) {
+	tests := map[string]string{
+		" Product Platform API ": "product-platform-api",
+		"!!!":                    "project",
+		"API_v2/Worker":          "api-v2-worker",
+	}
+	for input, want := range tests {
+		if got := GenerateProjectID(input); got != want {
+			t.Fatalf("GenerateProjectID(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestBridgeAddMergeAndRemoveRelations(t *testing.T) {
+	root := t.TempDir()
+	writeWarrenFixture(t, root, "product-platform", "api", "web")
+
+	if _, err := AddBridge(root, Bridge{Source: "web", Target: "api", Relations: []string{"reads"}}); err != nil {
+		t.Fatalf("AddBridge reads: %v", err)
+	}
+	if _, err := AddBridge(root, Bridge{Source: "web", Target: "api", Relations: []string{"calls", "reads"}}); err != nil {
+		t.Fatalf("AddBridge merge: %v", err)
+	}
+	bridges, err := ListBridges(root)
+	if err != nil {
+		t.Fatalf("ListBridges: %v", err)
+	}
+	if len(bridges) != 1 || strings.Join(bridges[0].Relations, ",") != "calls,reads" {
+		t.Fatalf("bridge relations not merged: %+v", bridges)
+	}
+	if _, err := RemoveBridge(root, "web", "api", "reads"); err != nil {
+		t.Fatalf("RemoveBridge relation: %v", err)
+	}
+	bridges, err = ListBridges(root)
+	if err != nil {
+		t.Fatalf("ListBridges after relation remove: %v", err)
+	}
+	if len(bridges) != 1 || strings.Join(bridges[0].Relations, ",") != "calls" {
+		t.Fatalf("bridge relation not removed: %+v", bridges)
+	}
+	if _, err := RemoveBridge(root, "web", "api"); err != nil {
+		t.Fatalf("RemoveBridge full: %v", err)
+	}
+	bridges, err = ListBridges(root)
+	if err != nil {
+		t.Fatalf("ListBridges after remove: %v", err)
+	}
+	if len(bridges) != 0 {
+		t.Fatalf("expected no bridges after full remove, got %+v", bridges)
+	}
+}
+
+func TestSaveManifestRejectsMalformedBridgeWithoutDroppingIt(t *testing.T) {
+	root := t.TempDir()
+	manifest := &Manifest{
+		WarrenID: "product-platform",
+		Projects: []Project{
+			{ProjectID: "api", Path: "projects/api/.marmot"},
+			{ProjectID: "web", Path: "projects/web/.marmot"},
+		},
+		Bridges: []Bridge{{Source: "api", Target: "web"}},
+	}
+	if err := SaveManifest(root, manifest, ""); err == nil {
+		t.Fatal("expected SaveManifest to reject bridge with empty relations")
+	}
+	if _, err := os.Stat(filepath.Join(root, "_warren.md")); !os.IsNotExist(err) {
+		t.Fatalf("manifest should not be written after invalid bridge, stat err=%v", err)
+	}
+}
+
+func TestAddProjectDoesNotMutateManifestWhenMetadataIsInvalid(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root, "product-platform"); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	marmotDir := filepath.Join(root, "projects", "api", ".marmot")
+	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
+		t.Fatalf("mkdir metadata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "_warren.md"), []byte("---\nproject_id: ../bad\nwarren_id: product-platform\nvault_id: api\n---\n"), 0o644); err != nil {
+		t.Fatalf("write bad metadata: %v", err)
+	}
+	if _, err := AddProject(root, Project{ProjectID: "api", Path: "projects/api/.marmot"}); err == nil {
+		t.Fatal("expected AddProject to reject invalid existing metadata")
+	}
+	projects, err := ListProjects(root)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("project should not be registered after metadata preflight failure: %+v", projects)
+	}
+}
+
+func TestDoctorAndFormat(t *testing.T) {
+	root := t.TempDir()
+	writeWarrenFixture(t, root, "product-platform", "api")
+
+	report, err := Doctor(root)
+	if err != nil {
+		t.Fatalf("Doctor healthy: %v", err)
+	}
+	if !report.OK() {
+		t.Fatalf("expected healthy report, got %+v", report)
+	}
+
+	meta := &ProjectMetadata{ProjectID: "other", WarrenID: "product-platform"}
+	if err := SaveProjectMetadata(filepath.Join(root, "projects", "api", ".marmot"), meta, "metadata body\n"); err != nil {
+		t.Fatalf("SaveProjectMetadata mismatch: %v", err)
+	}
+	report, err = Doctor(root)
+	if err != nil {
+		t.Fatalf("Doctor mismatch: %v", err)
+	}
+	if report.OK() || report.Issues[0].Code != "project_id_mismatch" {
+		t.Fatalf("expected project_id_mismatch, got %+v", report)
+	}
+
+	body := "Body survives format.\n"
+	manifest := &Manifest{
+		WarrenID: "product-platform",
+		Projects: []Project{
+			{ProjectID: "web", Path: "projects/web/.marmot", Aliases: []string{"ui", "ui"}},
+			{ProjectID: "api", Path: "projects/api/.marmot"},
+		},
+		Bridges: []Bridge{
+			{Source: "web", Target: "api", Relations: []string{"reads", "calls", "reads"}},
+			{Source: "web", Target: "api", Relations: []string{"writes"}},
+		},
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		t.Fatalf("SaveManifest before Format: %v", err)
+	}
+	formatted, err := Format(root)
+	if err != nil {
+		t.Fatalf("Format: %v", err)
+	}
+	_, gotBody, err := LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest after Format: %v", err)
+	}
+	if gotBody != body {
+		t.Fatalf("format body = %q, want %q", gotBody, body)
+	}
+	if formatted.Projects[0].ProjectID != "api" || len(formatted.Bridges) != 1 || strings.Join(formatted.Bridges[0].Relations, ",") != "calls,reads,writes" {
+		t.Fatalf("manifest not formatted: %+v", formatted)
 	}
 }
 

@@ -4,7 +4,8 @@ For many-project workflows, also see [Warrens](warrens.md). A bridge connects
 specific namespaces or vaults. A Warren registers a curated set of project vaults
 that can be mounted on demand.
 
-Bridges allow edges and queries to cross namespace or vault boundaries. Two types are supported.
+Bridges allow edges and queries to cross namespace or vault boundaries. Three
+ownership patterns are supported.
 
 ## Namespace bridges (same vault)
 
@@ -80,6 +81,41 @@ edges:
 ```
 
 **Querying across vaults:** `context_query` automatically searches the remote vault's embedding store (top 3 results per bridged vault) and includes those as additional entry points for graph traversal. Remote nodes appear in results with `@vault-id/` prefixed IDs.
+
+## Warren project bridges (shared Warren repo)
+
+Connect two project vaults that belong to the same Warren. The bridge is owned by
+the Warren repo's top-level `_warren.md`, not by `_bridges/` files in each
+project vault.
+
+```bash
+marmot warren bridge add project-a project-b --relations calls,reads,references
+```
+
+The manifest records project IDs:
+
+```yaml
+bridges:
+  - source: project-a
+    target: project-b
+    relations:
+      - calls
+      - reads
+      - references
+```
+
+At runtime, Marmot maps those project IDs to each project's `vault_id`. Nodes use
+the same qualified target syntax as cross-vault bridges:
+
+```yaml
+edges:
+    - target: "@project-b-vault/shared/api"
+      relation: calls
+```
+
+Only active mounted Warren projects participate. A bridge to a dormant Warren
+project is retained as policy in the manifest, but it is not queryable or
+accepted for writes until that project is mounted.
 
 ## Namespace setup
 

@@ -203,14 +203,12 @@ func buildEngine(dir string) (*engineResult, error) {
 		return nil, fmt.Errorf("create engine: %w", err)
 	}
 
-	// Wire namespace manager (best-effort — missing namespaces are fine).
+	// Load namespace manager (best-effort — missing namespaces are fine).
+	// It is attached after Warren bridge discovery so runtime Warren bridges
+	// participate in the same cross-vault validation path.
 	var nsMgr *namespace.Manager
-	if mgr, nsErr := namespace.NewManager(dir); nsErr == nil &&
-		(len(mgr.Namespaces) > 0 || len(mgr.Bridges) > 0 || len(mgr.CrossVaultBridges) > 0) {
+	if mgr, nsErr := namespace.NewManager(dir); nsErr == nil {
 		nsMgr = mgr
-		engine.WithNamespaceManager(nsMgr)
-		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
-			len(nsMgr.Namespaces), len(nsMgr.Bridges), len(nsMgr.CrossVaultBridges))
 	}
 
 	// Wire heat map (load from _heat/default.md or create empty).
@@ -229,15 +227,29 @@ func buildEngine(dir string) (*engineResult, error) {
 		rt = &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
 	}
 	vaultID := vaultCfg.VaultID
+	warrenBridgeDeclarations := false
 	if mounts, mountErr := warren.ActiveMounts(dir); mountErr == nil {
 		for _, mount := range mounts {
 			if mount.VaultID != "" && mount.Available {
 				rt.Set(mount.VaultID, mount.Path)
 			}
 		}
+		if bridges, declared := warrenRuntimeBridges(dir, mounts); declared {
+			warrenBridgeDeclarations = true
+			if nsMgr == nil {
+				nsMgr = emptyNamespaceManager(dir)
+			}
+			nsMgr.CrossVaultBridges = append(nsMgr.CrossVaultBridges, bridges...)
+		}
 		if len(mounts) > 0 {
 			fmt.Fprintf(os.Stderr, "warren: %d active project mounts loaded\n", len(mounts))
 		}
+	}
+	if nsMgr != nil &&
+		(len(nsMgr.Namespaces) > 0 || len(nsMgr.Bridges) > 0 || len(nsMgr.CrossVaultBridges) > 0 || warrenBridgeDeclarations) {
+		engine.WithNamespaceManager(nsMgr)
+		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
+			len(nsMgr.Namespaces), len(nsMgr.Bridges), len(nsMgr.CrossVaultBridges))
 	}
 	hasCrossVaultBridges := nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0
 	hasRoutes := rt != nil && len(rt.List()) > 0
@@ -347,6 +359,92 @@ func buildEngine(dir string) (*engineResult, error) {
 		LLM:       llmProvider,
 		Cleanup:   cleanup,
 	}, nil
+}
+
+func emptyNamespaceManager(dir string) *namespace.Manager {
+	return &namespace.Manager{
+		VaultDir:   dir,
+		Namespaces: make(map[string]*namespace.Namespace),
+		Bridges:    make(map[string]*namespace.Bridge),
+	}
+}
+
+func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*namespace.Bridge, bool) {
+	state, _, err := warren.LoadWorkspaceStateFromMarmot(marmotDir)
+	if err != nil {
+		return nil, false
+	}
+
+	active := make(map[string]map[string]warren.ProjectStatus)
+	for _, mount := range mounts {
+		if !mount.Active || !mount.Available || mount.VaultID == "" {
+			continue
+		}
+		projects := active[mount.WarrenID]
+		if projects == nil {
+			projects = make(map[string]warren.ProjectStatus)
+			active[mount.WarrenID] = projects
+		}
+		projects[mount.ProjectID] = mount
+	}
+
+	declared := false
+	merged := make(map[string]*namespace.Bridge)
+	relationSets := make(map[string]map[string]bool)
+	for warrenID, entry := range state.Warrens {
+		manifest, _, err := warren.LoadManifest(entry.Path)
+		if err != nil {
+			continue
+		}
+		if len(manifest.Bridges) > 0 {
+			declared = true
+		}
+		activeProjects := active[warrenID]
+		if len(activeProjects) == 0 {
+			continue
+		}
+		for _, bridge := range manifest.Bridges {
+			source, sourceOK := activeProjects[bridge.Source]
+			target, targetOK := activeProjects[bridge.Target]
+			if !sourceOK || !targetOK || source.VaultID == "" || target.VaultID == "" {
+				continue
+			}
+			key := runtimeBridgeKey(source.VaultID, target.VaultID)
+			runtimeBridge, ok := merged[key]
+			if !ok {
+				runtimeBridge = &namespace.Bridge{
+					Source:          bridge.Source,
+					Target:          bridge.Target,
+					SourceVaultID:   source.VaultID,
+					TargetVaultID:   target.VaultID,
+					SourceVaultPath: source.Path,
+					TargetVaultPath: target.Path,
+				}
+				merged[key] = runtimeBridge
+				relationSets[key] = make(map[string]bool)
+			}
+			for _, relation := range bridge.Relations {
+				if relation == "" || relationSets[key][relation] {
+					continue
+				}
+				relationSets[key][relation] = true
+				runtimeBridge.AllowedRelations = append(runtimeBridge.AllowedRelations, relation)
+			}
+		}
+	}
+
+	bridges := make([]*namespace.Bridge, 0, len(merged))
+	for _, bridge := range merged {
+		bridges = append(bridges, bridge)
+	}
+	return bridges, declared
+}
+
+func runtimeBridgeKey(a, b string) string {
+	if a > b {
+		a, b = b, a
+	}
+	return a + "\x00" + b
 }
 
 // runServePipeline starts the MCP server on stdio.

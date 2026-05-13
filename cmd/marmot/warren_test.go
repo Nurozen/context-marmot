@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +94,147 @@ func TestWarrenCommandRequiresTargetWhenAmbiguous(t *testing.T) {
 	}
 	if code := run([]string{"warren", "status", "--dir", marmotDir}); code == 0 {
 		t.Fatalf("status without --warren should fail when multiple Warrens exist")
+	}
+}
+
+func TestWarrenAuthoringProjectCommands(t *testing.T) {
+	root := t.TempDir()
+
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "add", "project-a", "--warren-dir", root, "--path", "projects/project-a/.marmot", "--vault-id", "project-a-vault", "--alias", "svc-a", "--alias", "api"}); code != 0 {
+		t.Fatalf("project add exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "list", "--warren-dir", root}); code != 0 {
+		t.Fatalf("project list exit code = %d", code)
+	}
+	output, code := captureRun([]string{"warren", "project", "list", "--warren-dir", root, "--json"})
+	if code != 0 {
+		t.Fatalf("project list --json exit code = %d output=%s", code, output)
+	}
+	var listed []warrenpkg.Project
+	if err := json.Unmarshal([]byte(output), &listed); err != nil {
+		t.Fatalf("project list --json invalid JSON: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "project_id") || strings.Contains(output, "ProjectID") {
+		t.Fatalf("project list JSON should use snake_case keys, got %s", output)
+	}
+
+	manifest, _, err := warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if manifest.WarrenID != "product-platform" {
+		t.Fatalf("WarrenID = %q", manifest.WarrenID)
+	}
+	if len(manifest.Projects) != 1 || manifest.Projects[0].ProjectID != "project-a" {
+		t.Fatalf("projects after add = %+v", manifest.Projects)
+	}
+	if got := strings.Join(manifest.Projects[0].Aliases, ","); got != "api,svc-a" {
+		t.Fatalf("aliases = %q", got)
+	}
+	meta, _, err := warrenpkg.LoadProjectMetadata(filepath.Join(root, "projects", "project-a", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata: %v", err)
+	}
+	if meta.VaultID != "project-a-vault" {
+		t.Fatalf("VaultID = %q", meta.VaultID)
+	}
+
+	if code := run([]string{"warren", "project", "rename", "project-a", "project-api", "--warren-dir", root}); code != 0 {
+		t.Fatalf("project rename exit code = %d", code)
+	}
+	manifest, _, err = warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest after rename: %v", err)
+	}
+	if len(manifest.Projects) != 1 || manifest.Projects[0].ProjectID != "project-api" {
+		t.Fatalf("projects after rename = %+v", manifest.Projects)
+	}
+
+	if code := run([]string{"warren", "project", "remove", "project-api", "--warren-dir", root}); code != 0 {
+		t.Fatalf("project remove exit code = %d", code)
+	}
+	manifest, _, err = warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest after remove: %v", err)
+	}
+	if len(manifest.Projects) != 0 {
+		t.Fatalf("projects after remove = %+v", manifest.Projects)
+	}
+}
+
+func TestWarrenProjectAddInvalidVaultIDDoesNotRegisterProject(t *testing.T) {
+	root := t.TempDir()
+
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "add", "api", "--warren-dir", root, "--path", "projects/api/.marmot", "--vault-id", "../bad"}); code == 0 {
+		t.Fatal("expected invalid vault ID add to fail")
+	}
+	manifest, _, err := warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Projects) != 0 {
+		t.Fatalf("invalid vault ID should not register project, got %+v", manifest.Projects)
+	}
+}
+
+func TestWarrenAuthoringBridgeDoctorAndFormatCommands(t *testing.T) {
+	root := t.TempDir()
+
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	for _, projectID := range []string{"project-a", "project-b"} {
+		if code := run([]string{"warren", "project", "add", "--warren-dir", root, "--path", "projects/" + projectID + "/.marmot", projectID}); code != 0 {
+			t.Fatalf("project add %s exit code = %d", projectID, code)
+		}
+	}
+	if code := run([]string{"warren", "bridge", "add", "project-a", "project-b", "--warren-dir", root, "--relations", "calls,reads"}); code != 0 {
+		t.Fatalf("bridge add exit code = %d", code)
+	}
+	if code := run([]string{"warren", "bridge", "list", "--warren-dir", root}); code != 0 {
+		t.Fatalf("bridge list exit code = %d", code)
+	}
+	output, code := captureRun([]string{"warren", "bridge", "list", "--warren-dir", root, "--json"})
+	if code != 0 {
+		t.Fatalf("bridge list --json exit code = %d output=%s", code, output)
+	}
+	if !strings.Contains(output, "relations") || strings.Contains(output, "Relations") {
+		t.Fatalf("bridge list JSON should use snake_case keys, got %s", output)
+	}
+	if code := run([]string{"warren", "doctor", "--warren-dir", root, "--json"}); code != 0 {
+		t.Fatalf("doctor exit code = %d", code)
+	}
+	if code := run([]string{"warren", "format", "--warren-dir", root}); code != 0 {
+		t.Fatalf("format exit code = %d", code)
+	}
+
+	manifest, _, err := warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Bridges) != 1 {
+		t.Fatalf("bridges after add = %+v", manifest.Bridges)
+	}
+	bridge := manifest.Bridges[0]
+	if bridge.Source != "project-a" || bridge.Target != "project-b" || strings.Join(bridge.Relations, ",") != "calls,reads" {
+		t.Fatalf("unexpected bridge = %+v", bridge)
+	}
+
+	if code := run([]string{"warren", "bridge", "remove", "project-a", "project-b", "--warren-dir", root}); code != 0 {
+		t.Fatalf("bridge remove exit code = %d", code)
+	}
+	manifest, _, err = warrenpkg.LoadManifest(root)
+	if err != nil {
+		t.Fatalf("LoadManifest after remove: %v", err)
+	}
+	if len(manifest.Bridges) != 0 {
+		t.Fatalf("bridges after remove = %+v", manifest.Bridges)
 	}
 }
 
@@ -198,4 +341,19 @@ func testWarrenRoot(t *testing.T, warrenID string, projects ...string) string {
 		t.Fatalf("SaveManifest: %v", err)
 	}
 	return root
+}
+
+func captureRun(args []string) (string, int) {
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		return "", 1
+	}
+	os.Stdout = w
+	code := run(args)
+	_ = w.Close()
+	os.Stdout = oldStdout
+	data, _ := io.ReadAll(r)
+	_ = r.Close()
+	return string(data), code
 }

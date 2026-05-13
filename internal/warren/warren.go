@@ -3,13 +3,16 @@
 package warren
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
+	"github.com/nurozen/context-marmot/internal/node"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,32 +23,32 @@ const (
 
 // Manifest describes a Warren repository.
 type Manifest struct {
-	WarrenID string    `yaml:"warren_id"`
-	Version  int       `yaml:"version"`
-	Projects []Project `yaml:"projects,omitempty"`
-	Bridges  []Bridge  `yaml:"bridges,omitempty"`
+	WarrenID string    `yaml:"warren_id" json:"warren_id"`
+	Version  int       `yaml:"version" json:"version"`
+	Projects []Project `yaml:"projects,omitempty" json:"projects,omitempty"`
+	Bridges  []Bridge  `yaml:"bridges,omitempty" json:"bridges,omitempty"`
 }
 
 // Project describes one project vault inside a Warren repository.
 type Project struct {
-	ProjectID string   `yaml:"project_id"`
-	Path      string   `yaml:"path"`
-	Aliases   []string `yaml:"aliases,omitempty"`
+	ProjectID string   `yaml:"project_id" json:"project_id"`
+	Path      string   `yaml:"path" json:"path"`
+	Aliases   []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
 }
 
 // Bridge describes curated cross-project relations in a Warren.
 type Bridge struct {
-	Source    string   `yaml:"source"`
-	Target    string   `yaml:"target"`
-	Relations []string `yaml:"relations"`
+	Source    string   `yaml:"source" json:"source"`
+	Target    string   `yaml:"target" json:"target"`
+	Relations []string `yaml:"relations" json:"relations"`
 }
 
 // ProjectMetadata lives in projects/<id>/.marmot/_warren.md.
 type ProjectMetadata struct {
-	ProjectID string   `yaml:"project_id"`
-	WarrenID  string   `yaml:"warren_id"`
-	VaultID   string   `yaml:"vault_id"`
-	Aliases   []string `yaml:"aliases,omitempty"`
+	ProjectID string   `yaml:"project_id" json:"project_id"`
+	WarrenID  string   `yaml:"warren_id" json:"warren_id"`
+	VaultID   string   `yaml:"vault_id" json:"vault_id"`
+	Aliases   []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
 }
 
 // WorkspaceState lives in a local workspace .marmot/_warren.md.
@@ -85,6 +88,420 @@ type Provenance struct {
 	Editable    bool   `json:"editable,omitempty"`
 }
 
+// DoctorReport describes consistency findings for a Warren manifest.
+type DoctorReport struct {
+	WarrenID string        `json:"warren_id"`
+	Issues   []DoctorIssue `json:"issues,omitempty"`
+}
+
+// OK reports whether Doctor found no issues.
+func (r DoctorReport) OK() bool {
+	for _, issue := range r.Issues {
+		if issue.Severity == "error" {
+			return false
+		}
+	}
+	return true
+}
+
+// DoctorIssue describes one Warren consistency problem.
+type DoctorIssue struct {
+	Severity  string `json:"severity"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	ProjectID string `json:"project_id,omitempty"`
+	Path      string `json:"path,omitempty"`
+}
+
+// Init creates or normalizes the root Warren manifest.
+func Init(root, warrenID string) (*Manifest, error) {
+	if warrenID == "" {
+		warrenID = GenerateProjectID(filepath.Base(root))
+	}
+	if err := ValidateWarrenID(warrenID); err != nil {
+		return nil, err
+	}
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		manifest = &Manifest{WarrenID: warrenID}
+	} else if manifest.WarrenID != warrenID {
+		return nil, fmt.Errorf("Warren already initialized as %q", manifest.WarrenID)
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// AddProject registers a project in the Warren manifest and writes project metadata.
+func AddProject(root string, project Project) (*Manifest, error) {
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	project.ProjectID = strings.TrimSpace(project.ProjectID)
+	if project.ProjectID == "" {
+		project.ProjectID = generateProjectIDFromPath(project.Path)
+	}
+	if project.Path == "" {
+		project.Path = defaultProjectPath(project.ProjectID)
+	}
+	project.Path = filepath.ToSlash(filepath.Clean(project.Path))
+	project.Aliases = uniqueSorted(project.Aliases)
+	if err := ValidateProjectID(project.ProjectID); err != nil {
+		return nil, err
+	}
+	for _, existing := range manifest.Projects {
+		if existing.ProjectID == project.ProjectID {
+			return nil, fmt.Errorf("project %q already exists", project.ProjectID)
+		}
+	}
+	if err := preflightProjectMetadata(root, manifest.WarrenID, project); err != nil {
+		return nil, err
+	}
+	manifest.Projects = append(manifest.Projects, project)
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	if err := ensureProjectMetadata(root, manifest.WarrenID, project); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// ListProjects returns normalized Warren projects.
+func ListProjects(root string) ([]Project, error) {
+	manifest, _, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	return append([]Project(nil), manifest.Projects...), nil
+}
+
+// RemoveProject removes a project from the Warren manifest and drops related bridges.
+func RemoveProject(root, projectID string) (*Manifest, error) {
+	if err := ValidateProjectID(projectID); err != nil {
+		return nil, err
+	}
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	projects := manifest.Projects[:0]
+	found := false
+	for _, project := range manifest.Projects {
+		if project.ProjectID == projectID {
+			found = true
+			continue
+		}
+		projects = append(projects, project)
+	}
+	if !found {
+		return nil, fmt.Errorf("project %q does not exist", projectID)
+	}
+	manifest.Projects = projects
+	bridges := manifest.Bridges[:0]
+	for _, bridge := range manifest.Bridges {
+		if bridge.Source != projectID && bridge.Target != projectID {
+			bridges = append(bridges, bridge)
+		}
+	}
+	manifest.Bridges = bridges
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// RenameProject renames a project ID in the manifest, project metadata, and bridges.
+func RenameProject(root, oldID, newID string) (*Manifest, error) {
+	if err := ValidateProjectID(oldID); err != nil {
+		return nil, err
+	}
+	if err := ValidateProjectID(newID); err != nil {
+		return nil, err
+	}
+	if oldID == newID {
+		return nil, fmt.Errorf("new project ID must differ from old project ID")
+	}
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	var renamed Project
+	for i := range manifest.Projects {
+		if manifest.Projects[i].ProjectID == newID {
+			return nil, fmt.Errorf("project %q already exists", newID)
+		}
+		if manifest.Projects[i].ProjectID == oldID {
+			found = true
+			manifest.Projects[i].ProjectID = newID
+			renamed = manifest.Projects[i]
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("project %q does not exist", oldID)
+	}
+	for i := range manifest.Bridges {
+		if manifest.Bridges[i].Source == oldID {
+			manifest.Bridges[i].Source = newID
+		}
+		if manifest.Bridges[i].Target == oldID {
+			manifest.Bridges[i].Target = newID
+		}
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	if err := ensureProjectMetadata(root, manifest.WarrenID, renamed); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// AddBridge adds or merges allowed relations for a cross-project bridge.
+func AddBridge(root string, bridge Bridge) (*Manifest, error) {
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	normalizeBridge(&bridge)
+	if err := validateBridge(bridge); err != nil {
+		return nil, err
+	}
+	known := projectSet(manifest.Projects)
+	if !known[bridge.Source] {
+		return nil, fmt.Errorf("bridge source project %q does not exist", bridge.Source)
+	}
+	if !known[bridge.Target] {
+		return nil, fmt.Errorf("bridge target project %q does not exist", bridge.Target)
+	}
+	merged := false
+	for i := range manifest.Bridges {
+		if manifest.Bridges[i].Source == bridge.Source && manifest.Bridges[i].Target == bridge.Target {
+			manifest.Bridges[i].Relations = uniqueSorted(append(manifest.Bridges[i].Relations, bridge.Relations...))
+			merged = true
+			break
+		}
+	}
+	if !merged {
+		manifest.Bridges = append(manifest.Bridges, bridge)
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// ListBridges returns normalized Warren bridges.
+func ListBridges(root string) ([]Bridge, error) {
+	manifest, _, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	return append([]Bridge(nil), manifest.Bridges...), nil
+}
+
+// RemoveBridge removes a bridge, or only the supplied relations when provided.
+func RemoveBridge(root, source, target string, relations ...string) (*Manifest, error) {
+	if err := ValidateProjectID(source); err != nil {
+		return nil, err
+	}
+	if err := ValidateProjectID(target); err != nil {
+		return nil, err
+	}
+	relations = uniqueSorted(relations)
+	for _, relation := range relations {
+		if err := validateRelation(relation); err != nil {
+			return nil, err
+		}
+	}
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	bridges := manifest.Bridges[:0]
+	for _, bridge := range manifest.Bridges {
+		if bridge.Source != source || bridge.Target != target {
+			bridges = append(bridges, bridge)
+			continue
+		}
+		found = true
+		if len(relations) == 0 {
+			continue
+		}
+		bridge.Relations = removeNames(bridge.Relations, relations)
+		if len(bridge.Relations) > 0 {
+			bridges = append(bridges, bridge)
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("bridge %q -> %q does not exist", source, target)
+	}
+	manifest.Bridges = bridges
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// Doctor validates that the Warren manifest points to coherent project metadata.
+func Doctor(root string) (DoctorReport, error) {
+	manifest, _, err := LoadManifest(root)
+	if err != nil {
+		return DoctorReport{}, err
+	}
+	report := DoctorReport{WarrenID: manifest.WarrenID}
+	known := projectSet(manifest.Projects)
+	vaultIDs := make(map[string]string)
+	if dirExists(filepath.Join(root, ".marmot-data", "warrens")) {
+		report.Issues = append(report.Issues, DoctorIssue{
+			Severity: "warning",
+			Code:     "materialized_cache_in_warren",
+			Message:  "materialized Warren cache path exists inside the Warren repository",
+			Path:     ".marmot-data/warrens",
+		})
+	}
+	for _, project := range manifest.Projects {
+		projectPath := filepath.Join(root, filepath.FromSlash(project.Path))
+		info, statErr := os.Stat(projectPath)
+		if statErr != nil {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "error",
+				Code:      "project_missing",
+				Message:   fmt.Sprintf("project %q path is not available", project.ProjectID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+			continue
+		}
+		if !info.IsDir() {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "error",
+				Code:      "project_not_directory",
+				Message:   fmt.Sprintf("project %q path is not a directory", project.ProjectID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+			continue
+		}
+		meta, _, metaErr := LoadProjectMetadata(projectPath)
+		if metaErr != nil {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "warning",
+				Code:      "metadata_unreadable",
+				Message:   fmt.Sprintf("project %q metadata could not be read: %v", project.ProjectID, metaErr),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+			continue
+		}
+		if meta.ProjectID != project.ProjectID {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "error",
+				Code:      "project_id_mismatch",
+				Message:   fmt.Sprintf("project %q metadata has project ID %q", project.ProjectID, meta.ProjectID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+		}
+		if meta.WarrenID != manifest.WarrenID {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "error",
+				Code:      "warren_id_mismatch",
+				Message:   fmt.Sprintf("project %q metadata has Warren ID %q", project.ProjectID, meta.WarrenID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+		}
+		if meta.VaultID != "" {
+			if existingProject, ok := vaultIDs[meta.VaultID]; ok && existingProject != project.ProjectID {
+				report.Issues = append(report.Issues, DoctorIssue{
+					Severity:  "error",
+					Code:      "duplicate_vault_id",
+					Message:   fmt.Sprintf("project %q and project %q both use vault ID %q", existingProject, project.ProjectID, meta.VaultID),
+					ProjectID: project.ProjectID,
+					Path:      project.Path,
+				})
+			} else {
+				vaultIDs[meta.VaultID] = project.ProjectID
+			}
+		}
+		if _, err := os.Stat(filepath.Join(projectPath, ".marmot-data", "embeddings.db")); err != nil {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "warning",
+				Code:      "embeddings_missing",
+				Message:   fmt.Sprintf("project %q has no embedding database; run indexing before relying on semantic search", project.ProjectID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+		}
+	}
+	for _, bridge := range manifest.Bridges {
+		if !known[bridge.Source] {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity: "error",
+				Code:     "bridge_source_missing",
+				Message:  fmt.Sprintf("bridge source project %q is not registered", bridge.Source),
+			})
+		}
+		if !known[bridge.Target] {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity: "error",
+				Code:     "bridge_target_missing",
+				Message:  fmt.Sprintf("bridge target project %q is not registered", bridge.Target),
+			})
+		}
+	}
+	return report, nil
+}
+
+// Format rewrites the manifest with canonical YAML while preserving markdown body text.
+func Format(root string) (*Manifest, error) {
+	manifest, body, err := LoadManifest(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil, err
+	}
+	return manifest, nil
+}
+
+// GenerateProjectID converts display text into a safe Warren project ID.
+func GenerateProjectID(name string) string {
+	name = strings.TrimSpace(strings.ToLower(name))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range name {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if b.Len() > 0 && !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	id := strings.Trim(b.String(), "-")
+	if id == "" {
+		return "project"
+	}
+	if len(id) > 128 {
+		id = strings.Trim(id[:128], "-")
+	}
+	if id == "" {
+		return "project"
+	}
+	return id
+}
+
 // LoadManifest reads _warren.md from a Warren repository root.
 func LoadManifest(root string) (*Manifest, string, error) {
 	path, err := manifestPath(root)
@@ -99,6 +516,13 @@ func LoadManifest(root string) (*Manifest, string, error) {
 	body, err := parseMarkdownYAML(data, &m)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse Warren manifest: %w", err)
+	}
+	if m.WarrenID == "" {
+		m.WarrenID = GenerateProjectID(filepath.Base(root))
+	}
+	defaultProjectPaths(&m)
+	if err := validateManifest(root, &m); err != nil {
+		return nil, "", err
 	}
 	normalizeManifest(&m)
 	if err := validateManifest(root, &m); err != nil {
@@ -115,6 +539,9 @@ func SaveManifest(root string, manifest *Manifest, body string) error {
 	}
 	if manifest == nil {
 		manifest = &Manifest{}
+	}
+	if err := validateManifest(root, manifest); err != nil {
+		return err
 	}
 	normalizeManifest(manifest)
 	if err := validateManifest(root, manifest); err != nil {
@@ -611,8 +1038,10 @@ func normalizeManifest(m *Manifest) {
 	m.Projects = uniqueProjects(m.Projects)
 	for i := range m.Projects {
 		m.Projects[i].Aliases = uniqueSorted(m.Projects[i].Aliases)
+		m.Projects[i].Path = filepath.ToSlash(filepath.Clean(m.Projects[i].Path))
 	}
 	sort.Slice(m.Projects, func(i, j int) bool { return m.Projects[i].ProjectID < m.Projects[j].ProjectID })
+	m.Bridges = uniqueBridges(m.Bridges)
 }
 
 func normalizeProjectMetadata(m *ProjectMetadata) {
@@ -651,10 +1080,7 @@ func validateManifest(root string, m *Manifest) error {
 		}
 	}
 	for _, bridge := range m.Bridges {
-		if err := ValidateProjectID(bridge.Source); err != nil {
-			return err
-		}
-		if err := ValidateProjectID(bridge.Target); err != nil {
+		if err := validateBridge(bridge); err != nil {
 			return err
 		}
 	}
@@ -799,6 +1225,7 @@ func uniqueSorted(names []string) []string {
 	seen := make(map[string]struct{}, len(names))
 	out := make([]string, 0, len(names))
 	for _, name := range names {
+		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
@@ -812,9 +1239,24 @@ func uniqueSorted(names []string) []string {
 	return out
 }
 
+func removeNames(names []string, removals []string) []string {
+	remove := make(map[string]struct{}, len(removals))
+	for _, name := range removals {
+		remove[name] = struct{}{}
+	}
+	out := names[:0]
+	for _, name := range names {
+		if _, ok := remove[name]; !ok {
+			out = append(out, name)
+		}
+	}
+	return uniqueSorted(out)
+}
+
 func uniqueProjects(projects []Project) []Project {
 	seen := make(map[string]Project, len(projects))
 	for _, project := range projects {
+		project.ProjectID = strings.TrimSpace(project.ProjectID)
 		if project.ProjectID == "" {
 			continue
 		}
@@ -825,4 +1267,126 @@ func uniqueProjects(projects []Project) []Project {
 		out = append(out, project)
 	}
 	return out
+}
+
+func uniqueBridges(bridges []Bridge) []Bridge {
+	seen := make(map[string]Bridge, len(bridges))
+	for _, bridge := range bridges {
+		normalizeBridge(&bridge)
+		if bridge.Source == "" || bridge.Target == "" || len(bridge.Relations) == 0 {
+			continue
+		}
+		key := bridge.Source + "\x00" + bridge.Target
+		if existing, ok := seen[key]; ok {
+			bridge.Relations = uniqueSorted(append(existing.Relations, bridge.Relations...))
+		}
+		seen[key] = bridge
+	}
+	out := make([]Bridge, 0, len(seen))
+	for _, bridge := range seen {
+		out = append(out, bridge)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Source == out[j].Source {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Source < out[j].Source
+	})
+	return out
+}
+
+func normalizeBridge(bridge *Bridge) {
+	bridge.Source = strings.TrimSpace(bridge.Source)
+	bridge.Target = strings.TrimSpace(bridge.Target)
+	bridge.Relations = uniqueSorted(bridge.Relations)
+}
+
+func defaultProjectPaths(m *Manifest) {
+	for i := range m.Projects {
+		if m.Projects[i].ProjectID != "" && m.Projects[i].Path == "" {
+			m.Projects[i].Path = defaultProjectPath(m.Projects[i].ProjectID)
+		}
+	}
+}
+
+func validateBridge(bridge Bridge) error {
+	if err := ValidateProjectID(bridge.Source); err != nil {
+		return fmt.Errorf("bridge source: %w", err)
+	}
+	if err := ValidateProjectID(bridge.Target); err != nil {
+		return fmt.Errorf("bridge target: %w", err)
+	}
+	if len(bridge.Relations) == 0 {
+		return fmt.Errorf("bridge %q -> %q must include at least one relation", bridge.Source, bridge.Target)
+	}
+	for _, relation := range bridge.Relations {
+		if err := validateRelation(relation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateRelation(relation string) error {
+	if relation == "" {
+		return fmt.Errorf("bridge relation must not be empty")
+	}
+	switch node.EdgeRelation(relation) {
+	case node.Contains, node.Imports, node.Extends, node.Implements,
+		node.Calls, node.Reads, node.Writes, node.References,
+		node.CrossProject, node.Associated:
+		return nil
+	default:
+		return fmt.Errorf("bridge relation %q is not a known edge relation", relation)
+	}
+}
+
+func projectSet(projects []Project) map[string]bool {
+	known := make(map[string]bool, len(projects))
+	for _, project := range projects {
+		known[project.ProjectID] = true
+	}
+	return known
+}
+
+func defaultProjectPath(projectID string) string {
+	return filepath.ToSlash(filepath.Join("projects", projectID, MarmotDirName))
+}
+
+func generateProjectIDFromPath(path string) string {
+	clean := filepath.Clean(path)
+	if filepath.Base(clean) == MarmotDirName {
+		return GenerateProjectID(filepath.Base(filepath.Dir(clean)))
+	}
+	return GenerateProjectID(filepath.Base(clean))
+}
+
+func ensureProjectMetadata(root, warrenID string, project Project) error {
+	marmotDir := filepath.Join(root, filepath.FromSlash(project.Path))
+	meta, body, err := LoadProjectMetadata(marmotDir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		meta = &ProjectMetadata{VaultID: project.ProjectID}
+	}
+	meta.ProjectID = project.ProjectID
+	meta.WarrenID = warrenID
+	meta.Aliases = uniqueSorted(append(meta.Aliases, project.Aliases...))
+	return SaveProjectMetadata(marmotDir, meta, body)
+}
+
+func preflightProjectMetadata(root, warrenID string, project Project) error {
+	marmotDir := filepath.Join(root, filepath.FromSlash(project.Path))
+	meta, _, err := LoadProjectMetadata(marmotDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	meta.ProjectID = project.ProjectID
+	meta.WarrenID = warrenID
+	meta.Aliases = uniqueSorted(append(meta.Aliases, project.Aliases...))
+	return validateProjectMetadata(meta)
 }
