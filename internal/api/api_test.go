@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/routes"
+	warrenpkg "github.com/nurozen/context-marmot/internal/warren"
 )
 
 // testEdge is a convenience struct for writing test node files.
@@ -129,6 +132,75 @@ func newTestServer(t *testing.T) (*Server, *mcpserver.Engine) {
 	return server, engine
 }
 
+func setupAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID string) string {
+	t.Helper()
+	warrenRoot := t.TempDir()
+	marmotDir := filepath.Join(warrenRoot, "projects", projectID, ".marmot")
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir Warren .marmot-data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte("---\nversion: \"1\"\nvault_id: "+vaultID+"\nnamespace: default\nembedding_provider: mock\n---\n"), 0o644); err != nil {
+		t.Fatalf("write Warren config: %v", err)
+	}
+	if err := warrenpkg.SaveProjectMetadata(marmotDir, &warrenpkg.ProjectMetadata{
+		ProjectID: projectID,
+		WarrenID:  warrenID,
+		VaultID:   vaultID,
+	}, ""); err != nil {
+		t.Fatalf("SaveProjectMetadata: %v", err)
+	}
+	writeTestNode(t, marmotDir, "service/api", "module", "Service API", nil)
+	seedRemoteEmbedding(t, marmotDir, vaultID, "service/api", "Service API")
+	manifest := &warrenpkg.Manifest{
+		WarrenID: warrenID,
+		Projects: []warrenpkg.Project{{
+			ProjectID: projectID,
+			Path:      filepath.ToSlash(filepath.Join("projects", projectID, ".marmot")),
+		}},
+	}
+	if err := warrenpkg.SaveManifest(warrenRoot, manifest, ""); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot); err != nil {
+		t.Fatalf("RegisterWorkspaceWarren: %v", err)
+	}
+	if _, err := warrenpkg.Mount(workspaceRoot, warrenID, []string{projectID}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	return warrenRoot
+}
+
+func seedRemoteEmbedding(t *testing.T, marmotDir, vaultID, nodeID, text string) {
+	t.Helper()
+	embedder := embedding.NewMockEmbedder("mock-test")
+	vec, err := embedder.Embed(text)
+	if err != nil {
+		t.Fatalf("embed remote node %s: %v", nodeID, err)
+	}
+	embStore, err := embedding.NewStore(filepath.Join(marmotDir, ".marmot-data", "embeddings.db"))
+	if err != nil {
+		t.Fatalf("open remote embedding store %s: %v", vaultID, err)
+	}
+	defer func() { _ = embStore.Close() }()
+	h := sha256.Sum256([]byte(text))
+	if err := embStore.Upsert(nodeID, vec, hex.EncodeToString(h[:]), embedder.Model()); err != nil {
+		t.Fatalf("upsert remote embedding %s: %v", nodeID, err)
+	}
+}
+
+func wireWarrenVaultRegistry(t *testing.T, engine *mcpserver.Engine) {
+	t.Helper()
+	mounts, err := warrenpkg.ActiveMounts(engine.MarmotDir)
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	rt := &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
+	for _, mount := range mounts {
+		rt.Set(mount.VaultID, mount.Path)
+	}
+	engine.WithVaultRegistry(namespace.NewVaultRegistry("", engine.MarmotDir, nil, rt))
+}
+
 // doRequest is a helper that performs an HTTP request against the server handler
 // and returns the recorder for inspection.
 func doRequest(t *testing.T, handler http.Handler, method, path string, body string) *httptest.ResponseRecorder {
@@ -215,6 +287,196 @@ func TestHandleGraph(t *testing.T) {
 	// Verify outbound edges are present in the flat edges list.
 	if resp.EdgeCount < 4 {
 		t.Errorf("expected at least 4 outbound edges total, got %d", resp.EdgeCount)
+	}
+}
+
+func TestWarrenGraphAndEditableWritePolicy(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+	workspaceRoot := filepath.Dir(engine.MarmotDir)
+	warrenRoot := setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
+	wireWarrenVaultRegistry(t, engine)
+
+	rec := doRequest(t, handler, "GET", "/api/warren/product-platform/graph", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var graphResp GraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&graphResp); err != nil {
+		t.Fatalf("decode graph: %v", err)
+	}
+	if graphResp.NodeCount != 1 {
+		t.Fatalf("expected 1 Warren node, got %+v", graphResp)
+	}
+	if graphResp.Nodes[0].ID != "@project-a-vault/service/api" {
+		t.Fatalf("unexpected Warren node ID: %+v", graphResp.Nodes[0])
+	}
+	if graphResp.Nodes[0].Provenance == nil || graphResp.Nodes[0].Provenance.ProjectID != "project-a" || graphResp.Nodes[0].Provenance.Editable {
+		t.Fatalf("unexpected provenance: %+v", graphResp.Nodes[0].Provenance)
+	}
+
+	updatePath := "/api/node/" + url.PathEscape("@project-a-vault/service/api")
+	rec = doRequest(t, handler, "PUT", updatePath, `{"summary":"updated summary"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected read-only 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err := warrenpkg.SetEditable(workspaceRoot, "product-platform", "project-a", true); err != nil {
+		t.Fatalf("SetEditable: %v", err)
+	}
+	rec = doRequest(t, handler, "PUT", updatePath, `{"summary":"updated summary"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected editable write 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	store := node.NewStore(filepath.Join(warrenRoot, "projects", "project-a", ".marmot"))
+	updated, err := store.LoadNode(store.NodePath("service/api"))
+	if err != nil {
+		t.Fatalf("load updated Warren node: %v", err)
+	}
+	if updated.Summary != "updated summary" {
+		t.Fatalf("summary was not updated through editable Warren write: %q", updated.Summary)
+	}
+
+	rec = doRequest(t, handler, "PUT", updatePath, `{"context":"context-only update drives embeddings"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected context-only write 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	embStore, err := embedding.NewStore(filepath.Join(warrenRoot, "projects", "project-a", ".marmot", ".marmot-data", "embeddings.db"))
+	if err != nil {
+		t.Fatalf("open Warren embedding store: %v", err)
+	}
+	defer func() { _ = embStore.Close() }()
+	vec, err := engine.Embedder.Embed("context-only update drives embeddings")
+	if err != nil {
+		t.Fatalf("embed context-only query: %v", err)
+	}
+	results, err := embStore.Search(vec, 1, engine.Embedder.Model())
+	if err != nil || len(results) == 0 || results[0].NodeID != "service/api" {
+		t.Fatalf("context-only edit did not refresh Warren embeddings: results=%+v err=%v", results, err)
+	}
+}
+
+func TestWarrenGraphQualifiesEmbeddedNodeEdges(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+	workspaceRoot := filepath.Dir(engine.MarmotDir)
+	warrenRoot := setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
+
+	store := node.NewStore(filepath.Join(warrenRoot, "projects", "project-a", ".marmot"))
+	if err := store.SaveNode(&node.Node{
+		ID:        "service/api",
+		Type:      "module",
+		Namespace: "default",
+		Status:    node.StatusActive,
+		Summary:   "Service API",
+		Edges:     []node.Edge{{Target: "service/db", Relation: node.References}},
+	}); err != nil {
+		t.Fatalf("save Warren api node with edge: %v", err)
+	}
+	if err := store.SaveNode(&node.Node{
+		ID:        "service/db",
+		Type:      "module",
+		Namespace: "default",
+		Status:    node.StatusActive,
+		Summary:   "Service database",
+	}); err != nil {
+		t.Fatalf("save Warren db node: %v", err)
+	}
+
+	rec := doRequest(t, handler, "GET", "/api/warren/product-platform/graph", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var graphResp GraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&graphResp); err != nil {
+		t.Fatalf("decode graph: %v", err)
+	}
+	var apiNode APINode
+	for _, n := range graphResp.Nodes {
+		if n.ID == "@project-a-vault/service/api" {
+			apiNode = n
+			break
+		}
+	}
+	if apiNode.ID == "" {
+		t.Fatalf("expected qualified api node, got %+v", graphResp.Nodes)
+	}
+	if len(apiNode.Edges) != 1 {
+		t.Fatalf("expected one embedded edge, got %+v", apiNode.Edges)
+	}
+	if apiNode.Edges[0].Source != "@project-a-vault/service/api" || apiNode.Edges[0].Target != "@project-a-vault/service/db" {
+		t.Fatalf("embedded edge was not qualified: %+v", apiNode.Edges[0])
+	}
+}
+
+func TestWarrenAPISearchAndUnknownWarrenPolicy(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+	workspaceRoot := filepath.Dir(engine.MarmotDir)
+	setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
+	wireWarrenVaultRegistry(t, engine)
+
+	rec := doRequest(t, handler, "GET", "/api/warrens", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected warrens 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "ActiveProjects") || !strings.Contains(rec.Body.String(), "active_projects") {
+		t.Fatalf("expected JSON-tagged Warren state, got %s", rec.Body.String())
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/search?q=Service%20API&ns=_warren/product-platform", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected Warren search 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var searchResp SearchResponse
+	if err := json.NewDecoder(rec.Body).Decode(&searchResp); err != nil {
+		t.Fatalf("decode search: %v", err)
+	}
+	if len(searchResp.Results) == 0 {
+		t.Fatal("expected Warren-mounted search result")
+	}
+	found := false
+	for _, result := range searchResp.Results {
+		if !strings.HasPrefix(result.NodeID, "@") {
+			t.Fatalf("Warren-scoped search leaked local result: %+v", result)
+		}
+		if result.NodeID == "@project-a-vault/service/api" {
+			found = true
+			if result.Provenance == nil || result.Provenance.WarrenID != "product-platform" {
+				t.Fatalf("missing Warren provenance on search result: %+v", result)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected qualified Warren result, got %+v", searchResp.Results)
+	}
+
+	rec = doRequest(t, handler, "GET", "/api/search?q=Service%20API&ns=default", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected scoped local search 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	searchResp = SearchResponse{}
+	if err := json.NewDecoder(rec.Body).Decode(&searchResp); err != nil {
+		t.Fatalf("decode scoped local search: %v", err)
+	}
+	for _, result := range searchResp.Results {
+		if strings.HasPrefix(result.NodeID, "@") || result.Provenance != nil {
+			t.Fatalf("default namespace search leaked Warren result: %+v", result)
+		}
+	}
+
+	for _, path := range []string{
+		"/api/warren/not-registered/graph",
+		"/api/warren/not-registered/status",
+	} {
+		rec = doRequest(t, handler, "GET", path, "")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	rec = doRequest(t, handler, "POST", "/api/warren/not-registered/refresh", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected refresh 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -891,7 +1153,7 @@ func TestHandleGraphAllBridgeEdges(t *testing.T) {
 
 	// Wire up a namespace manager so handleGraphAll sees both namespaces.
 	engine.NSManager = &namespace.Manager{
-		VaultDir:   marmotDir,
+		VaultDir: marmotDir,
 		Namespaces: map[string]*namespace.Namespace{
 			"alpha": {Name: "alpha"},
 			"beta":  {Name: "beta"},

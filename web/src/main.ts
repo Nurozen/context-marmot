@@ -1,4 +1,4 @@
-import { fetchGraph, fetchGraphAll, fetchNamespaces } from './api';
+import { fetchGraph, fetchGraphAll, fetchNamespaces, fetchWarrenGraph, fetchWarrens } from './api';
 import { GraphView } from './graph-view';
 import { renderLegend } from './legend';
 import { DetailPanel } from './detail-panel';
@@ -46,9 +46,12 @@ async function init(): Promise<void> {
     }
   });
 
-  search = new Search((nodeId: string) => {
-    highlightNode(nodeId);
-  });
+  search = new Search(
+    (nodeId: string) => {
+      highlightNode(nodeId);
+    },
+    () => (currentNamespace === '_all' ? undefined : currentNamespace),
+  );
 
   /* ── Issues panel ────────────────────────────────────────────── */
   const issuesContainer = document.getElementById('issues-list')!;
@@ -156,6 +159,23 @@ async function init(): Promise<void> {
       currentNamespace = namespaces[0].name;
       select.value = currentNamespace;
     }
+    const warrenData = await fetchWarrens();
+    const warrenEntries = Object.entries(warrenData.warrens ?? {}).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    if (warrenEntries.length > 0 && select.options.length > 0) {
+      const divider = document.createElement('option');
+      divider.disabled = true;
+      divider.textContent = 'Warrens';
+      select.appendChild(divider);
+    }
+    for (const [warrenId, warren] of warrenEntries) {
+      const opt = document.createElement('option');
+      opt.value = `_warren/${warrenId}`;
+      const count = warren.active_projects?.length ?? 0;
+      opt.textContent = `Warren ${warrenId} (${count} active)`;
+      select.appendChild(opt);
+    }
   } catch {
     // API not available yet -- add a default option
     const opt = document.createElement('option');
@@ -201,6 +221,8 @@ async function loadGraph(): Promise<void> {
   try {
     if (currentNamespace === '_all') {
       currentData = await fetchGraphAll(includeSuperseded);
+    } else if (currentNamespace.startsWith('_warren/')) {
+      currentData = await fetchWarrenGraph(currentNamespace.slice('_warren/'.length));
     } else {
       currentData = await fetchGraph(currentNamespace, includeSuperseded);
     }
@@ -224,7 +246,7 @@ async function loadGraph(): Promise<void> {
     graphView?.update(currentData);
 
     /* Sync the group-by dropdown UI for the all-namespaces view */
-    if (currentNamespace === '_all') {
+    if (currentNamespace === '_all' || currentNamespace.startsWith('_warren/')) {
       const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
       groupBySelect.value = 'namespace';
     }
@@ -233,7 +255,11 @@ async function loadGraph(): Promise<void> {
     curator.updateGraphData(currentData, currentNamespace);
 
     /* Load curation suggestions after graph data is available */
-    issuesPanel.load(currentNamespace === '_all' ? undefined : currentNamespace);
+    issuesPanel.load(
+      currentNamespace === '_all' || currentNamespace.startsWith('_warren/')
+        ? undefined
+        : currentNamespace,
+    );
   } catch (err) {
     console.error('Failed to load graph:', err);
   }

@@ -16,6 +16,7 @@
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve]                         Manage vault routing table
+//	marmot warren     [init|project|bridge|doctor|format|register|mount|...] Manage Warrens
 //	marmot ui         [--dir .marmot] [--port 3274] [--no-open]    Start graph UI server
 //	marmot sdk        [--out <path>] [--base-url <url>]           Generate TypeScript SDK
 package main
@@ -103,6 +104,8 @@ func run(args []string) int {
 		return cmdReembed(cmdArgs)
 	case "route":
 		return cmdRoute(cmdArgs)
+	case "warren":
+		return cmdWarren(cmdArgs)
 	case "ui":
 		return cmdUI(cmdArgs)
 	case "sdk":
@@ -116,7 +119,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, ui, sdk")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, warren, ui, sdk")
 }
 
 // ---------------------------------------------------------------------------

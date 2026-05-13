@@ -106,6 +106,22 @@ export class DetailPanel {
     nsSection.appendChild(nsText);
     this.content.appendChild(nsSection);
 
+    // ── Warren provenance ──
+    if (node.provenance) {
+      const provenanceSection = this.createSection('Provenance');
+      const pre = document.createElement('pre');
+      pre.textContent = [
+        `Source ${node.provenance.source ?? 'unknown'}`,
+        node.provenance.warren_id ? `Warren ${node.provenance.warren_id}` : '',
+        node.provenance.project_id ? `Project ${node.provenance.project_id}` : '',
+        node.provenance.vault_id ? `Vault ${node.provenance.vault_id}` : '',
+        node.provenance.qualified_id ? `ID ${node.provenance.qualified_id}` : '',
+        `Editable ${node.provenance.editable ? 'yes' : 'no'}`,
+      ].filter(Boolean).join('\n');
+      provenanceSection.appendChild(pre);
+      this.content.appendChild(provenanceSection);
+    }
+
     // ── Summary (editable) ──
     const summarySection = this.createSection('Summary');
     const summaryArea = document.createElement('textarea');
@@ -187,6 +203,7 @@ export class DetailPanel {
     // ── Save button ──
     const saveBtn = document.createElement('button');
     saveBtn.textContent = 'Save Changes';
+    const isReadOnlyWarrenNode = Boolean(node.provenance && !node.provenance.editable);
     saveBtn.disabled = true;
     Object.assign(saveBtn.style, {
       marginTop: '12px',
@@ -203,7 +220,12 @@ export class DetailPanel {
       transition: 'opacity var(--transition-fast)',
     });
 
+    if (isReadOnlyWarrenNode) {
+      saveBtn.textContent = 'Read-only Warren Node';
+    }
+
     const enableSave = () => {
+      if (isReadOnlyWarrenNode) return;
       saveBtn.disabled = false;
       saveBtn.style.opacity = '1';
     };
@@ -212,6 +234,7 @@ export class DetailPanel {
     contextArea.addEventListener('input', enableSave);
 
     saveBtn.addEventListener('click', () => {
+      if (isReadOnlyWarrenNode) return;
       if (!this.currentNodeId) return;
       saveBtn.disabled = true;
       saveBtn.style.opacity = '0.5';

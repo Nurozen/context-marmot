@@ -13,6 +13,7 @@ export interface APINode {
   edge_count: number;
   is_stale: boolean;
   tags?: string[];
+  provenance?: Provenance;
 }
 
 export interface APISource {
@@ -38,6 +39,16 @@ export interface GraphResponse {
   namespaces?: string[];
 }
 
+export interface Provenance {
+  source?: 'local' | 'warren_mount' | 'warren_materialized' | string;
+  warren_id?: string;
+  project_id?: string;
+  vault_id?: string;
+  marmot_dir?: string;
+  qualified_id?: string;
+  editable?: boolean;
+}
+
 export interface APIHeatPair {
   a: string;
   b: string;
@@ -50,6 +61,17 @@ export interface NamespaceInfo {
   name: string;
   node_count: number;
   has_summary: boolean;
+}
+
+export interface WorkspaceWarren {
+  path: string;
+  active_projects?: string[];
+  editable_projects?: string[];
+  materialized_projects?: string[];
+}
+
+export interface WarrensResponse {
+  warrens: Record<string, WorkspaceWarren>;
 }
 
 export interface BridgeInfo {
@@ -65,6 +87,7 @@ export interface SearchResult {
   summary: string;
   type: string;
   namespace: string;
+  provenance?: Provenance;
 }
 
 export interface SummaryInfo {
