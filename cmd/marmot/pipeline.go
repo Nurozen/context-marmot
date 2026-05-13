@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/nurozen/context-marmot/internal/api"
 	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/config"
@@ -25,9 +26,9 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/routes"
 	"github.com/nurozen/context-marmot/internal/summary"
-	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/update"
 	"github.com/nurozen/context-marmot/internal/verify"
+	"github.com/nurozen/context-marmot/internal/warren"
 	"github.com/nurozen/context-marmot/web"
 )
 
@@ -142,75 +143,43 @@ func runIndexPipeline(dir string, force bool) error {
 	return nil
 }
 
-// runQueryPipeline executes the full query pipeline:
-// load nodes -> build graph -> embed query -> search -> traverse -> compact -> print XML.
+// runQueryPipeline executes the same query path used by MCP/UI so cross-vault
+// routes and active Warren mounts are included consistently.
 func runQueryPipeline(dir, query string, depth, budget int) error {
-	// 1. Load node store and graph.
-	store := node.NewStore(dir)
-	g, err := graph.LoadGraph(store)
-	if err != nil {
-		return fmt.Errorf("load graph: %w", err)
-	}
-
-	if g.NodeCount() == 0 {
-		fmt.Println(`<context_result tokens="0" nodes="0">
-</context_result>`)
-		return nil
-	}
-
-	// 2. Open embedding store.
-	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
-	embStore, err := embedding.NewStore(dbPath)
-	if err != nil {
-		return fmt.Errorf("open embedding store: %w", err)
-	}
-	defer func() { _ = embStore.Close() }()
-
-	// 3. Create embedder from config and embed the query.
-	embedder, err := loadEmbedder(dir)
+	result, err := buildEngine(dir)
 	if err != nil {
 		return err
 	}
-	queryVec, err := embedder.Embed(query)
+	defer result.Cleanup()
+
+	res, err := result.Engine.HandleContextQuery(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "context_query",
+			Arguments: map[string]any{
+				"query":  query,
+				"depth":  depth,
+				"budget": budget,
+			},
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("embed query: %w", err)
+		return err
 	}
-
-	// 4. Search for top-K entry nodes.
-	topK := 5
-	results, err := embStore.Search(queryVec, topK, embedder.Model())
-	if err != nil {
-		// If no embeddings exist yet, fall back to empty result.
-		fmt.Println(`<context_result tokens="0" nodes="0">
-</context_result>`)
-		return nil
+	if res.IsError {
+		return fmt.Errorf("%s", toolResultText(res))
 	}
-
-	if len(results) == 0 {
-		fmt.Println(`<context_result tokens="0" nodes="0">
-</context_result>`)
-		return nil
-	}
-
-	// Collect entry IDs from search results.
-	entryIDs := make([]string, 0, len(results))
-	for _, r := range results {
-		entryIDs = append(entryIDs, r.NodeID)
-	}
-
-	// 5. Traverse the graph.
-	config := traversal.TraversalConfig{
-		EntryIDs:    entryIDs,
-		MaxDepth:    depth,
-		TokenBudget: budget,
-		Mode:        "adjacency",
-	}
-	subgraph := traversal.Traverse(g, config)
-
-	// 6. Compact and print.
-	result := traversal.Compact(g, subgraph, budget)
-	fmt.Println(result.XML)
+	fmt.Println(toolResultText(res))
 	return nil
+}
+
+func toolResultText(res *mcp.CallToolResult) string {
+	if res == nil || len(res.Content) == 0 {
+		return ""
+	}
+	if text, ok := res.Content[0].(mcp.TextContent); ok {
+		return text.Text
+	}
+	return fmt.Sprintf("%v", res.Content[0])
 }
 
 // engineResult holds the fully-wired engine and its cleanup function.
@@ -254,12 +223,25 @@ func buildEngine(dir string) (*engineResult, error) {
 		nsName = "default"
 	}
 
-	// Wire vault registry for cross-vault traversal.
+	// Wire vault registry for cross-vault and Warren-mounted traversal.
 	rt, _ := routes.Load() // best-effort; nil is fine
+	if rt == nil {
+		rt = &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
+	}
 	vaultID := vaultCfg.VaultID
+	if mounts, mountErr := warren.ActiveMounts(dir); mountErr == nil {
+		for _, mount := range mounts {
+			if mount.VaultID != "" && mount.Available {
+				rt.Set(mount.VaultID, mount.Path)
+			}
+		}
+		if len(mounts) > 0 {
+			fmt.Fprintf(os.Stderr, "warren: %d active project mounts loaded\n", len(mounts))
+		}
+	}
 	hasCrossVaultBridges := nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0
 	hasRoutes := rt != nil && len(rt.List()) > 0
-	if vaultID != "" && (hasCrossVaultBridges || hasRoutes) {
+	if hasCrossVaultBridges || hasRoutes {
 		var bridges []*namespace.Bridge
 		if nsMgr != nil {
 			bridges = nsMgr.CrossVaultBridges

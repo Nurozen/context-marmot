@@ -9,16 +9,19 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/nurozen/context-marmot/internal/curator"
+	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/sdkgen"
 	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/verify"
+	"github.com/nurozen/context-marmot/internal/warren"
 )
 
 // handleGraph returns the full graph for a namespace.
@@ -315,6 +318,11 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasPrefix(id, "@") {
+		s.handleWarrenNodeUpdate(w, id, req)
+		return
+	}
+
 	n, ok := s.engine.ResolveNodeID(id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "node not found: "+id)
@@ -333,13 +341,14 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summaryChanged := false
+	embeddingChanged := false
 	if req.Summary != "" {
 		diskNode.Summary = req.Summary
-		summaryChanged = true
+		embeddingChanged = true
 	}
 	if req.Context != "" {
 		diskNode.Context = req.Context
+		embeddingChanged = true
 	}
 	if req.Tags != nil {
 		diskNode.Tags = *req.Tags
@@ -358,7 +367,7 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-embed if summary changed.
-	if summaryChanged && s.engine.Embedder != nil {
+	if embeddingChanged && s.engine.Embedder != nil {
 		embedText := diskNode.Summary
 		if diskNode.Context != "" {
 			ctxSnip := diskNode.Context
@@ -382,6 +391,80 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, NodeUpdateResponse{
 		NodeID: diskNode.ID,
 		Hash:   nodeHash,
+		Status: "updated",
+	})
+}
+
+func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req NodeUpdateRequest) {
+	vaultID, localID, ok := splitQualifiedVaultID(id)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid Warren node id: "+id)
+		return
+	}
+	mount, ok := s.findWarrenMountByVault(vaultID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "Warren mount not found for vault: "+vaultID)
+		return
+	}
+	if !mount.Editable {
+		writeError(w, http.StatusForbidden, "Warren project is read-only in this workspace: "+mount.ProjectID)
+		return
+	}
+
+	store := node.NewStore(mount.Path)
+	path := store.NodePath(localID)
+	diskNode, err := store.LoadNode(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "node not found: "+id)
+		return
+	}
+
+	embeddingChanged := false
+	if req.Summary != "" {
+		diskNode.Summary = req.Summary
+		embeddingChanged = true
+	}
+	if req.Context != "" {
+		diskNode.Context = req.Context
+		embeddingChanged = true
+	}
+	if req.Tags != nil {
+		diskNode.Tags = *req.Tags
+	}
+
+	if err := store.SaveNode(diskNode); err != nil {
+		writeError(w, http.StatusInternalServerError, "save Warren node: "+err.Error())
+		return
+	}
+
+	if embeddingChanged && s.engine.Embedder != nil {
+		embedText := diskNode.Summary
+		if diskNode.Context != "" {
+			ctxSnip := diskNode.Context
+			if len(ctxSnip) > 6000 {
+				ctxSnip = ctxSnip[:6000]
+			}
+			embedText = diskNode.Summary + "\n\n" + ctxSnip
+		}
+		if embedText != "" {
+			vec, err := s.engine.Embedder.Embed(embedText)
+			if err == nil {
+				embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
+				if storeErr == nil {
+					h := sha256.Sum256([]byte(embedText))
+					_ = embStore.Upsert(diskNode.ID, vec, hex.EncodeToString(h[:]), s.engine.Embedder.Model())
+					_ = embStore.Close()
+				}
+			}
+		}
+	}
+	if s.engine.VaultRegistry != nil {
+		_ = s.engine.VaultRegistry.Refresh(vaultID)
+	}
+
+	writeJSON(w, http.StatusOK, NodeUpdateResponse{
+		NodeID: id,
+		Hash:   verify.ComputeNodeHash(diskNode),
 		Status: "updated",
 	})
 }
@@ -422,30 +505,128 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	results, err := s.engine.EmbeddingStore.Search(vec, limit, s.engine.Embedder.Model())
 	if err != nil {
 		// Graceful degradation: empty results on model mismatch or empty store.
-		writeJSON(w, http.StatusOK, SearchResponse{Results: []SearchResult{}})
-		return
+		results = []embedding.ScoredResult{}
 	}
+	results = append(results, s.searchMountedVaults(vec, ns, limit)...)
+	results = dedupeAndRankSearchResults(results, limit)
 
 	resp := SearchResponse{Results: make([]SearchResult, 0, len(results))}
 	for _, sr := range results {
-		n, ok := s.engine.GetGraph().GetNode(sr.NodeID)
+		if strings.HasPrefix(ns, "_warren/") && !strings.HasPrefix(sr.NodeID, "@") {
+			continue
+		}
+		n, provenance, ok := s.resolveSearchNode(sr.NodeID)
 		if !ok {
 			continue
 		}
 		// Apply optional namespace filter.
-		if ns != "" && !matchNamespace(n.Namespace, ns) {
+		if ns != "" && !strings.HasPrefix(ns, "_warren/") && !matchNamespace(n.Namespace, ns) {
 			continue
 		}
 		resp.Results = append(resp.Results, SearchResult{
-			NodeID:    sr.NodeID,
-			Score:     sr.Score,
-			Summary:   n.Summary,
-			Type:      n.Type,
-			Namespace: n.Namespace,
+			NodeID:     sr.NodeID,
+			Score:      sr.Score,
+			Summary:    n.Summary,
+			Type:       n.Type,
+			Namespace:  n.Namespace,
+			Provenance: provenance,
 		})
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embedding.ScoredResult {
+	if s.engine.VaultRegistry == nil {
+		return nil
+	}
+	warrenFilter := strings.TrimPrefix(ns, "_warren/")
+	if warrenFilter == ns {
+		return nil
+	}
+	mounts, _ := warren.ActiveMounts(s.engine.MarmotDir)
+	mountByVault := make(map[string]warren.ProjectStatus, len(mounts))
+	for _, mount := range mounts {
+		if !mount.Available || mount.VaultID == "" {
+			continue
+		}
+		if warrenFilter != "" && mount.WarrenID != warrenFilter {
+			continue
+		}
+		mountByVault[mount.VaultID] = mount
+	}
+	if len(mountByVault) == 0 {
+		return nil
+	}
+
+	var results []embedding.ScoredResult
+	for vaultID := range mountByVault {
+		if vaultID == "" || vaultID == s.engine.LocalVaultID {
+			continue
+		}
+		remoteStore, err := s.engine.VaultRegistry.ResolveEmbeddingStore(vaultID)
+		if err != nil {
+			continue
+		}
+		remoteResults, err := remoteStore.SearchActive(vec, limit, s.engine.Embedder.Model())
+		if err != nil {
+			continue
+		}
+		for _, result := range remoteResults {
+			results = append(results, embedding.ScoredResult{
+				NodeID: "@" + vaultID + "/" + result.NodeID,
+				Score:  result.Score,
+			})
+		}
+	}
+	return results
+}
+
+func (s *Server) resolveSearchNode(id string) (*node.Node, *warren.Provenance, bool) {
+	if !strings.HasPrefix(id, "@") {
+		n, ok := s.engine.GetGraph().GetNode(id)
+		return n, nil, ok
+	}
+	vaultID, nodeID, ok := splitQualifiedVaultID(id)
+	if !ok || s.engine.VaultRegistry == nil {
+		return nil, nil, false
+	}
+	n, ok := s.engine.VaultRegistry.Resolve(vaultID, nodeID)
+	if !ok {
+		return nil, nil, false
+	}
+	mount, mountOK := s.findWarrenMountByVault(vaultID)
+	if !mountOK {
+		return n, nil, true
+	}
+	return n, &warren.Provenance{
+		Source:      "warren_mount",
+		WarrenID:    mount.WarrenID,
+		ProjectID:   mount.ProjectID,
+		VaultID:     mount.VaultID,
+		MarmotDir:   mount.Path,
+		QualifiedID: id,
+		Editable:    mount.Editable,
+	}, true
+}
+
+func dedupeAndRankSearchResults(results []embedding.ScoredResult, limit int) []embedding.ScoredResult {
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	seen := make(map[string]bool, len(results))
+	out := make([]embedding.ScoredResult, 0, min(limit, len(results)))
+	for _, result := range results {
+		if seen[result.NodeID] {
+			continue
+		}
+		seen[result.NodeID] = true
+		out = append(out, result)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 // handleHeat returns heat map pairs for a namespace.
@@ -601,6 +782,180 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 		NodeCount:   result.NodeCount,
 		GeneratedAt: result.GeneratedAt.Format("2006-01-02T15:04:05Z07:00"),
 	})
+}
+
+// handleWarrens lists Warren registrations for the current local workspace.
+func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
+	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, WarrensResponse{Warrens: state.Warrens})
+}
+
+// handleWarrenStatus returns mounted/editable status for a single Warren.
+func (s *Server) handleWarrenStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "warren id is required")
+		return
+	}
+	workspaceRoot := filepath.Dir(s.engine.MarmotDir)
+	state, _, err := warren.LoadWorkspaceState(workspaceRoot)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
+		return
+	}
+	entry, ok := state.Warrens[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
+		return
+	}
+	statuses, err := warren.Status(workspaceRoot, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren status: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, WarrenStatusResponse{
+		WarrenID: id,
+		Path:     entry.Path,
+		Projects: statuses,
+	})
+}
+
+// handleWarrenGraph returns a graph view across active projects in one Warren.
+func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "warren id is required")
+		return
+	}
+	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
+		return
+	}
+	if _, ok := state.Warrens[id]; !ok {
+		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
+		return
+	}
+	mounts, err := warren.ActiveMounts(s.engine.MarmotDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren mounts: "+err.Error())
+		return
+	}
+
+	resp := GraphResponse{
+		Namespace: "_warren/" + id,
+		Nodes:     []APINode{},
+		Edges:     []APIEdge{},
+	}
+	nsSet := make(map[string]bool)
+
+	for _, mount := range mounts {
+		if mount.WarrenID != id || !mount.Available {
+			continue
+		}
+		store := node.NewStore(mount.Path)
+		g, err := graph.LoadGraph(store)
+		if err != nil {
+			continue
+		}
+		nodes := g.AllActiveNodes()
+		for _, n := range nodes {
+			outEdges := g.GetEdges(n.ID, graph.Outbound)
+			inEdges := g.GetEdges(n.ID, graph.Inbound)
+			apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
+			apiNode.ID = "@" + mount.VaultID + "/" + n.ID
+			apiNode.Provenance = &warren.Provenance{
+				Source:      "warren_mount",
+				WarrenID:    mount.WarrenID,
+				ProjectID:   mount.ProjectID,
+				VaultID:     mount.VaultID,
+				MarmotDir:   mount.Path,
+				QualifiedID: apiNode.ID,
+				Editable:    mount.Editable,
+			}
+			for i, edge := range apiNode.Edges {
+				edge.Source = apiNode.ID
+				if !strings.HasPrefix(edge.Target, "@") {
+					edge.Target = "@" + mount.VaultID + "/" + edge.Target
+				}
+				apiNode.Edges[i] = edge
+			}
+			resp.Nodes = append(resp.Nodes, apiNode)
+			if n.Namespace != "" {
+				nsSet[mount.ProjectID+":"+n.Namespace] = true
+			}
+			for _, e := range outEdges {
+				target := e.Target
+				if !strings.HasPrefix(target, "@") {
+					target = "@" + mount.VaultID + "/" + target
+				}
+				resp.Edges = append(resp.Edges, APIEdge{
+					Source:   apiNode.ID,
+					Target:   target,
+					Relation: string(e.Relation),
+					Class:    string(e.Class),
+				})
+			}
+		}
+	}
+
+	resp.NodeCount = len(resp.Nodes)
+	resp.EdgeCount = len(resp.Edges)
+	for ns := range nsSet {
+		resp.Namespaces = append(resp.Namespaces, ns)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleWarrenRefresh is a no-op refresh hook for git-backed Warren state.
+func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "warren id is required")
+		return
+	}
+	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
+		return
+	}
+	if _, ok := state.Warrens[id]; !ok {
+		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"warren_id": id,
+		"status":    "git-backed Warren state is read from disk",
+	})
+}
+
+func splitQualifiedVaultID(id string) (vaultID, nodeID string, ok bool) {
+	if !strings.HasPrefix(id, "@") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(id, "@")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+func (s *Server) findWarrenMountByVault(vaultID string) (warren.ProjectStatus, bool) {
+	mounts, err := warren.ActiveMounts(s.engine.MarmotDir)
+	if err != nil {
+		return warren.ProjectStatus{}, false
+	}
+	for _, mount := range mounts {
+		if mount.VaultID == vaultID {
+			return mount, true
+		}
+	}
+	return warren.ProjectStatus{}, false
 }
 
 // matchNamespace returns true if the node namespace matches the requested one.

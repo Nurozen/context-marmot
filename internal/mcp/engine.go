@@ -28,21 +28,21 @@ import (
 // Engine wires together all ContextMarmot internal components. It is the
 // single dependency injected into every MCP tool handler.
 type Engine struct {
-	NodeStore      *node.Store
-	graph          atomic.Pointer[graph.Graph]
-	EmbeddingStore *embedding.Store
-	Embedder       embedding.Embedder
-	Classifier       *classifier.Classifier // optional; nil = no CRUD classification
-	NSManager        *namespace.Manager     // optional; nil = single-namespace mode
-	HeatMap          *heatmap.HeatMap       // optional; nil = no heat-based priority
-	SummaryEngine    *summary.Engine        // optional; nil = no summary generation
-	UpdateEngine     *update.Engine         // optional; nil = no update detection
-	SummaryScheduler *summary.Scheduler     // optional; nil = no async summaries
+	NodeStore        *node.Store
+	graph            atomic.Pointer[graph.Graph]
+	EmbeddingStore   *embedding.Store
+	Embedder         embedding.Embedder
+	Classifier       *classifier.Classifier   // optional; nil = no CRUD classification
+	NSManager        *namespace.Manager       // optional; nil = single-namespace mode
+	HeatMap          *heatmap.HeatMap         // optional; nil = no heat-based priority
+	SummaryEngine    *summary.Engine          // optional; nil = no summary generation
+	UpdateEngine     *update.Engine           // optional; nil = no update detection
+	SummaryScheduler *summary.Scheduler       // optional; nil = no async summaries
 	VaultRegistry    *namespace.VaultRegistry // optional; nil = single-vault mode
 	// MarmotDir is the root .marmot directory.
 	MarmotDir    string
-	LocalVaultID string // cached from config; avoids repeated disk reads in handlers
-	nsMu      sync.Map // map[string]*sync.Mutex — per-namespace write locks
+	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
+	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
 }
 
 // SetGraph atomically replaces the in-memory graph.
@@ -227,7 +227,12 @@ func (e *Engine) ResolveNodeID(id string) (*node.Node, bool) {
 // Close releases resources held by the engine.
 func (e *Engine) Close() error {
 	if e.EmbeddingStore != nil {
-		return e.EmbeddingStore.Close()
+		if err := e.EmbeddingStore.Close(); err != nil {
+			return err
+		}
+	}
+	if e.VaultRegistry != nil {
+		e.VaultRegistry.Close()
 	}
 	return nil
 }

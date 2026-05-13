@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,6 +73,9 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 	// Step 2b: If cross-vault bridges exist, also search remote vault embeddings.
 	if e.VaultRegistry != nil {
 		for _, vid := range e.VaultRegistry.KnownVaultIDs() {
+			if vid == "" || vid == e.LocalVaultID {
+				continue
+			}
 			remoteStore, err := e.VaultRegistry.ResolveEmbeddingStore(vid)
 			if err != nil {
 				continue // best-effort
@@ -91,6 +95,7 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 			}
 		}
 	}
+	results = dedupeAndRankResults(results, 10)
 
 	entryIDs := make([]string, 0, len(results))
 	for _, r := range results {
@@ -141,6 +146,25 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	return mcp.NewToolResultText(compacted.XML), nil
+}
+
+func dedupeAndRankResults(results []embedding.ScoredResult, limit int) []embedding.ScoredResult {
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	seen := make(map[string]bool, len(results))
+	out := make([]embedding.ScoredResult, 0, min(limit, len(results)))
+	for _, r := range results {
+		if seen[r.NodeID] {
+			continue
+		}
+		seen[r.NodeID] = true
+		out = append(out, r)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 type contextEmbedder interface {
@@ -199,6 +223,9 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	id := req.GetString("id", "")
 	if id == "" {
 		return mcp.NewToolResultError("id parameter is required"), nil
+	}
+	if strings.HasPrefix(id, "@") {
+		return mcp.NewToolResultError("direct context_write to mounted Warren nodes is not supported; enable the project with marmot warren edit and use the Warren-aware API/UI write path"), nil
 	}
 	if err := node.ValidateNodeID(id); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil

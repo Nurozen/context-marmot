@@ -11,11 +11,13 @@ export class Search {
   private resultsContainer: HTMLElement;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private onSelect: (nodeId: string) => void;
+  private namespaceProvider: () => string | undefined;
   private results: SearchResult[] = [];
 
-  constructor(onSelect: (nodeId: string) => void) {
+  constructor(onSelect: (nodeId: string) => void, namespaceProvider: () => string | undefined) {
     this.input = document.getElementById('search-input') as HTMLInputElement;
     this.onSelect = onSelect;
+    this.namespaceProvider = namespaceProvider;
 
     // Create dropdown container positioned below the search input
     this.resultsContainer = document.createElement('div');
@@ -89,7 +91,7 @@ export class Search {
       return;
     }
     try {
-      const results = await searchNodes(query);
+      const results = await searchNodes(query, this.namespaceProvider());
       this.showResults(results);
     } catch {
       this.hideResults();

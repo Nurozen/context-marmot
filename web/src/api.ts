@@ -1,4 +1,11 @@
-import type { BridgeInfo, GraphResponse, NamespaceInfo, SearchResult, SummaryInfo } from './types';
+import type {
+  BridgeInfo,
+  GraphResponse,
+  NamespaceInfo,
+  SearchResult,
+  SummaryInfo,
+  WarrensResponse,
+} from './types';
 
 export async function fetchGraph(
   namespace: string,
@@ -53,6 +60,18 @@ export async function fetchBridges(): Promise<BridgeInfo[]> {
   if (!res.ok) throw new Error(`fetchBridges: ${res.status}`);
   const data = await res.json();
   return data.bridges ?? [];
+}
+
+export async function fetchWarrens(): Promise<WarrensResponse> {
+  const res = await fetch('/api/warrens');
+  if (!res.ok) throw new Error(`fetchWarrens: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchWarrenGraph(warrenId: string): Promise<GraphResponse> {
+  const res = await fetch(`/api/warren/${encodeURIComponent(warrenId)}/graph`);
+  if (!res.ok) throw new Error(`fetchWarrenGraph: ${res.status}`);
+  return res.json();
 }
 
 export async function updateNode(

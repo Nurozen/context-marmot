@@ -3,24 +3,28 @@
 // backed by the MCP Engine.
 package api
 
-import "github.com/nurozen/context-marmot/internal/curator"
+import (
+	"github.com/nurozen/context-marmot/internal/curator"
+	"github.com/nurozen/context-marmot/internal/warren"
+)
 
 // APINode is the JSON representation of a knowledge-graph node.
 type APINode struct {
-	ID           string     `json:"id"`
-	Type         string     `json:"type"`
-	Namespace    string     `json:"namespace"`
-	Status       string     `json:"status"`
-	ValidFrom    string     `json:"valid_from,omitempty"`
-	ValidUntil   string     `json:"valid_until,omitempty"`
-	SupersededBy string     `json:"superseded_by,omitempty"`
-	Summary      string     `json:"summary"`
-	Context      string     `json:"context"`
-	Source       *APISource `json:"source,omitempty"`
-	Edges        []APIEdge  `json:"edges"`
-	EdgeCount    int        `json:"edge_count"` // total in+out degree
-	IsStale      bool       `json:"is_stale"`
-	Tags         []string   `json:"tags"`
+	ID           string             `json:"id"`
+	Type         string             `json:"type"`
+	Namespace    string             `json:"namespace"`
+	Status       string             `json:"status"`
+	ValidFrom    string             `json:"valid_from,omitempty"`
+	ValidUntil   string             `json:"valid_until,omitempty"`
+	SupersededBy string             `json:"superseded_by,omitempty"`
+	Summary      string             `json:"summary"`
+	Context      string             `json:"context"`
+	Source       *APISource         `json:"source,omitempty"`
+	Edges        []APIEdge          `json:"edges"`
+	EdgeCount    int                `json:"edge_count"` // total in+out degree
+	IsStale      bool               `json:"is_stale"`
+	Tags         []string           `json:"tags"`
+	Provenance   *warren.Provenance `json:"provenance,omitempty"`
 }
 
 // APISource locates the original source code that a node was derived from.
@@ -65,11 +69,24 @@ type SearchResponse struct {
 
 // SearchResult is a single semantic search hit.
 type SearchResult struct {
-	NodeID    string  `json:"node_id"`
-	Score     float64 `json:"score"`
-	Summary   string  `json:"summary"`
-	Type      string  `json:"type"`
-	Namespace string  `json:"namespace"`
+	NodeID     string             `json:"node_id"`
+	Score      float64            `json:"score"`
+	Summary    string             `json:"summary"`
+	Type       string             `json:"type"`
+	Namespace  string             `json:"namespace"`
+	Provenance *warren.Provenance `json:"provenance,omitempty"`
+}
+
+// WarrensResponse lists local workspace Warren registrations.
+type WarrensResponse struct {
+	Warrens map[string]warren.WorkspaceWarren `json:"warrens"`
+}
+
+// WarrenStatusResponse describes a registered Warren in this workspace.
+type WarrenStatusResponse struct {
+	WarrenID string                 `json:"warren_id"`
+	Path     string                 `json:"path"`
+	Projects []warren.ProjectStatus `json:"projects"`
 }
 
 // NamespacesResponse is returned by the GET /api/namespaces endpoint.

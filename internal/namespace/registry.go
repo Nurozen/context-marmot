@@ -32,9 +32,9 @@ type VaultRegistry struct {
 	mu           sync.RWMutex
 	localVaultID string
 	localDir     string
-	vaults       map[string]*RemoteVault       // vault_id -> loaded vault
-	pathToID     map[string]string             // vault_path -> vault_id (from bridges)
-	routingTable *routes.RoutingTable          // global routing table; may be nil
+	vaults       map[string]*RemoteVault // vault_id -> loaded vault
+	pathToID     map[string]string       // vault_path -> vault_id (from bridges)
+	routingTable *routes.RoutingTable    // global routing table; may be nil
 }
 
 // NewVaultRegistry creates a registry seeded with cross-vault bridge paths
@@ -149,6 +149,9 @@ func (r *VaultRegistry) Refresh(vaultID string) error {
 	existing, ok := r.vaults[vaultID]
 	if !ok {
 		return fmt.Errorf("vault %q not loaded", vaultID)
+	}
+	if existing.EmbStore != nil {
+		_ = existing.EmbStore.Close()
 	}
 
 	_, err := r.loadVaultLocked(vaultID, existing.VaultDir)

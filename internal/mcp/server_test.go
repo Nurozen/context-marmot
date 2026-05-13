@@ -128,6 +128,26 @@ func TestWriteQueryRoundtrip(t *testing.T) {
 	}
 }
 
+func TestContextWriteRejectsMountedWarrenID(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	res, err := eng.HandleContextWrite(ctx, makeCallToolRequest("context_write", map[string]any{
+		"id":      "@remote-vault/service/api",
+		"type":    "module",
+		"summary": "Should not create a local shadow node",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextWrite: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected @vault ID write to be rejected")
+	}
+	if eng.GetGraph().NodeCount() != 0 {
+		t.Fatalf("expected no graph mutation, got %d nodes", eng.GetGraph().NodeCount())
+	}
+}
+
 func TestWriteWithEdgesAndCycleRejection(t *testing.T) {
 	eng := testEngine(t)
 	ctx := context.Background()

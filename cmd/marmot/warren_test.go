@@ -1,0 +1,201 @@
+package main
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nurozen/context-marmot/internal/embedding"
+	"github.com/nurozen/context-marmot/internal/node"
+	warrenpkg "github.com/nurozen/context-marmot/internal/warren"
+)
+
+func TestWarrenRegisterMountEditStatus(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "product-platform", "project-a", "project-b")
+
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
+		t.Fatalf("register exit code = %d", code)
+	}
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "product-platform", "project-a", "project-b"}); code != 0 {
+		t.Fatalf("mount exit code = %d", code)
+	}
+	if code := run([]string{"warren", "edit", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
+		t.Fatalf("edit exit code = %d", code)
+	}
+	if code := run([]string{"warren", "status", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
+		t.Fatalf("status exit code = %d", code)
+	}
+
+	state, _, err := warrenpkg.LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	entry := state.Warrens["product-platform"]
+	if len(entry.ActiveProjects) != 2 {
+		t.Fatalf("active projects = %+v", entry.ActiveProjects)
+	}
+	if len(entry.EditableProjects) != 1 || entry.EditableProjects[0] != "project-a" {
+		t.Fatalf("editable projects = %+v", entry.EditableProjects)
+	}
+
+	if code := run([]string{"warren", "edit", "--off", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
+		t.Fatalf("edit --off exit code = %d", code)
+	}
+	state, _, err = warrenpkg.LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState after off: %v", err)
+	}
+	if len(state.Warrens["product-platform"].EditableProjects) != 0 {
+		t.Fatalf("expected no editable projects after off, got %+v", state.Warrens["product-platform"].EditableProjects)
+	}
+}
+
+func TestWarrenBurrowMaterializeCachesVaults(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "product-platform", "project-a")
+
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
+		t.Fatalf("register exit code = %d", code)
+	}
+	if code := run([]string{"warren", "burrow", "--materialize", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
+		t.Fatalf("burrow exit code = %d", code)
+	}
+
+	cached := filepath.Join(marmotDir, ".marmot-data", "warrens", "product-platform", "projects", "project-a", ".marmot", "_warren.md")
+	if _, err := os.Stat(cached); err != nil {
+		t.Fatalf("expected materialized cache file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(marmotDir, "project-a")); err == nil {
+		t.Fatalf("burrow --materialize should not copy project under .marmot/project-a")
+	}
+}
+
+func TestWarrenCommandRequiresTargetWhenAmbiguous(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenA := testWarrenRoot(t, "product", "project-a")
+	warrenB := testWarrenRoot(t, "devex", "tooling")
+
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "product", warrenA}); code != 0 {
+		t.Fatalf("register product exit code = %d", code)
+	}
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "devex", warrenB}); code != 0 {
+		t.Fatalf("register devex exit code = %d", code)
+	}
+	if code := run([]string{"warren", "status", "--dir", marmotDir}); code == 0 {
+		t.Fatalf("status without --warren should fail when multiple Warrens exist")
+	}
+}
+
+func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir local .marmot-data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte("---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"), 0o644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	warrenRoot := testWarrenRoot(t, "product-platform", "project-a")
+	remoteMarmot := filepath.Join(warrenRoot, "projects", "project-a", ".marmot")
+	if err := os.MkdirAll(filepath.Join(remoteMarmot, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir remote .marmot-data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(remoteMarmot, "_config.md"), []byte("---\nversion: \"1\"\nvault_id: project-a\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"), 0o644); err != nil {
+		t.Fatalf("write remote config: %v", err)
+	}
+	store := node.NewStore(remoteMarmot)
+	remoteNode := &node.Node{
+		ID:        "service/api",
+		Type:      "module",
+		Namespace: "default",
+		Status:    node.StatusActive,
+		Summary:   "payments service API gateway",
+	}
+	if err := store.SaveNode(remoteNode); err != nil {
+		t.Fatalf("save remote node: %v", err)
+	}
+	embedder := embedding.NewMockEmbedder("test-model")
+	vec, err := embedder.Embed(remoteNode.Summary)
+	if err != nil {
+		t.Fatalf("embed remote node: %v", err)
+	}
+	embStore, err := embedding.NewStore(filepath.Join(remoteMarmot, ".marmot-data", "embeddings.db"))
+	if err != nil {
+		t.Fatalf("open remote embedding store: %v", err)
+	}
+	h := sha256.Sum256([]byte(remoteNode.Summary))
+	if err := embStore.Upsert(remoteNode.ID, vec, hex.EncodeToString(h[:]), embedder.Model()); err != nil {
+		t.Fatalf("upsert remote embedding: %v", err)
+	}
+	_ = embStore.Close()
+
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspace, "product-platform", warrenRoot); err != nil {
+		t.Fatalf("RegisterWorkspaceWarren: %v", err)
+	}
+	if _, err := warrenpkg.Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	result, err := buildEngine(marmotDir)
+	if err != nil {
+		t.Fatalf("buildEngine: %v", err)
+	}
+	defer result.Cleanup()
+	query, err := result.Engine.HandleContextQuery(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "context_query",
+			Arguments: map[string]any{
+				"query":  "payments gateway",
+				"depth":  1,
+				"budget": 4096,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleContextQuery: %v", err)
+	}
+	if query.IsError {
+		t.Fatalf("query error: %+v", query.Content)
+	}
+	text, ok := query.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected text content, got %#v", query.Content[0])
+	}
+	if !strings.Contains(text.Text, "@project-a/service/api") {
+		t.Fatalf("expected Warren-mounted result, got:\n%s", text.Text)
+	}
+}
+
+func testWarrenRoot(t *testing.T, warrenID string, projects ...string) string {
+	t.Helper()
+	root := t.TempDir()
+	manifest := &warrenpkg.Manifest{WarrenID: warrenID}
+	for _, projectID := range projects {
+		marmotDir := filepath.Join(root, "projects", projectID, ".marmot")
+		if err := warrenpkg.SaveProjectMetadata(marmotDir, &warrenpkg.ProjectMetadata{
+			ProjectID: projectID,
+			WarrenID:  warrenID,
+			VaultID:   projectID,
+		}, ""); err != nil {
+			t.Fatalf("SaveProjectMetadata: %v", err)
+		}
+		manifest.Projects = append(manifest.Projects, warrenpkg.Project{
+			ProjectID: projectID,
+			Path:      filepath.ToSlash(filepath.Join("projects", projectID, ".marmot")),
+		})
+	}
+	if err := warrenpkg.SaveManifest(root, manifest, ""); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	return root
+}
