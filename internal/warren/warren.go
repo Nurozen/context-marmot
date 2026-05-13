@@ -135,7 +135,7 @@ func Init(root, warrenID string) (*Manifest, error) {
 		}
 		manifest = &Manifest{WarrenID: warrenID}
 	} else if manifest.WarrenID != warrenID {
-		return nil, fmt.Errorf("Warren already initialized as %q", manifest.WarrenID)
+		return nil, fmt.Errorf("warren already initialized as %q", manifest.WarrenID)
 	}
 	if err := SaveManifest(root, manifest, body); err != nil {
 		return nil, err
@@ -805,7 +805,7 @@ func RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot string) (*Works
 		return nil, err
 	}
 	if manifest.WarrenID != warrenID {
-		return nil, fmt.Errorf("Warren ID mismatch: manifest has %q, command used %q", manifest.WarrenID, warrenID)
+		return nil, fmt.Errorf("warren ID mismatch: manifest has %q, command used %q", manifest.WarrenID, warrenID)
 	}
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
 		entry := state.Warrens[warrenID]
@@ -820,7 +820,7 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
-			return fmt.Errorf("Warren %q is not registered in this workspace", warrenID)
+			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
 		}
 		known, err := registeredProjectSet(entry.Path)
 		if err != nil {
@@ -848,7 +848,7 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
-			return fmt.Errorf("Warren %q is not registered in this workspace", warrenID)
+			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
 		}
 		if err := ValidateProjectID(projectID); err != nil {
 			return err
@@ -879,7 +879,7 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 	}
 	entry, ok := state.Warrens[warrenID]
 	if !ok {
-		return nil, fmt.Errorf("Warren %q is not registered in this workspace", warrenID)
+		return nil, fmt.Errorf("warren %q is not registered in this workspace", warrenID)
 	}
 	manifest, _, err := LoadManifest(entry.Path)
 	if err != nil {
@@ -1117,10 +1117,7 @@ func parseMarkdownYAML(data []byte, out any) (string, error) {
 		return "", fmt.Errorf("unterminated YAML frontmatter")
 	}
 	yamlBlock := content[3 : end+3]
-	body := content[end+6:]
-	if strings.HasPrefix(body, "\n") {
-		body = body[1:]
-	}
+	body := strings.TrimPrefix(content[end+6:], "\n")
 	if err := yaml.Unmarshal([]byte(yamlBlock), out); err != nil {
 		return "", fmt.Errorf("unmarshal YAML: %w", err)
 	}
@@ -1309,22 +1306,11 @@ func copyDir(source, target string) error {
 		if d.IsDir() {
 			return os.MkdirAll(dest, 0o755)
 		}
-		src, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer src.Close()
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
-		dst, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
-		if err != nil {
-			return err
-		}
-		defer dst.Close()
-		_, err = io.Copy(dst, src)
-		return err
+		return copyRegularFile(path, dest, info.Mode())
 	})
 }
 
@@ -1404,17 +1390,25 @@ func shouldSkipImportFile(relSlash string, opts ImportOptions) bool {
 	return false
 }
 
-func copyRegularFile(source, target string, mode os.FileMode) error {
+func copyRegularFile(source, target string, mode os.FileMode) (err error) {
 	src, err := os.Open(source)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() {
+		if closeErr := src.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 	dst, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
+	defer func() {
+		if closeErr := dst.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 	_, err = io.Copy(dst, src)
 	return err
 }

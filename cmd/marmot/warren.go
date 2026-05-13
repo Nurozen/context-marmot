@@ -917,7 +917,7 @@ func resolveWarrenID(workspaceRoot, requested string) (string, error) {
 	}
 	if requested != "" {
 		if _, ok := state.Warrens[requested]; !ok {
-			return "", fmt.Errorf("Warren %q is not registered", requested)
+			return "", fmt.Errorf("warren %q is not registered", requested)
 		}
 		return requested, nil
 	}
