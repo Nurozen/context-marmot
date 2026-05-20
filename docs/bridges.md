@@ -122,27 +122,18 @@ accepted for writes until that project is mounted.
 To use namespace bridges, each namespace needs a `_namespace.md` file:
 
 ```bash
-# Create namespace directories with manifests
-mkdir -p .marmot/frontend .marmot/backend
-
-cat > .marmot/frontend/_namespace.md << 'EOF'
----
-name: frontend
-description: Frontend UI components
----
-EOF
-
-cat > .marmot/backend/_namespace.md << 'EOF'
----
-name: backend
-description: Backend API services
----
-EOF
+marmot namespace create frontend --dir .marmot --root-path ../frontend
+marmot namespace create backend --dir .marmot --root-path ../backend
 ```
+
+Marmot also auto-creates a non-default namespace manifest when `context_write`
+or `marmot index` first writes a node into that namespace. The explicit command
+is still useful when you want to review or set namespace metadata before adding
+nodes.
 
 Verify namespaces are detected:
 
 ```bash
-marmot status --dir .marmot
-# Should show: Namespaces: frontend, backend
+marmot namespace list --dir .marmot
+marmot namespace doctor --dir .marmot
 ```

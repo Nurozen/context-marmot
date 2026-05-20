@@ -3,6 +3,7 @@
 package namespace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -184,12 +185,8 @@ func parseNamespace(data []byte) (*Namespace, error) {
 
 // CreateNamespace creates a new namespace directory and writes its _namespace.md file.
 func CreateNamespace(vaultDir, name, rootPath string) (*Namespace, error) {
-	if name == "" {
-		return nil, fmt.Errorf("namespace name must not be empty")
-	}
-	// Validate name: no path separators, no dots at start, no special chars.
-	if strings.ContainsAny(name, "/\\") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
-		return nil, fmt.Errorf("invalid namespace name %q: must not contain path separators or start with . or _", name)
+	if err := ValidateNamespaceName(name); err != nil {
+		return nil, err
 	}
 
 	nsDir := filepath.Join(vaultDir, name)
@@ -209,6 +206,46 @@ func CreateNamespace(vaultDir, name, rootPath string) (*Namespace, error) {
 	return ns, nil
 }
 
+// EnsureNamespace loads an existing namespace manifest or creates one when the
+// namespace directory has nodes but no _namespace.md yet. The returned bool is
+// true when a new manifest was written.
+func EnsureNamespace(vaultDir, name, rootPath string) (*Namespace, bool, error) {
+	if err := ValidateNamespaceName(name); err != nil {
+		return nil, false, err
+	}
+
+	nsDir := filepath.Join(vaultDir, name)
+	if ns, err := LoadNamespace(nsDir); err == nil {
+		if ns.Name != name {
+			return nil, false, fmt.Errorf("namespace manifest name %q does not match directory %q", ns.Name, name)
+		}
+		return ns, false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, false, err
+	}
+
+	ns, err := CreateNamespace(vaultDir, name, rootPath)
+	if err != nil {
+		return nil, false, err
+	}
+	return ns, true, nil
+}
+
+// ValidateNamespaceName checks that a namespace name is a single safe path
+// component. Namespaces are represented as top-level directories under a vault.
+func ValidateNamespaceName(name string) error {
+	if name == "" {
+		return fmt.Errorf("namespace name must not be empty")
+	}
+	if strings.TrimSpace(name) != name {
+		return fmt.Errorf("invalid namespace name %q: must not contain leading or trailing whitespace", name)
+	}
+	if strings.ContainsAny(name, "/\\") || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || strings.Contains(name, "..") {
+		return fmt.Errorf("invalid namespace name %q: must be a simple identifier without path separators, '..', or leading ./_", name)
+	}
+	return nil
+}
+
 // SaveNamespace writes a Namespace to _namespace.md in the given directory.
 func SaveNamespace(nsDir string, ns *Namespace) error {
 	yamlBytes, err := yaml.Marshal(ns)
@@ -223,14 +260,28 @@ func SaveNamespace(nsDir string, ns *Namespace) error {
 	buf.WriteString(fmt.Sprintf("Namespace configuration for %s.\n", ns.Name))
 
 	path := filepath.Join(nsDir, "_namespace.md")
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(buf.String()), 0o644); err != nil {
+	tmp, err := os.CreateTemp(nsDir, ".namespace-*.md.tmp")
+	if err != nil {
+		return fmt.Errorf("create tmp namespace: %w", err)
+	}
+	tmpPath := tmp.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write([]byte(buf.String())); err != nil {
 		return fmt.Errorf("write tmp namespace: %w", err)
 	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp namespace: %w", err)
+	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename namespace: %w", err)
 	}
+	success = true
 	return nil
 }
 

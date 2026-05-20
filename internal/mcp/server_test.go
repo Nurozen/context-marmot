@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -125,6 +127,90 @@ func TestWriteQueryRoundtrip(t *testing.T) {
 	// The result should contain our node.
 	if !containsString(xml, "auth/login") {
 		t.Errorf("expected XML to contain auth/login, got: %s", xml)
+	}
+}
+
+func TestContextWriteAutoCreatesNamespaceManifest(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	res, err := eng.HandleContextWrite(ctx, makeCallToolRequest("context_write", map[string]any{
+		"id":        "overview",
+		"type":      "concept",
+		"namespace": "team-api",
+		"summary":   "Team API overview",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextWrite: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("write returned error: %s", resultText(t, res))
+	}
+
+	manifest := filepath.Join(eng.MarmotDir, "team-api", "_namespace.md")
+	if _, err := os.Stat(manifest); err != nil {
+		t.Fatalf("expected namespace manifest at %s: %v", manifest, err)
+	}
+	if eng.NSManager == nil || eng.NSManager.Namespaces["team-api"] == nil {
+		t.Fatalf("expected namespace manager to know team-api")
+	}
+}
+
+func TestContextNamespaceToolCreateListDoctor(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	createRes, err := eng.HandleContextNamespace(ctx, makeCallToolRequest("context_namespace", map[string]any{
+		"action":    "create",
+		"name":      "ops",
+		"root_path": "../ops",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextNamespace create: %v", err)
+	}
+	if createRes.IsError {
+		t.Fatalf("create returned error: %s", resultText(t, createRes))
+	}
+
+	listRes, err := eng.HandleContextNamespace(ctx, makeCallToolRequest("context_namespace", map[string]any{
+		"action": "list",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextNamespace list: %v", err)
+	}
+	if listRes.IsError {
+		t.Fatalf("list returned error: %s", resultText(t, listRes))
+	}
+	text := resultText(t, listRes)
+	if !containsString(text, `"name":"ops"`) {
+		t.Fatalf("expected ops namespace in list response: %s", text)
+	}
+
+	doctorRes, err := eng.HandleContextNamespace(ctx, makeCallToolRequest("context_namespace", map[string]any{
+		"action": "doctor",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextNamespace doctor: %v", err)
+	}
+	if doctorRes.IsError {
+		t.Fatalf("doctor returned error: %s", resultText(t, doctorRes))
+	}
+}
+
+func TestContextNamespaceUpdateRejectsUnsafeName(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	res, err := eng.HandleContextNamespace(ctx, makeCallToolRequest("context_namespace", map[string]any{
+		"action":    "update",
+		"name":      "../outside",
+		"root_path": "../outside",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextNamespace update: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("expected unsafe namespace update to fail: %s", resultText(t, res))
 	}
 }
 

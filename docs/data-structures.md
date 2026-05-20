@@ -450,6 +450,10 @@ This eliminates dual bookkeeping and drift — edges live in node files only.
 ## Namespace Config
 
 Per-namespace metadata. Stored as `_namespace.md` in each namespace folder.
+Marmot writes this file with `marmot namespace create` and will also create it
+automatically when a non-default `context_write` or `marmot index` operation
+first writes nodes for a namespace. `marmot namespace doctor` reports older
+implicit namespaces that have node frontmatter but no manifest yet.
 
 ### Format
 

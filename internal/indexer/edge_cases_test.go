@@ -1032,6 +1032,28 @@ func TestEdge_Runner_EmptyDirectory(t *testing.T) {
 	}
 }
 
+func TestRunnerEnsuresNamespaceManifest(t *testing.T) {
+	srcDir := t.TempDir()
+	vaultDir := t.TempDir()
+
+	registry := NewDefaultRegistry()
+	ns := newMockNodeStore()
+	es := newMockEmbedStore()
+	emb := &mockEmbedder{}
+
+	runner := NewRunner(
+		RunnerConfig{SrcDir: srcDir, VaultDir: vaultDir, Namespace: "indexed"},
+		registry, ns, es, emb, nil, nil,
+	)
+
+	if _, err := runner.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(vaultDir, "indexed", "_namespace.md")); err != nil {
+		t.Fatalf("expected namespace manifest: %v", err)
+	}
+}
+
 func TestEdge_Runner_NonExistentDirectory(t *testing.T) {
 	registry := NewDefaultRegistry()
 	ns := newMockNodeStore()

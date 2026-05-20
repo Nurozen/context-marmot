@@ -13,6 +13,7 @@
 //	marmot watch      [--dir .marmot]                            Watch for file changes and auto-reindex
 //	marmot bridge     <ns-a> <ns-b> [--relations ...] [--dir]   Create cross-namespace bridge
 //	marmot bridge     /path/to/.marmot [--relations ...] [--dir] Create cross-vault bridge
+//	marmot namespace  [create|list|update|doctor|remove]         Manage namespace manifests
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve]                         Manage vault routing table
@@ -98,6 +99,8 @@ func run(args []string) int {
 		return cmdWatch(cmdArgs)
 	case "bridge":
 		return cmdBridge(cmdArgs)
+	case "namespace":
+		return cmdNamespace(cmdArgs)
 	case "summarize":
 		return cmdSummarize(cmdArgs)
 	case "reembed":
@@ -119,7 +122,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, summarize, reembed, route, warren, ui, sdk")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, namespace, summarize, reembed, route, warren, ui, sdk")
 }
 
 // ---------------------------------------------------------------------------
@@ -227,16 +230,26 @@ func cmdIndex(args []string) int {
 	remaining := fs.Args()
 	if len(remaining) > 0 {
 		var srcDir string
-		for _, arg := range remaining {
+		for i := 0; i < len(remaining); i++ {
+			arg := remaining[i]
 			switch arg {
 			case "--incremental", "-incremental":
-				inc := true
-				incremental = &inc
+				*incremental = true
 			case "--force", "-force":
-				f := true
-				force = &f
+				*force = true
+			case "--dir", "-dir":
+				if i+1 >= len(remaining) {
+					fmt.Fprintln(os.Stderr, "index: --dir requires a value")
+					return 1
+				}
+				i++
+				*dir = remaining[i]
 			default:
-				if srcDir == "" {
+				if strings.HasPrefix(arg, "--dir=") {
+					*dir = strings.TrimPrefix(arg, "--dir=")
+				} else if strings.HasPrefix(arg, "-dir=") {
+					*dir = strings.TrimPrefix(arg, "-dir=")
+				} else if srcDir == "" {
 					srcDir = arg
 				}
 			}

@@ -215,11 +215,32 @@ HOW IT WORKS: The query is embedded and matched against node summaries. The tag 
 		),
 	)
 
+	// context_namespace tool
+	namespaceTool := mcp.NewTool("context_namespace",
+		mcp.WithDescription(`Manage namespace manifests for this Marmot vault.
+
+Use this when an agent needs to intentionally create, inspect, update, diagnose, or remove namespace metadata. Node writes also auto-create non-default namespace manifests, but this tool is the explicit management surface.`),
+		mcp.WithString("action",
+			mcp.Description("Namespace management action"),
+			mcp.Enum("list", "create", "update", "doctor", "remove"),
+		),
+		mcp.WithString("name",
+			mcp.Description("Namespace name for create, update, or remove"),
+		),
+		mcp.WithString("root_path",
+			mcp.Description("Optional source root path to store in the namespace manifest"),
+		),
+		mcp.WithBoolean("force",
+			mcp.Description("For remove: remove the manifest even when nodes still reference the namespace"),
+		),
+	)
+
 	s.mcpServer.AddTool(queryTool, s.engine.HandleContextQuery)
 	s.mcpServer.AddTool(writeTool, s.engine.HandleContextWrite)
 	s.mcpServer.AddTool(verifyTool, s.engine.HandleContextVerify)
 	s.mcpServer.AddTool(deleteTool, s.engine.HandleContextDelete)
 	s.mcpServer.AddTool(tagTool, s.engine.HandleContextTag)
+	s.mcpServer.AddTool(namespaceTool, s.engine.HandleContextNamespace)
 }
 
 // ListenStdio starts the MCP server on stdin/stdout. It blocks until the

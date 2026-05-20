@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/routes"
@@ -84,6 +85,56 @@ func TestCreateAndLoadNamespace(t *testing.T) {
 	}
 	if loaded.RootPath != "/tmp/test" {
 		t.Errorf("loaded RootPath = %q, want %q", loaded.RootPath, "/tmp/test")
+	}
+}
+
+func TestEnsureNamespaceCreatesAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+
+	ns, created, err := EnsureNamespace(dir, "team-api", "/src/team-api")
+	if err != nil {
+		t.Fatalf("EnsureNamespace create: %v", err)
+	}
+	if !created {
+		t.Fatal("expected namespace manifest to be created")
+	}
+	if ns.Name != "team-api" || ns.RootPath != "/src/team-api" {
+		t.Fatalf("namespace = %+v", ns)
+	}
+
+	loaded, created, err := EnsureNamespace(dir, "team-api", "/different")
+	if err != nil {
+		t.Fatalf("EnsureNamespace existing: %v", err)
+	}
+	if created {
+		t.Fatal("expected existing namespace not to be recreated")
+	}
+	if loaded.RootPath != "/src/team-api" {
+		t.Fatalf("existing namespace root path changed to %q", loaded.RootPath)
+	}
+}
+
+func TestEnsureNamespaceConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := EnsureNamespace(dir, "shared", "")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureNamespace concurrent: %v", err)
+		}
+	}
+	if _, err := LoadNamespace(filepath.Join(dir, "shared")); err != nil {
+		t.Fatalf("LoadNamespace after concurrent ensure: %v", err)
 	}
 }
 

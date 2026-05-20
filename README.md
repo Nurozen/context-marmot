@@ -208,6 +208,7 @@ Once connected, agents get five tools:
 | `marmot serve [--dir .marmot]` | Start the MCP server on stdio |
 | `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, namespaces, heat map |
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
+| `marmot namespace create/list/update/doctor/remove ...` | Manage per-namespace `_namespace.md` manifests |
 | `marmot bridge <ns-a> <ns-b> [--relations ...]` | Create bridge manifest between two namespaces |
 | `marmot warren init --id <id> [--warren-dir .]` | Create a Warren repository manifest |
 | `marmot warren project import <project-id> <source-.marmot> [--vault-id <id>]` | Copy an existing project vault into a Warren |

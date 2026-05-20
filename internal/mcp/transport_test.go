@@ -105,16 +105,17 @@ func TestTransport_ToolsList(t *testing.T) {
 		t.Fatalf("ListTools: %v", err)
 	}
 
-	if len(result.Tools) != 5 {
-		t.Fatalf("expected 5 tools, got %d", len(result.Tools))
+	if len(result.Tools) != 6 {
+		t.Fatalf("expected 6 tools, got %d", len(result.Tools))
 	}
 
 	expected := map[string]bool{
-		"context_query":  false,
-		"context_write":  false,
-		"context_verify": false,
-		"context_delete": false,
-		"context_tag":    false,
+		"context_query":     false,
+		"context_write":     false,
+		"context_verify":    false,
+		"context_delete":    false,
+		"context_tag":       false,
+		"context_namespace": false,
 	}
 	for _, tool := range result.Tools {
 		if _, ok := expected[tool.Name]; !ok {

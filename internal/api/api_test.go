@@ -702,6 +702,54 @@ func TestHandleNamespaces(t *testing.T) {
 	}
 }
 
+func TestHandleNamespacesIncludesImplicitNodeNamespaces(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+
+	implicit := &node.Node{
+		ID:        "implicit/overview",
+		Type:      "concept",
+		Namespace: "implicit",
+		Status:    node.StatusActive,
+		Summary:   "Implicit namespace node",
+	}
+	if err := engine.GetGraph().AddNode(implicit); err != nil {
+		t.Fatalf("add implicit namespace node: %v", err)
+	}
+
+	rec := doRequest(t, handler, "GET", "/api/namespaces", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp NamespacesResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	counts := make(map[string]int)
+	for _, ns := range resp.Namespaces {
+		counts[ns.Name] = ns.NodeCount
+	}
+	if counts["default"] != 4 {
+		t.Fatalf("default namespace count = %d, want 4", counts["default"])
+	}
+	if counts["implicit"] != 1 {
+		t.Fatalf("implicit namespace count = %d, want 1; namespaces=%+v", counts["implicit"], resp.Namespaces)
+	}
+
+	graphRec := doRequest(t, handler, "GET", "/api/graph/implicit", "")
+	if graphRec.Code != http.StatusOK {
+		t.Fatalf("expected graph 200, got %d: %s", graphRec.Code, graphRec.Body.String())
+	}
+	var graphResp GraphResponse
+	if err := json.NewDecoder(graphRec.Body).Decode(&graphResp); err != nil {
+		t.Fatalf("decode graph: %v", err)
+	}
+	if len(graphResp.Nodes) != 1 || graphResp.Nodes[0].ID != "implicit/overview" {
+		t.Fatalf("implicit graph nodes = %+v", graphResp.Nodes)
+	}
+}
+
 func TestHandleBridges(t *testing.T) {
 	server, _ := newTestServer(t)
 	handler := server.Handler()

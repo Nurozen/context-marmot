@@ -13,6 +13,7 @@ import (
 
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/heatmap"
+	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/verify"
@@ -291,11 +292,9 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 			// that start with another known namespace (cross-namespace edges).
 			if namespace != "default" && !strings.HasPrefix(target, "@") && !strings.HasPrefix(target, namespace+"/") {
 				shouldPrefix := true
-				if e.NSManager != nil {
-					if idx := strings.Index(target, "/"); idx > 0 {
-						if _, ok := e.NSManager.Namespaces[target[:idx]]; ok {
-							shouldPrefix = false
-						}
+				if idx := strings.Index(target, "/"); idx > 0 {
+					if e.HasNamespace(target[:idx]) {
+						shouldPrefix = false
 					}
 				}
 				if shouldPrefix {
@@ -352,30 +351,13 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 	// Validate cross-namespace edges against bridge manifests.
 	// Skip edges that target a different vault (@vault-id/...) — those are
 	// validated separately in the cross-vault check below.
-	if e.NSManager != nil {
-		for _, edge := range edges {
-			qid := e.NSManager.ParseQualifiedID(edge.Target, namespace)
-			if qid.VaultID != "" {
-				continue // cross-vault edge; validated below
-			}
-			if qid.Namespace != namespace {
-				if err := e.NSManager.ValidateCrossNamespaceEdge(namespace, qid.Namespace, string(edge.Relation)); err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("cross-namespace edge rejected: %v", err)), nil
-				}
-			}
-		}
+	if err := e.validateCrossNamespaceEdges(edges, namespace); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("cross-namespace edge rejected: %v", err)), nil
 	}
 
 	// Validate cross-vault edges against bridge manifests.
-	if e.NSManager != nil && e.VaultRegistry != nil && e.LocalVaultID != "" {
-		for _, edge := range edges {
-			qid := e.NSManager.ParseQualifiedID(edge.Target, namespace)
-			if qid.VaultID != "" {
-				if err := e.NSManager.ValidateCrossVaultEdge(e.LocalVaultID, qid.VaultID, string(edge.Relation)); err != nil {
-					return mcp.NewToolResultError(fmt.Sprintf("cross-vault edge rejected: %v", err)), nil
-				}
-			}
-		}
+	if err := e.validateCrossVaultEdges(edges, namespace); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("cross-vault edge rejected: %v", err)), nil
 	}
 
 	// Determine whether this is a create or update before any mutation.
@@ -438,6 +420,10 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
+	if err := e.ensureNamespaceManifest(namespace); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("ensure namespace: %v", err)), nil
+	}
+
 	// Upsert node into graph.
 	if err := e.GetGraph().UpsertNode(n); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("graph upsert: %v", err)), nil
@@ -496,6 +482,28 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		Status: writeStatus,
 	}
 	return mcp.NewToolResultJSON(result)
+}
+
+func (e *Engine) ensureNamespaceManifest(name string) error {
+	if name == "" || name == "default" {
+		return nil
+	}
+	ns, _, err := namespace.EnsureNamespace(e.MarmotDir, name, "")
+	if err != nil {
+		return err
+	}
+	e.nsMgrMu.Lock()
+	defer e.nsMgrMu.Unlock()
+	if e.NSManager != nil {
+		e.NSManager.Namespaces[name] = ns
+		return nil
+	}
+	mgr, mgrErr := namespace.NewManager(e.MarmotDir)
+	if mgrErr != nil {
+		return mgrErr
+	}
+	e.NSManager = mgr
+	return nil
 }
 
 // ---------------------------------------------------------------------------

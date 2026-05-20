@@ -43,6 +43,7 @@ type Engine struct {
 	MarmotDir    string
 	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
 	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
+	nsMgrMu      sync.RWMutex
 }
 
 // SetGraph atomically replaces the in-memory graph.
@@ -153,7 +154,86 @@ func (e *Engine) WithHeatMap(h *heatmap.HeatMap) {
 // WithNamespaceManager attaches a namespace manager to the engine.
 // When set, cross-namespace edges are validated against bridge manifests.
 func (e *Engine) WithNamespaceManager(mgr *namespace.Manager) {
+	e.nsMgrMu.Lock()
+	defer e.nsMgrMu.Unlock()
 	e.NSManager = mgr
+}
+
+// HasNamespace reports whether the namespace manager knows a namespace.
+func (e *Engine) HasNamespace(name string) bool {
+	e.nsMgrMu.RLock()
+	defer e.nsMgrMu.RUnlock()
+	if e.NSManager == nil {
+		return false
+	}
+	_, ok := e.NSManager.Namespaces[name]
+	return ok
+}
+
+// NamespaceNames returns namespace names currently known to the manager.
+func (e *Engine) NamespaceNames() []string {
+	e.nsMgrMu.RLock()
+	defer e.nsMgrMu.RUnlock()
+	if e.NSManager == nil {
+		return nil
+	}
+	names := make([]string, 0, len(e.NSManager.Namespaces))
+	for name := range e.NSManager.Namespaces {
+		names = append(names, name)
+	}
+	return names
+}
+
+// BridgeSnapshot returns copies of bridge slices currently known to the manager.
+func (e *Engine) BridgeSnapshot() ([]*namespace.Bridge, []*namespace.Bridge) {
+	e.nsMgrMu.RLock()
+	defer e.nsMgrMu.RUnlock()
+	if e.NSManager == nil {
+		return nil, nil
+	}
+	bridges := make([]*namespace.Bridge, 0, len(e.NSManager.Bridges))
+	for _, b := range e.NSManager.Bridges {
+		bridges = append(bridges, b)
+	}
+	crossVault := append([]*namespace.Bridge(nil), e.NSManager.CrossVaultBridges...)
+	return bridges, crossVault
+}
+
+func (e *Engine) validateCrossNamespaceEdges(edges []node.Edge, currentNamespace string) error {
+	e.nsMgrMu.RLock()
+	defer e.nsMgrMu.RUnlock()
+	if e.NSManager == nil {
+		return nil
+	}
+	for _, edge := range edges {
+		qid := e.NSManager.ParseQualifiedID(edge.Target, currentNamespace)
+		if qid.VaultID != "" {
+			continue
+		}
+		if qid.Namespace != currentNamespace {
+			if err := e.NSManager.ValidateCrossNamespaceEdge(currentNamespace, qid.Namespace, string(edge.Relation)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (e *Engine) validateCrossVaultEdges(edges []node.Edge, currentNamespace string) error {
+	e.nsMgrMu.RLock()
+	defer e.nsMgrMu.RUnlock()
+	if e.NSManager == nil || e.VaultRegistry == nil || e.LocalVaultID == "" {
+		return nil
+	}
+	for _, edge := range edges {
+		qid := e.NSManager.ParseQualifiedID(edge.Target, currentNamespace)
+		if qid.VaultID != "" {
+			if err := e.NSManager.ValidateCrossVaultEdge(e.LocalVaultID, qid.VaultID, string(edge.Relation)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // WithLLMClassifier wires up a CRUD classifier on the engine using the
@@ -213,12 +293,10 @@ func (e *Engine) ResolveNodeID(id string) (*node.Node, bool) {
 	if n, ok := g.GetNode(id); ok {
 		return n, true
 	}
-	if e.NSManager != nil {
-		for nsName := range e.NSManager.Namespaces {
-			prefixed := nsName + "/" + id
-			if n, ok := g.GetNode(prefixed); ok {
-				return n, true
-			}
+	for _, nsName := range e.NamespaceNames() {
+		prefixed := nsName + "/" + id
+		if n, ok := g.GetNode(prefixed); ok {
+			return n, true
 		}
 	}
 	return nil, false
