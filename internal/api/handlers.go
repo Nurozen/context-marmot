@@ -163,12 +163,10 @@ func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// If NSManager is available, also include namespaces from the manager.
-	if s.engine.NSManager != nil {
-		for name := range s.engine.NSManager.Namespaces {
-			if !nsSet[name] {
-				nsSet[name] = true
-				namespaces = append(namespaces, name)
-			}
+	for _, name := range s.engine.NamespaceNames() {
+		if !nsSet[name] {
+			nsSet[name] = true
+			namespaces = append(namespaces, name)
 		}
 	}
 
@@ -681,23 +679,6 @@ func (s *Server) handleHeat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 	resp := NamespacesResponse{Namespaces: []NamespaceInfo{}}
 
-	if s.engine.NSManager == nil {
-		// Single-namespace mode: count all active nodes under "default".
-		count := len(s.engine.GetGraph().AllActiveNodes())
-		hasSummary := false
-		if _, err := summary.ReadSummary(s.engine.MarmotDir, "default"); err == nil {
-			hasSummary = true
-		}
-		resp.Namespaces = append(resp.Namespaces, NamespaceInfo{
-			Name:       "default",
-			NodeCount:  count,
-			HasSummary: hasSummary,
-		})
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-
-	// Count nodes per namespace from the graph.
 	nsCounts := make(map[string]int)
 	for _, n := range s.engine.GetGraph().AllActiveNodes() {
 		ns := n.Namespace
@@ -707,7 +688,23 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 		nsCounts[ns]++
 	}
 
-	for name := range s.engine.NSManager.Namespaces {
+	if len(nsCounts) == 0 {
+		nsCounts["default"] = 0
+	}
+
+	for _, name := range s.engine.NamespaceNames() {
+		if _, ok := nsCounts[name]; !ok {
+			nsCounts[name] = 0
+		}
+	}
+
+	names := make([]string, 0, len(nsCounts))
+	for name := range nsCounts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
 		hasSummary := false
 		if _, err := summary.ReadSummary(s.engine.MarmotDir, name); err == nil {
 			hasSummary = true
@@ -726,12 +723,13 @@ func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBridges(w http.ResponseWriter, r *http.Request) {
 	resp := BridgesResponse{Bridges: []BridgeInfo{}}
 
-	if s.engine.NSManager == nil {
+	bridges, crossVaultBridges := s.engine.BridgeSnapshot()
+	if len(bridges) == 0 && len(crossVaultBridges) == 0 {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	for _, b := range s.engine.NSManager.Bridges {
+	for _, b := range bridges {
 		resp.Bridges = append(resp.Bridges, BridgeInfo{
 			Source:           b.Source,
 			Target:           b.Target,
@@ -740,7 +738,7 @@ func (s *Server) handleBridges(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	for _, b := range s.engine.NSManager.CrossVaultBridges {
+	for _, b := range crossVaultBridges {
 		// Avoid duplicates: cross-vault bridges already in Bridges map are skipped.
 		alreadyIncluded := false
 		for _, existing := range resp.Bridges {

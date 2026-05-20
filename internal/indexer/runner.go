@@ -11,6 +11,7 @@ import (
 
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/llm"
+	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
@@ -79,8 +80,8 @@ type Runner struct {
 	nodeStore  NodeStore
 	embStore   EmbeddingStore
 	embedder   Embedder
-	classifier Classifier   // may be nil
-	graph      GraphReader  // may be nil; used by classifier
+	classifier Classifier  // may be nil
+	graph      GraphReader // may be nil; used by classifier
 }
 
 // NewRunner creates a Runner with the given configuration and dependencies.
@@ -114,6 +115,12 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 	// Verify source directory exists before walking.
 	if _, err := os.Stat(r.config.SrcDir); err != nil {
 		return result, fmt.Errorf("source directory: %w", err)
+	}
+
+	if r.config.VaultDir != "" && r.config.Namespace != "" && r.config.Namespace != "default" {
+		if _, _, err := namespace.EnsureNamespace(r.config.VaultDir, r.config.Namespace, r.config.SrcDir); err != nil {
+			return result, fmt.Errorf("ensure namespace: %w", err)
+		}
 	}
 
 	ignore := NewIgnoreMatcher(r.config.SrcDir, r.config.ExtraIgnore)
