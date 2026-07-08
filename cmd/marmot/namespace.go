@@ -46,7 +46,7 @@ func cmdNamespaceCreate(args []string) int {
 	fs := flag.NewFlagSet("namespace create", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
 	rootPath := fs.String("root-path", "", "source root path for this namespace")
-	if err := fs.Parse(reorderNamespaceFlags(args, map[string]bool{"dir": true, "root-path": true})); err != nil {
+	if err := fs.Parse(reorderInterspersedFlags(args, map[string]bool{"dir": true, "root-path": true}, nil)); err != nil {
 		return 1
 	}
 	if *dir == "" {
@@ -74,7 +74,7 @@ func cmdNamespaceList(args []string) int {
 	fs := flag.NewFlagSet("namespace list", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
 	jsonOut := fs.Bool("json", false, "print JSON")
-	if err := fs.Parse(reorderNamespaceFlags(args, map[string]bool{"dir": true, "json": false})); err != nil {
+	if err := fs.Parse(reorderInterspersedFlags(args, map[string]bool{"dir": true}, map[string]bool{"json": true})); err != nil {
 		return 1
 	}
 	if *dir == "" {
@@ -112,7 +112,7 @@ func cmdNamespaceUpdate(args []string) int {
 	fs := flag.NewFlagSet("namespace update", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
 	rootPath := fs.String("root-path", "", "source root path for this namespace")
-	if err := fs.Parse(reorderNamespaceFlags(args, map[string]bool{"dir": true, "root-path": true})); err != nil {
+	if err := fs.Parse(reorderInterspersedFlags(args, map[string]bool{"dir": true, "root-path": true}, nil)); err != nil {
 		return 1
 	}
 	if *dir == "" {
@@ -145,7 +145,7 @@ func cmdNamespaceUpdate(args []string) int {
 func cmdNamespaceDoctor(args []string) int {
 	fs := flag.NewFlagSet("namespace doctor", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
-	if err := fs.Parse(reorderNamespaceFlags(args, map[string]bool{"dir": true})); err != nil {
+	if err := fs.Parse(reorderInterspersedFlags(args, map[string]bool{"dir": true}, nil)); err != nil {
 		return 1
 	}
 	if *dir == "" {
@@ -175,7 +175,7 @@ func cmdNamespaceRemove(args []string) int {
 	fs := flag.NewFlagSet("namespace remove", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
 	force := fs.Bool("force", false, "remove manifest even when nodes still reference the namespace")
-	if err := fs.Parse(reorderNamespaceFlags(args, map[string]bool{"dir": true, "force": false})); err != nil {
+	if err := fs.Parse(reorderInterspersedFlags(args, map[string]bool{"dir": true}, map[string]bool{"force": true})); err != nil {
 		return 1
 	}
 	if *dir == "" {
@@ -212,35 +212,4 @@ func cmdNamespaceRemove(args []string) int {
 	}
 	fmt.Printf("Removed namespace manifest for %q\n", name)
 	return 0
-}
-
-func reorderNamespaceFlags(args []string, flagsWithValue map[string]bool) []string {
-	var flags []string
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if len(arg) < 2 || arg[:2] != "--" {
-			positional = append(positional, arg)
-			continue
-		}
-		flags = append(flags, arg)
-		name := arg[2:]
-		if eq := indexByte(name, '='); eq >= 0 {
-			name = name[:eq]
-		}
-		if flagsWithValue[name] && indexByte(arg, '=') < 0 && i+1 < len(args) {
-			i++
-			flags = append(flags, args[i])
-		}
-	}
-	return append(flags, positional...)
-}
-
-func indexByte(s string, b byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == b {
-			return i
-		}
-	}
-	return -1
 }

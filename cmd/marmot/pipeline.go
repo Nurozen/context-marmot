@@ -594,7 +594,17 @@ func runVerifyEnhanced(dir, ns string, checkStaleness, checkBridges bool) error 
 	}
 
 	projectRoot := filepath.Dir(dir)
-	issues := verify.VerifyIntegrity(nodes, projectRoot)
+
+	// When filtering by namespace, resolve edge targets against all vault
+	// nodes so cross-namespace edges aren't flagged dangling.
+	var knownIDs map[string]bool
+	if ns != "" {
+		knownIDs = make(map[string]bool, len(metas))
+		for _, m := range metas {
+			knownIDs[m.ID] = true
+		}
+	}
+	issues := verify.VerifyIntegrityScoped(nodes, knownIDs, projectRoot)
 
 	// Also check staleness if requested.
 	if checkStaleness {
@@ -814,8 +824,27 @@ func runStatusPipeline(dir string) error {
 	return nil
 }
 
-// runWatchPipeline starts a file watcher that auto-reindexes on changes.
+// runWatchPipeline starts a file watcher that auto-reindexes on changes,
+// running until an interrupt signal is received.
 func runWatchPipeline(dir string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Cancel the watch loop on SIGINT/SIGTERM.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		cancel()
+	}()
+
+	return watchLoop(ctx, dir)
+}
+
+// watchLoop wires up the file watcher and blocks until ctx is cancelled. It is
+// separated from signal handling so tests can drive it with a cancellable
+// context instead of delivering real process signals.
+func watchLoop(ctx context.Context, dir string) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist", dir)
 	}
@@ -849,16 +878,11 @@ func runWatchPipeline(dir string) error {
 		return fmt.Errorf("create watcher: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	watcher.Start(ctx)
 	fmt.Fprintf(os.Stderr, "Watching %s for changes (Ctrl+C to stop)...\n", dir)
 
-	// Wait for interrupt signal.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-	<-sigCh
+	// Wait for cancellation (signal in production, context in tests).
+	<-ctx.Done()
 
 	fmt.Fprintln(os.Stderr, "\nStopping watcher...")
 	return watcher.Stop()
@@ -948,6 +972,13 @@ func runSummarizePipeline(dir, ns string) error {
 		return fmt.Errorf("no LLM provider configured; run 'marmot configure' to set up a classifier provider")
 	}
 
+	return summarizeWithProvider(dir, ns, summarizer)
+}
+
+// summarizeWithProvider generates and writes a namespace summary using the given
+// summarizer. It is separated from provider selection so tests can inject a
+// summarizer without configuring a real LLM.
+func summarizeWithProvider(dir, ns string, summarizer llm.Summarizer) error {
 	sumEngine := summary.NewEngine(summarizer)
 
 	// Load active nodes.

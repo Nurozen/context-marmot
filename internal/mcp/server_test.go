@@ -363,6 +363,85 @@ func TestVerifyDetectsDanglingEdges(t *testing.T) {
 	}
 }
 
+func TestVerifyScopedNodeWithEdgeToUnscopedNode(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	// Write a target node, then a node with an edge to it.
+	writeTarget := makeCallToolRequest("context_write", map[string]any{
+		"id":      "test/target",
+		"type":    "function",
+		"summary": "Target node",
+	})
+	if res, err := eng.HandleContextWrite(ctx, writeTarget); err != nil || res.IsError {
+		t.Fatalf("write target failed")
+	}
+	writeSource := makeCallToolRequest("context_write", map[string]any{
+		"id":      "test/source",
+		"type":    "function",
+		"summary": "Source node",
+		"edges": []map[string]any{
+			{"target": "test/target", "relation": "calls"},
+		},
+	})
+	if res, err := eng.HandleContextWrite(ctx, writeSource); err != nil || res.IsError {
+		t.Fatalf("write source failed")
+	}
+
+	// Scoped verify of only the source node: its edge target exists in the
+	// graph but is outside the scoped set, and must NOT be flagged dangling.
+	verifyReq := makeCallToolRequest("context_verify", map[string]any{
+		"node_ids": []string{"test/source"},
+		"check":    "integrity",
+	})
+	verifyRes, err := eng.HandleContextVerify(ctx, verifyReq)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	var vr VerifyResult
+	if err := json.Unmarshal([]byte(resultText(t, verifyRes)), &vr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if vr.Total != 0 {
+		t.Errorf("expected 0 issues for scoped verify, got %d: %+v", vr.Total, vr.Issues)
+	}
+
+	// A genuinely dangling edge must still be reported in scoped mode.
+	writeDangling := makeCallToolRequest("context_write", map[string]any{
+		"id":      "test/dangling",
+		"type":    "function",
+		"summary": "Node with dangling edge",
+		"edges": []map[string]any{
+			{"target": "test/nonexistent", "relation": "calls"},
+		},
+	})
+	if res, err := eng.HandleContextWrite(ctx, writeDangling); err != nil || res.IsError {
+		t.Fatalf("write dangling failed")
+	}
+	verifyReq2 := makeCallToolRequest("context_verify", map[string]any{
+		"node_ids": []string{"test/dangling"},
+		"check":    "integrity",
+	})
+	verifyRes2, err := eng.HandleContextVerify(ctx, verifyReq2)
+	if err != nil {
+		t.Fatalf("verify dangling: %v", err)
+	}
+	var vr2 VerifyResult
+	if err := json.Unmarshal([]byte(resultText(t, verifyRes2)), &vr2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, issue := range vr2.Issues {
+		if issue.Type == "dangling_edge" && issue.NodeID == "test/dangling" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected dangling_edge issue for test/dangling, got: %+v", vr2.Issues)
+	}
+}
+
 func TestQueryEmptyGraph(t *testing.T) {
 	eng := testEngine(t)
 	ctx := context.Background()

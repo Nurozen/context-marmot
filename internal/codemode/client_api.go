@@ -192,7 +192,7 @@ func registerClient(rt *goja.Runtime, scope *runScope) error {
 		}
 		g := engine.GetGraph()
 		out := collectCapped(g, func(n *node.Node) bool {
-			return ns == "" || n.Namespace == ns
+			return ns == "" || normalizeNS(n.Namespace) == normalizeNS(ns)
 		})
 		return rt.ToValue(out)
 	})
@@ -224,11 +224,7 @@ func registerClient(rt *goja.Runtime, scope *runScope) error {
 			panic(rt.NewTypeError("client.listByNamespace: namespace is required"))
 		}
 		out := collectCapped(engine.GetGraph(), func(n *node.Node) bool {
-			nodeNS := n.Namespace
-			if nodeNS == "" {
-				nodeNS = "default"
-			}
-			return nodeNS == ns
+			return normalizeNS(n.Namespace) == normalizeNS(ns)
 		})
 		return rt.ToValue(out)
 	})
@@ -357,14 +353,20 @@ func hasTag(n *node.Node, tag string) bool {
 	return false
 }
 
+// normalizeNS maps the empty namespace to "default" so nodes whose files omit
+// the namespace field (hand-authored/legacy) are treated as default-namespace
+// nodes, matching the MCP layer's matchNamespace semantics.
+func normalizeNS(ns string) string {
+	if ns == "" {
+		return "default"
+	}
+	return ns
+}
+
 func allNamespaces(g *graph.Graph) []string {
 	seen := make(map[string]struct{})
 	for _, n := range g.AllActiveNodes() {
-		ns := n.Namespace
-		if ns == "" {
-			ns = "default"
-		}
-		seen[ns] = struct{}{}
+		seen[normalizeNS(n.Namespace)] = struct{}{}
 	}
 	out := make([]string, 0, len(seen))
 	for ns := range seen {

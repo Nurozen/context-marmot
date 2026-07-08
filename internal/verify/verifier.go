@@ -170,13 +170,29 @@ func VerifyStaleness(n *node.Node, projectRoot string) (*StaleStatus, error) {
 //   - Hash mismatches: node content hash differs from stored source hash
 //   - Structural cycles: cycles among structural edges (via Kahn's algorithm)
 //   - Missing sources: node references a source file that doesn't exist
+//
+// Edge targets are resolved against the passed nodes themselves, so this is
+// only correct when nodes is the complete graph. To verify a subset, use
+// VerifyIntegrityScoped with the full graph's ID set.
 func VerifyIntegrity(nodes []*node.Node, projectRoot string) []IntegrityIssue {
+	return VerifyIntegrityScoped(nodes, nil, projectRoot)
+}
+
+// VerifyIntegrityScoped runs the same checks as VerifyIntegrity but resolves
+// edge and superseded_by targets against knownIDs, which must contain every
+// node ID in the graph. Use this when nodes is a subset of the graph so that
+// edges pointing outside the subset are not reported as dangling. A nil
+// knownIDs derives the ID set from nodes.
+func VerifyIntegrityScoped(nodes []*node.Node, knownIDs map[string]bool, projectRoot string) []IntegrityIssue {
 	var issues []IntegrityIssue
 
 	// Build ID index for dangling-edge detection.
-	idSet := make(map[string]bool, len(nodes))
-	for _, n := range nodes {
-		idSet[n.ID] = true
+	idSet := knownIDs
+	if idSet == nil {
+		idSet = make(map[string]bool, len(nodes))
+		for _, n := range nodes {
+			idSet[n.ID] = true
+		}
 	}
 
 	for _, n := range nodes {

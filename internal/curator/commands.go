@@ -618,7 +618,17 @@ func executeVerify(_ context.Context, _ *SlashCommand, engine *mcp.Engine, selec
 	// MarmotDir is typically .marmot; project root is its parent.
 	projectRoot := filepath.Dir(engine.MarmotDir)
 
-	issues := verify.VerifyIntegrity(nodes, projectRoot)
+	// When verifying selected nodes, resolve edge targets against the full
+	// graph so edges to unselected nodes aren't flagged dangling.
+	var knownIDs map[string]bool
+	if len(selectedNodes) > 0 {
+		all := g.AllNodes()
+		knownIDs = make(map[string]bool, len(all))
+		for _, n := range all {
+			knownIDs[n.ID] = true
+		}
+	}
+	issues := verify.VerifyIntegrityScoped(nodes, knownIDs, projectRoot)
 
 	if len(issues) == 0 {
 		return &CommandResult{

@@ -153,3 +153,61 @@ func TestRelativeSourcePath_AlreadyRelative(t *testing.T) {
 		t.Errorf("path should stay relative, got %q", n.Source.Path)
 	}
 }
+
+// TestWriteComputesSourceHashWhenOmitted verifies that HandleContextWrite
+// computes the source hash when the caller provides a source path without a
+// hash, so staleness detection has a baseline.
+func TestWriteComputesSourceHashWhenOmitted(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	projectRoot := filepath.Dir(eng.MarmotDir)
+	srcFile := filepath.Join(projectRoot, "src", "hashed.go")
+	if err := os.MkdirAll(filepath.Dir(srcFile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(srcFile, []byte("package src\n\nfunc Hashed() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeReq := makeCallToolRequest("context_write", map[string]any{
+		"id":      "test/hashsrc",
+		"type":    "function",
+		"summary": "Hash computed on write",
+		"source": map[string]any{
+			"path": srcFile, // no hash provided
+		},
+	})
+	res, err := eng.HandleContextWrite(ctx, writeReq)
+	if err != nil {
+		t.Fatalf("HandleContextWrite: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("write error: %s", resultText(t, res))
+	}
+
+	n, ok := eng.GetGraph().GetNode("test/hashsrc")
+	if !ok {
+		t.Fatal("node not found in graph")
+	}
+	if len(n.Source.Hash) != 64 {
+		t.Errorf("expected computed 64-char source hash, got %q", n.Source.Hash)
+	}
+
+	// The freshly written node must not be reported stale.
+	verifyReq := makeCallToolRequest("context_verify", map[string]any{
+		"node_ids": []string{"test/hashsrc"},
+		"check":    "staleness",
+	})
+	verifyRes, err := eng.HandleContextVerify(ctx, verifyReq)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var vr VerifyResult
+	if err := json.Unmarshal([]byte(resultText(t, verifyRes)), &vr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if vr.Total != 0 {
+		t.Errorf("expected 0 staleness issues, got %d: %+v", vr.Total, vr.Issues)
+	}
+}

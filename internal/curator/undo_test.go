@@ -139,7 +139,7 @@ func TestSnapshotNodesExistingAndMissing(t *testing.T) {
 		t.Fatalf("expected node file to exist: %v", err)
 	}
 
-	snapshots := SnapshotNodes(store, "test", []string{"existing-node", "no-such-node"})
+	snapshots := SnapshotNodes(store, []string{"existing-node", "no-such-node"})
 
 	if len(snapshots) != 2 {
 		t.Fatalf("expected 2 snapshots, got %d", len(snapshots))

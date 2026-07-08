@@ -212,6 +212,9 @@ This is the root configuration for a ContextMarmot vault.
 // ---------------------------------------------------------------------------
 
 func cmdIndex(args []string) int {
+	// Flags may follow the positional source path (e.g., `marmot index ./src
+	// --incremental`); reorder them ahead of the positionals before parsing.
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true}, map[string]bool{"force": true, "incremental": true})
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	force := fs.Bool("force", false, "clear and rebuild all embeddings (use after changing embedding provider)")
@@ -223,45 +226,13 @@ func cmdIndex(args []string) int {
 		*dir = discoverVault()
 	}
 
-	// Check for positional arg (source path).
-	// Go's flag.FlagSet stops parsing at the first non-flag argument, so
-	// flags placed after the positional path (e.g., `marmot index ./src --incremental`)
-	// end up in the remaining args. We scan for them manually.
-	remaining := fs.Args()
-	if len(remaining) > 0 {
-		var srcDir string
-		for i := 0; i < len(remaining); i++ {
-			arg := remaining[i]
-			switch arg {
-			case "--incremental", "-incremental":
-				*incremental = true
-			case "--force", "-force":
-				*force = true
-			case "--dir", "-dir":
-				if i+1 >= len(remaining) {
-					fmt.Fprintln(os.Stderr, "index: --dir requires a value")
-					return 1
-				}
-				i++
-				*dir = remaining[i]
-			default:
-				if strings.HasPrefix(arg, "--dir=") {
-					*dir = strings.TrimPrefix(arg, "--dir=")
-				} else if strings.HasPrefix(arg, "-dir=") {
-					*dir = strings.TrimPrefix(arg, "-dir=")
-				} else if srcDir == "" {
-					srcDir = arg
-				}
-			}
+	if fs.NArg() > 0 {
+		// Static analysis indexing of a source directory.
+		if err := runStaticIndex(*dir, fs.Arg(0), *incremental); err != nil {
+			fmt.Fprintf(os.Stderr, "index: %v\n", err)
+			return 1
 		}
-		if srcDir != "" {
-			// Static analysis indexing of a source directory.
-			if err := runStaticIndex(*dir, srcDir, *incremental); err != nil {
-				fmt.Fprintf(os.Stderr, "index: %v\n", err)
-				return 1
-			}
-			return 0
-		}
+		return 0
 	}
 
 	if err := runIndex(*dir, *force); err != nil {
@@ -441,6 +412,7 @@ func looksLikeVaultPath(s string) bool {
 }
 
 func cmdBridge(args []string) int {
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "relations": true}, nil)
 	fs := flag.NewFlagSet("bridge", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory")
 	relations := fs.String("relations", "calls,reads,writes,references,cross_project,associated", "comma-separated list of allowed relations")

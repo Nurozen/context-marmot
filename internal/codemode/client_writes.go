@@ -178,7 +178,7 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 	unlock := s.lockNamespaces(snapshotIDs)
 	defer unlock()
 
-	snapshots := curator.SnapshotNodes(s.engine.NodeStore, s.write.Namespace, snapshotIDs)
+	snapshots := curator.SnapshotNodes(s.engine.NodeStore, snapshotIDs)
 
 	result, err := curator.ExecuteCommand(s.ctxOrBackground(), cmd, s.engine, affectedIDs)
 	if err != nil {

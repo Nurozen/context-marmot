@@ -76,7 +76,7 @@ func (s *Server) handleSlashCommand(w http.ResponseWriter, req curator.ChatReque
 	defer unlock()
 
 	// Snapshot nodes before mutation.
-	snapshots := curator.SnapshotNodes(s.engine.NodeStore, req.Namespace, affectedIDs)
+	snapshots := curator.SnapshotNodes(s.engine.NodeStore, affectedIDs)
 
 	ctx := context.Background()
 	result, err := curator.ExecuteCommand(ctx, cmd, s.engine, req.SelectedNodes)

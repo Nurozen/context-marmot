@@ -333,6 +333,16 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 				source.Path = rel
 			}
 		}
+
+		// Compute the source hash when omitted so staleness detection has a
+		// baseline. Leave it empty if the file can't be read — the integrity
+		// check reports missing sources separately.
+		if source.Path != "" && source.Hash == "" {
+			resolved := verify.ResolveSourcePath(source.Path, filepath.Dir(e.MarmotDir))
+			if h, err := verify.ComputeSourceHash(resolved, source.Lines); err == nil {
+				source.Hash = h
+			}
+		}
 	}
 
 	// Construct node.
@@ -560,7 +570,17 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 
 	// Run integrity check (dangling edges, structural cycles).
 	if check == "integrity" || check == "all" {
-		integrityIssues := verify.VerifyIntegrity(nodes, projectRoot)
+		// When verifying a subset, resolve edge targets against the full
+		// graph so edges to nodes outside the subset aren't flagged dangling.
+		var knownIDs map[string]bool
+		if len(nodeIDs) > 0 {
+			all := e.GetGraph().AllNodes()
+			knownIDs = make(map[string]bool, len(all))
+			for _, n := range all {
+				knownIDs[n.ID] = true
+			}
+		}
+		integrityIssues := verify.VerifyIntegrityScoped(nodes, knownIDs, projectRoot)
 		for _, ii := range integrityIssues {
 			issues = append(issues, VerifyIssue{
 				NodeID:   ii.NodeID,
@@ -571,10 +591,11 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 		}
 	}
 
-	// Run staleness check.
+	// Run staleness check. Nodes without a stored hash have no baseline to
+	// compare against and are skipped (matching CLI verify behavior).
 	if check == "staleness" || check == "all" {
 		for _, n := range nodes {
-			if n.Source.Path == "" {
+			if n.Source.Path == "" || n.Source.Hash == "" {
 				continue
 			}
 			status, err := verify.VerifyStaleness(n, projectRoot)

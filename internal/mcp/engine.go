@@ -44,6 +44,21 @@ type Engine struct {
 	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
 	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
 	nsMgrMu      sync.RWMutex
+	reindexWG     sync.WaitGroup // tracks background neighbor reindexes
+	closing       atomic.Bool    // set by Close; stops new background reindexes
+	reindexOnce   sync.Once      // lazily initializes the reindex context
+	reindexCtx    context.Context
+	reindexCancel context.CancelFunc
+}
+
+// reindexContext returns the shared parent context for background reindexes,
+// creating it on first use so zero-value Engines work too. Close cancels it
+// so shutdown never waits out a reindex's 30s timeout.
+func (e *Engine) reindexContext() context.Context {
+	e.reindexOnce.Do(func() {
+		e.reindexCtx, e.reindexCancel = context.WithCancel(context.Background())
+	})
+	return e.reindexCtx
 }
 
 // SetGraph atomically replaces the in-memory graph.
@@ -100,8 +115,19 @@ func (e *Engine) reindexNeighbors(nodeID string) {
 	}
 
 	// Run reindex in the background so the MCP response returns immediately.
+	// The WaitGroup lets Close drain in-flight reindexes before releasing the
+	// embedding store, preventing a use-after-close on shutdown.
+	if e.closing.Load() {
+		return
+	}
+	parent := e.reindexContext()
+	e.reindexWG.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer e.reindexWG.Done()
+		if e.closing.Load() {
+			return
+		}
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		defer cancel()
 		_ = e.UpdateEngine.Reindex(ctx, neighborIDs)
 	}()
@@ -302,8 +328,14 @@ func (e *Engine) ResolveNodeID(id string) (*node.Node, bool) {
 	return nil, false
 }
 
-// Close releases resources held by the engine.
+// Close releases resources held by the engine. It cancels and waits for
+// in-flight background reindexes so the embedding store is not closed under
+// them, without waiting out their 30s timeout.
 func (e *Engine) Close() error {
+	e.closing.Store(true)
+	e.reindexContext() // ensure reindexCancel is initialized
+	e.reindexCancel()
+	e.reindexWG.Wait()
 	if e.EmbeddingStore != nil {
 		if err := e.EmbeddingStore.Close(); err != nil {
 			return err

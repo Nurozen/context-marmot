@@ -3,6 +3,7 @@ package verify
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/node"
@@ -337,6 +338,37 @@ func TestVerifyIntegrity_DetectsDanglingEdges(t *testing.T) {
 	}
 	if !found {
 		t.Error("should detect dangling edge to 'nonexistent'")
+	}
+}
+
+func TestVerifyIntegrityScoped_ResolvesTargetsAgainstKnownIDs(t *testing.T) {
+	// Only node "a" is being verified, but "b" exists in the wider graph.
+	nodes := []*node.Node{
+		{
+			ID: "a",
+			Edges: []node.Edge{
+				{Target: "b", Relation: node.Calls, Class: node.Behavioral},
+				{Target: "nonexistent", Relation: node.Calls, Class: node.Behavioral},
+			},
+		},
+	}
+	knownIDs := map[string]bool{"a": true, "b": true}
+
+	issues := VerifyIntegrityScoped(nodes, knownIDs, "")
+
+	for _, issue := range issues {
+		if issue.IssueType == DanglingEdge && strings.Contains(issue.Message, `"b"`) {
+			t.Errorf("edge to known node 'b' should not be dangling: %+v", issue)
+		}
+	}
+	found := false
+	for _, issue := range issues {
+		if issue.IssueType == DanglingEdge && strings.Contains(issue.Message, `"nonexistent"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("should still detect dangling edge to 'nonexistent'")
 	}
 }
 

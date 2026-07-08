@@ -71,6 +71,7 @@ func warrenUsage() {
 }
 
 func warrenInit(args []string) int {
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true, "id": true}, nil)
 	fs := flag.NewFlagSet("warren init", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
 	rootCompat := fs.String("root", "", "Warren repository root")
@@ -81,10 +82,11 @@ func warrenInit(args []string) int {
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
-	if *warrenID == "" && fs.NArg() == 1 {
+	idFromFlag := *warrenID != ""
+	if !idFromFlag && fs.NArg() == 1 {
 		*warrenID = fs.Arg(0)
 	}
-	if *warrenID == "" || fs.NArg() > 1 {
+	if *warrenID == "" || fs.NArg() > 1 || (idFromFlag && fs.NArg() != 0) {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren init --id <warren-id> [--warren-dir .]")
 		return 1
 	}
@@ -616,38 +618,8 @@ func resolveWarrenRoot(root string) string {
 	}
 }
 
-func reorderInterspersedFlags(args []string, valueFlags, boolFlags map[string]bool) []string {
-	if len(args) == 0 {
-		return args
-	}
-	var flags []string
-	var positionals []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if !strings.HasPrefix(arg, "-") || arg == "-" {
-			positionals = append(positionals, arg)
-			continue
-		}
-		name := strings.TrimLeft(arg, "-")
-		if eq := strings.IndexByte(name, '='); eq >= 0 {
-			flags = append(flags, arg)
-			continue
-		}
-		if boolFlags[name] {
-			flags = append(flags, arg)
-			continue
-		}
-		if valueFlags[name] && i+1 < len(args) {
-			flags = append(flags, arg, args[i+1])
-			i++
-			continue
-		}
-		flags = append(flags, arg)
-	}
-	return append(flags, positionals...)
-}
-
 func warrenRegister(args []string) int {
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true}, nil)
 	fs := flag.NewFlagSet("warren register", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	if err := fs.Parse(args); err != nil {
@@ -715,6 +687,7 @@ func warrenMount(args []string, isBurrow bool) int {
 	if isBurrow {
 		name = "burrow"
 	}
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "warren": true}, map[string]bool{"materialize": true})
 	fs := flag.NewFlagSet("warren "+name, flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	warrenID := fs.String("warren", "", "Warren ID")
@@ -821,6 +794,7 @@ func warrenStatus(args []string) int {
 }
 
 func warrenEdit(args []string) int {
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "warren": true}, map[string]bool{"off": true})
 	fs := flag.NewFlagSet("warren edit", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	warrenID := fs.String("warren", "", "Warren ID")

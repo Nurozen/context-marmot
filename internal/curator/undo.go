@@ -133,7 +133,7 @@ func (u *UndoStack) Len(sessionID string) int {
 // SnapshotNodes loads the current state of the given node IDs from the store.
 // Returns snapshots suitable for an UndoEntry. Nodes that don't exist on disk
 // get Existed=false with a nil Node.
-func SnapshotNodes(store *node.Store, namespace string, nodeIDs []string) []NodeSnapshot {
+func SnapshotNodes(store *node.Store, nodeIDs []string) []NodeSnapshot {
 	snapshots := make([]NodeSnapshot, 0, len(nodeIDs))
 	for _, id := range nodeIDs {
 		path, err := store.SafeNodePath(id)
