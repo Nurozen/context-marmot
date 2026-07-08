@@ -339,14 +339,16 @@ func TestExecute_Writes_LinkRejectsStructuralCycle(t *testing.T) {
 }
 
 func TestExecute_Writes_UndoSnapshotUsesCanonicalID(t *testing.T) {
-	rig := newTestRig(t)
-	defer rig.cleanup()
-
-	rig.engine.WithNamespaceManager(&namespace.Manager{
-		Namespaces: map[string]*namespace.Namespace{
-			"auth": {Name: "auth"},
-		},
+	// Re-seed auth/login as a real "auth" namespace node (manifest plus
+	// matching frontmatter) so ResolveNodeID's namespace prefixing is
+	// exercised against prod-shaped fixtures rather than a manager that
+	// contradicts the node files.
+	rig := newTestRigWith(t, func(r *testRig) {
+		r.writeNodeNS(t, "auth", "", "login", "function", "JWT login handler", [][2]string{
+			{"db/users", "reads"},
+		})
 	})
+	defer rig.cleanup()
 
 	stack := curator.NewUndoStack()
 	ex := NewExecutor(rig.engine)
@@ -399,6 +401,15 @@ type testRig struct {
 }
 
 func newTestRig(t *testing.T) *testRig {
+	return newTestRigWith(t, nil)
+}
+
+// newTestRigWith seeds the standard default-namespace fixtures, runs extraSeed
+// (if non-nil) to write additional node files before the engine loads the
+// graph, then builds the engine. When extraSeed is given, a real namespace
+// manager is loaded from disk so ResolveNodeID can prefix any namespaces the
+// seed created via writeNodeNS.
+func newTestRigWith(t *testing.T, extraSeed func(*testRig)) *testRig {
 	t.Helper()
 	dir := t.TempDir()
 	marmotDir := filepath.Join(dir, ".marmot")
@@ -420,12 +431,24 @@ func newTestRig(t *testing.T) *testRig {
 	r.writeNode(t, "auth", "logout", "function", "Session logout", nil)
 	r.writeNode(t, "db", "users", "module", "User database access", nil)
 
+	if extraSeed != nil {
+		extraSeed(r)
+	}
+
 	emb := embedding.NewMockEmbedder("mock-test")
 	engine, err := mcpserver.NewEngine(marmotDir, emb)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
 	r.engine = engine
+
+	if extraSeed != nil {
+		mgr, err := namespace.NewManager(marmotDir)
+		if err != nil {
+			t.Fatalf("namespace manager: %v", err)
+		}
+		engine.WithNamespaceManager(mgr)
+	}
 
 	// Seed embeddings so search works.
 	for _, n := range engine.GetGraph().AllActiveNodes() {
@@ -452,19 +475,37 @@ func (r *testRig) cleanup() {
 	}
 }
 
-// writeNode writes a node markdown file at <dir>/<folder>/<name>.md with the
-// given type, summary, and outbound edges.
+// writeNode writes a default-namespace node markdown file at
+// <dir>/<folder>/<name>.md with the given type, summary, and outbound edges.
 func (r *testRig) writeNode(t *testing.T, folder, name, nodeType, summary string, edges [][2]string) {
 	t.Helper()
-	id := folder + "/" + name
-	if folder == "" {
-		id = name
+	r.writeNodeNS(t, "default", folder, name, nodeType, summary, edges)
+}
+
+// writeNodeNS is writeNode with an explicit namespace, mirroring what the prod
+// write path produces: for a non-default ns the node ID is prefixed with the
+// namespace and a _namespace.md manifest is created so a namespace manager
+// loaded from disk recognises it. ns == "" omits the namespace field entirely
+// (a hand-authored legacy file).
+func (r *testRig) writeNodeNS(t *testing.T, ns, folder, name, nodeType, summary string, edges [][2]string) {
+	t.Helper()
+	id := name
+	if folder != "" {
+		id = folder + "/" + name
+	}
+	if ns != "" && ns != "default" {
+		id = ns + "/" + id
+		if _, _, err := namespace.EnsureNamespace(r.dir, ns, ""); err != nil {
+			t.Fatalf("ensure namespace %s: %v", ns, err)
+		}
 	}
 	var buf strings.Builder
 	buf.WriteString("---\n")
 	fmt.Fprintf(&buf, "id: %s\n", id)
 	fmt.Fprintf(&buf, "type: %s\n", nodeType)
-	buf.WriteString("namespace: default\n")
+	if ns != "" {
+		fmt.Fprintf(&buf, "namespace: %s\n", ns)
+	}
 	buf.WriteString("status: active\n")
 	if len(edges) > 0 {
 		buf.WriteString("edges:\n")

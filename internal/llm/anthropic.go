@@ -37,9 +37,10 @@ Respond with only valid JSON matching: {"action":"ADD|UPDATE|SUPERSEDE|NOOP","ta
 
 // AnthropicProvider classifies nodes using the Anthropic Messages API.
 type AnthropicProvider struct {
-	apiKey string
-	model  string
-	client *http.Client
+	apiKey   string
+	model    string
+	client   *http.Client
+	endpoint string // Messages API endpoint; overridable in tests.
 }
 
 // NewAnthropicProvider creates a new AnthropicProvider using the given API
@@ -56,9 +57,10 @@ func NewAnthropicProviderWithModel(apiKey, model string) *AnthropicProvider {
 		model = AnthropicDefaultModel
 	}
 	return &AnthropicProvider{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{Timeout: 120 * time.Second},
+		apiKey:   apiKey,
+		model:    model,
+		client:   &http.Client{Timeout: 120 * time.Second},
+		endpoint: anthropicEndpoint,
 	}
 }
 
@@ -125,7 +127,7 @@ func (p *AnthropicProvider) Classify(ctx context.Context, req ClassifyRequest) (
 		return fallbackResult(), fmt.Errorf("anthropic: marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicEndpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fallbackResult(), fmt.Errorf("anthropic: create request: %w", err)
 	}
@@ -199,7 +201,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req ChatRequest) (string, 
 		return "", fmt.Errorf("anthropic: marshal chat request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicEndpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("anthropic: create chat request: %w", err)
 	}
@@ -256,7 +258,7 @@ func (p *AnthropicProvider) Summarize(ctx context.Context, req SummarizeRequest)
 		return "", fmt.Errorf("anthropic: marshal summarize request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicEndpoint, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("anthropic: create summarize request: %w", err)
 	}

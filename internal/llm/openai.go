@@ -28,9 +28,10 @@ const (
 
 // OpenAIProvider classifies/summarises nodes using the OpenAI Responses API.
 type OpenAIProvider struct {
-	apiKey string
-	model  string
-	client *http.Client
+	apiKey  string
+	model   string
+	client  *http.Client
+	baseURL string // Responses API endpoint; overridable in tests.
 }
 
 // NewOpenAIProvider creates a new OpenAIProvider using the given API key.
@@ -47,9 +48,10 @@ func NewOpenAIProviderWithModel(apiKey, model string) *OpenAIProvider {
 		model = OpenAIDefaultModel
 	}
 	return &OpenAIProvider{
-		apiKey: apiKey,
-		model:  model,
-		client: &http.Client{Timeout: 120 * time.Second},
+		apiKey:  apiKey,
+		model:   model,
+		client:  &http.Client{Timeout: 120 * time.Second},
+		baseURL: openaiResponsesURL,
 	}
 }
 
@@ -176,7 +178,7 @@ func (p *OpenAIProvider) doRequest(ctx context.Context, apiReq openaiResponsesRe
 		return "", fmt.Errorf("openai: marshal %s request: %w", label, err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, openaiResponsesURL, bytes.NewReader(bodyBytes))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", fmt.Errorf("openai: create %s request: %w", label, err)
 	}

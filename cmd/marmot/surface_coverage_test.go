@@ -1,0 +1,952 @@
+package main
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nurozen/context-marmot/internal/heatmap"
+	"github.com/nurozen/context-marmot/internal/llm"
+	"github.com/nurozen/context-marmot/internal/routes"
+	"github.com/nurozen/context-marmot/internal/summary"
+)
+
+// ---------------------------------------------------------------------------
+// Shared helpers for surface-coverage tests.
+// ---------------------------------------------------------------------------
+
+// withStdin temporarily replaces os.Stdin with a file containing content and
+// restores it afterwards. Interactive commands that scan stdin see EOF (or the
+// provided content) instead of blocking on a real terminal.
+func withStdin(t *testing.T, content string, fn func()) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content != "" {
+		if _, err := f.WriteString(content); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Seek(0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := os.Stdin
+	os.Stdin = f
+	defer func() {
+		os.Stdin = old
+		_ = f.Close()
+	}()
+	fn()
+}
+
+// writeVaultWithID creates a minimal mock-embedder vault carrying a vault_id.
+func writeVaultWithID(t *testing.T, dir, vaultID string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".marmot-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	idLine := ""
+	if vaultID != "" {
+		idLine = "vault_id: " + vaultID + "\n"
+	}
+	content := "---\nversion: \"1\"\n" + idLine + "namespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n# Vault\n"
+	if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// version
+// ---------------------------------------------------------------------------
+
+func TestVersionCommand(t *testing.T) {
+	for _, arg := range []string{"version", "--version", "-v"} {
+		if code := run([]string{arg}); code != 0 {
+			t.Fatalf("run(%q) exit code = %d, want 0", arg, code)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// init / configure / setup command wrappers (previously 0% cmd* funcs)
+// ---------------------------------------------------------------------------
+
+func TestCmdInitFullFlow(t *testing.T) {
+	vault := filepath.Join(t.TempDir(), ".marmot")
+	// Empty stdin -> configure uses defaults (mock), setup auto-generates.
+	withStdin(t, "", func() {
+		if code := run([]string{"init", "--dir", vault}); code != 0 {
+			t.Fatalf("init exit code = %d, want 0", code)
+		}
+	})
+	assertFileExists(t, filepath.Join(vault, "_config.md"))
+}
+
+func TestCmdInitFailsOnExisting(t *testing.T) {
+	vault := filepath.Join(t.TempDir(), ".marmot")
+	if err := runInit(vault); err != nil {
+		t.Fatalf("runInit: %v", err)
+	}
+	withStdin(t, "", func() {
+		if code := run([]string{"init", "--dir", vault}); code != 1 {
+			t.Fatalf("second init exit code = %d, want 1", code)
+		}
+	})
+}
+
+func TestCmdConfigureCommand(t *testing.T) {
+	vault := newTestVault(t)
+	withStdin(t, "\n\n", func() {
+		if code := run([]string{"configure", "--dir", vault}); code != 0 {
+			t.Fatalf("configure exit code = %d, want 0", code)
+		}
+	})
+}
+
+func TestCmdConfigureNonexistent(t *testing.T) {
+	withStdin(t, "", func() {
+		if code := run([]string{"configure", "--dir", filepath.Join(t.TempDir(), "nope")}); code != 1 {
+			t.Fatalf("configure nonexistent exit code = %d, want 1", code)
+		}
+	})
+}
+
+func TestCmdSetupCommand(t *testing.T) {
+	vault := newTestVault(t)
+	if code := run([]string{"setup", "--dir", vault, "--claude"}); code != 0 {
+		t.Fatalf("setup exit code = %d, want 0", code)
+	}
+	assertFileExists(t, filepath.Join(filepath.Dir(vault), ".mcp.json"))
+}
+
+func TestCmdSetupNonexistent(t *testing.T) {
+	if code := run([]string{"setup", "--dir", filepath.Join(t.TempDir(), "nope")}); code != 1 {
+		t.Fatalf("setup nonexistent exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// serve (blocks on stdin JSON-RPC; feed EOF so ListenStdio returns)
+// ---------------------------------------------------------------------------
+
+func TestServeCommandEOF(t *testing.T) {
+	vault := initTestVault(t)
+	withStdin(t, "", func() {
+		if code := run([]string{"serve", "--dir", vault}); code != 0 {
+			t.Fatalf("serve exit code = %d, want 0", code)
+		}
+	})
+}
+
+func TestServeCommandNoVault(t *testing.T) {
+	if code := run([]string{"serve", "--dir", filepath.Join(t.TempDir(), "nope")}); code != 1 {
+		t.Fatalf("serve nonexistent exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// route (entire file was 0%; isolate storage via SetOverridePath)
+// ---------------------------------------------------------------------------
+
+func TestRouteCommands(t *testing.T) {
+	routesFile := filepath.Join(t.TempDir(), "routes.yml")
+	routes.SetOverridePath(routesFile)
+	defer routes.SetOverridePath("")
+
+	// Empty list.
+	if out, code := captureRun([]string{"route"}); code != 0 || !strings.Contains(out, "No vaults registered") {
+		t.Fatalf("route list empty = %q code=%d", out, code)
+	}
+
+	target := t.TempDir()
+	if code := run([]string{"route", "add", "vault-x", target}); code != 0 {
+		t.Fatalf("route add exit code = %d", code)
+	}
+	if out, code := captureRun([]string{"route"}); code != 0 || !strings.Contains(out, "vault-x") {
+		t.Fatalf("route list = %q code=%d", out, code)
+	}
+	if out, code := captureRun([]string{"route", "resolve", "vault-x"}); code != 0 || !strings.Contains(out, target) {
+		t.Fatalf("route resolve = %q code=%d", out, code)
+	}
+	if code := run([]string{"route", "rm", "vault-x"}); code != 0 {
+		t.Fatalf("route rm exit code = %d", code)
+	}
+	if code := run([]string{"route", "resolve", "vault-x"}); code != 1 {
+		t.Fatalf("route resolve removed exit code = %d, want 1", code)
+	}
+}
+
+func TestRouteErrorPaths(t *testing.T) {
+	routesFile := filepath.Join(t.TempDir(), "routes.yml")
+	routes.SetOverridePath(routesFile)
+	defer routes.SetOverridePath("")
+
+	cases := [][]string{
+		{"route", "add"}, // missing args
+		{"route", "add", "v", filepath.Join(t.TempDir(), "no")}, // path does not exist
+		{"route", "rm"},                 // missing arg
+		{"route", "rm", "missing"},      // not registered
+		{"route", "resolve"},            // missing arg
+		{"route", "resolve", "missing"}, // not registered
+		{"route", "bogus"},              // unknown subcommand
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+
+	// route add with a path that is a file (not a directory).
+	file := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"route", "add", "v", file}); code != 1 {
+		t.Fatalf("route add file exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// sdk
+// ---------------------------------------------------------------------------
+
+func TestSDKCommand(t *testing.T) {
+	if out, code := captureRun([]string{"sdk"}); code != 0 || len(out) == 0 {
+		t.Fatalf("sdk stdout empty, code=%d", code)
+	}
+	out := filepath.Join(t.TempDir(), "sdk.ts")
+	if code := run([]string{"sdk", "--out", out, "--base-url", "http://example.test"}); code != 0 {
+		t.Fatalf("sdk --out exit code = %d", code)
+	}
+	assertFileExists(t, out)
+
+	if code := run([]string{"sdk", "--out", filepath.Join(t.TempDir(), "missing-dir", "sdk.ts")}); code != 1 {
+		t.Fatalf("sdk --out bad path exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ui
+// ---------------------------------------------------------------------------
+
+func TestUICommandNoVault(t *testing.T) {
+	if code := run([]string{"ui", "--dir", filepath.Join(t.TempDir(), "nope"), "--no-open"}); code != 1 {
+		t.Fatalf("ui nonexistent exit code = %d, want 1", code)
+	}
+}
+
+// TestUIInvalidPort forces runUIPipeline's ListenAndServe to fail immediately by
+// using an out-of-range port, exercising the full engine wiring and startup path
+// without blocking. Note: this leaves a signal-wait goroutine alive, so no test
+// in this package may send SIGINT/SIGTERM to the process.
+func TestUIInvalidPort(t *testing.T) {
+	vault := initTestVault(t)
+	// Port 70000 is out of the valid 0-65535 range; net.Listen rejects it,
+	// so ListenAndServe returns an error immediately instead of blocking.
+	if code := run([]string{"ui", "--dir", vault, "--no-open", "--port", "70000"}); code != 1 {
+		t.Fatalf("ui invalid-port exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// bridge — cross-vault mode and additional error branches
+// ---------------------------------------------------------------------------
+
+func TestCrossVaultBridgeCommand(t *testing.T) {
+	local := filepath.Join(t.TempDir(), ".marmot")
+	remote := filepath.Join(t.TempDir(), ".marmot")
+	writeVaultWithID(t, local, "local-vault")
+	writeVaultWithID(t, remote, "remote-vault")
+
+	// Two positional paths.
+	if code := run([]string{"bridge", local, remote}); code != 0 {
+		t.Fatalf("cross-vault bridge exit code = %d, want 0", code)
+	}
+
+	// verify --bridges should now exercise the cross-vault bridge check path.
+	writeTestNode(t, local, "svc/a", "default")
+	if code := run([]string{"verify", "--bridges", "--dir", local}); code != 0 {
+		t.Fatalf("verify --bridges exit code = %d, want 0", code)
+	}
+}
+
+func TestCrossVaultBridgeSinglePathArg(t *testing.T) {
+	local := filepath.Join(t.TempDir(), ".marmot")
+	remote := filepath.Join(t.TempDir(), ".marmot")
+	writeVaultWithID(t, local, "local-vault")
+	writeVaultWithID(t, remote, "remote-vault")
+
+	// Single path arg -> local from --dir, remote from positional.
+	if code := run([]string{"bridge", "--dir", local, remote}); code != 0 {
+		t.Fatalf("single-path cross-vault bridge exit code = %d, want 0", code)
+	}
+	// Flags may also follow the positional path.
+	if code := run([]string{"bridge", remote, "--dir", local}); code != 0 {
+		t.Fatalf("single-path cross-vault bridge trailing --dir exit code = %d, want 0", code)
+	}
+}
+
+func TestCrossVaultBridgeMissingVault(t *testing.T) {
+	if code := run([]string{"bridge", filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")}); code != 1 {
+		t.Fatalf("cross-vault bridge missing dirs exit code = %d, want 1", code)
+	}
+}
+
+func TestBridgeArgErrors(t *testing.T) {
+	vault := initTestVault(t)
+	cases := [][]string{
+		{"bridge", "--dir", vault},                 // 0 positional args
+		{"bridge", "a", "b", "c", "--dir", vault},  // too many args
+		{"bridge", "--dir", vault, "_bad", "beta"}, // invalid namespace name
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// warren list / refresh / propose (previously 0%)
+// ---------------------------------------------------------------------------
+
+func TestWarrenListRefreshPropose(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "product-platform", "project-a")
+
+	// Empty list first.
+	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "No Warrens registered") {
+		t.Fatalf("warren list empty = %q code=%d", out, code)
+	}
+
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
+		t.Fatalf("register exit code = %d", code)
+	}
+
+	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "product-platform") {
+		t.Fatalf("warren list = %q code=%d", out, code)
+	}
+	if code := run([]string{"warren", "list", "--dir", marmotDir, "--json"}); code != 0 {
+		t.Fatalf("warren list --json exit code = %d", code)
+	}
+	if code := run([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
+		t.Fatalf("warren refresh exit code = %d", code)
+	}
+	if code := run([]string{"warren", "propose", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
+		t.Fatalf("warren propose exit code = %d", code)
+	}
+	// refresh/propose resolve a single registered Warren without --warren.
+	if code := run([]string{"warren", "refresh", "--dir", marmotDir}); code != 0 {
+		t.Fatalf("warren refresh (auto-resolve) exit code = %d", code)
+	}
+	if code := run([]string{"warren", "propose", "--dir", marmotDir}); code != 0 {
+		t.Fatalf("warren propose (auto-resolve) exit code = %d", code)
+	}
+}
+
+func TestWarrenRefreshProposeNoWarren(t *testing.T) {
+	marmotDir := filepath.Join(t.TempDir(), ".marmot")
+	if code := run([]string{"warren", "refresh", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren refresh no-warren exit code = %d, want 1", code)
+	}
+	if code := run([]string{"warren", "propose", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren propose no-warren exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// warren project add --generate-id (covers generatedProjectID)
+// ---------------------------------------------------------------------------
+
+func TestWarrenProjectAddGenerateID(t *testing.T) {
+	root := t.TempDir()
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	// --generate-id with a path whose parent dir name becomes the project ID.
+	if code := run([]string{"warren", "project", "add", "--generate-id", "--warren-dir", root, "--path", "projects/billing/.marmot"}); code != 0 {
+		t.Fatalf("project add --generate-id exit code = %d", code)
+	}
+}
+
+func TestWarrenProjectImportGenerateIDFromPath(t *testing.T) {
+	root := t.TempDir()
+	// Source vault with no project metadata -> ID derived from path base.
+	source := writeCLIImportSourceVault(t, filepath.Join(t.TempDir(), "reporting", ".marmot"), "src-vault")
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "product-platform"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	if code := run([]string{"warren", "project", "import", "--generate-id", source, "--warren-dir", root}); code != 0 {
+		t.Fatalf("project import --generate-id exit code = %d", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// usage / unknown-subcommand paths (0% usage funcs)
+// ---------------------------------------------------------------------------
+
+func TestSubcommandUsageAndUnknownPaths(t *testing.T) {
+	cases := [][]string{
+		{"namespace"},                  // namespaceUsage
+		{"namespace", "bogus"},         // unknown namespace subcommand
+		{"warren"},                     // warrenUsage
+		{"warren", "bogus"},            // unknown warren subcommand
+		{"warren", "project"},          // warrenProjectUsage
+		{"warren", "project", "bogus"}, // unknown project subcommand
+		{"warren", "bridge"},           // warrenBridgeUsage
+		{"warren", "bridge", "bogus"},  // unknown bridge subcommand
+		{"warren", "init"},             // missing --id
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// query flag branches
+// ---------------------------------------------------------------------------
+
+func TestQueryWithExplicitBudgetAndDepth(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+	if code := run([]string{"query", "--dir", vault, "--query", "hello", "--depth", "3", "--budget", "2048"}); code != 0 {
+		t.Fatalf("query with flags exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// watch (context-driven loop; no real signals so the UI signal goroutine is
+// never triggered)
+// ---------------------------------------------------------------------------
+
+func TestWatchLoopCancels(t *testing.T) {
+	vault := initTestVault(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- watchLoop(ctx, vault) }()
+
+	// Give the watcher a moment to start, then cancel.
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("watchLoop returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchLoop did not return after cancel")
+	}
+}
+
+func TestWatchLoopNoVault(t *testing.T) {
+	if err := watchLoop(context.Background(), filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("expected error for nonexistent vault")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// openBrowser (neutralise side effects by clearing PATH so the launcher binary
+// cannot be found and Start() fails harmlessly)
+// ---------------------------------------------------------------------------
+
+func TestOpenBrowserNoSideEffects(t *testing.T) {
+	t.Setenv("PATH", "")
+	openBrowser("http://localhost:0/")
+}
+
+// ---------------------------------------------------------------------------
+// buildEngine classifier branches (provider configured but no API key present)
+// ---------------------------------------------------------------------------
+
+func TestBuildEngineClassifierNoKey(t *testing.T) {
+	for _, provider := range []string{"openai", "anthropic"} {
+		provider := provider
+		t.Run(provider, func(t *testing.T) {
+			t.Setenv("OPENAI_API_KEY", "")
+			t.Setenv("ANTHROPIC_API_KEY", "")
+			dir := filepath.Join(t.TempDir(), ".marmot")
+			if err := os.MkdirAll(filepath.Join(dir, ".marmot-data"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			content := "---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\nclassifier_provider: " + provider + "\n---\n"
+			if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			result, err := buildEngine(dir)
+			if err != nil {
+				t.Fatalf("buildEngine: %v", err)
+			}
+			result.Cleanup()
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// index / static-index error branches
+// ---------------------------------------------------------------------------
+
+func TestIndexErrorPaths(t *testing.T) {
+	// index on a nonexistent vault.
+	if code := run([]string{"index", "--dir", filepath.Join(t.TempDir(), "nope")}); code != 1 {
+		t.Fatalf("index nonexistent exit code = %d, want 1", code)
+	}
+	// static index (positional source) on a nonexistent vault.
+	if code := run([]string{"index", "src", "--dir", filepath.Join(t.TempDir(), "nope")}); code != 1 {
+		t.Fatalf("static index nonexistent exit code = %d, want 1", code)
+	}
+	// index --force on a valid empty vault (no nodes).
+	vault := initTestVault(t)
+	if code := run([]string{"index", "--force", "--dir", vault}); code != 0 {
+		t.Fatalf("index --force exit code = %d, want 0", code)
+	}
+}
+
+func TestStaticIndexNonexistentSource(t *testing.T) {
+	vault := initTestVault(t)
+	if code := run([]string{"index", filepath.Join(t.TempDir(), "no-src"), "--dir", vault}); code != 1 {
+		t.Fatalf("static index bad source exit code = %d, want 1", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// query / summarize / reembed additional branches
+// ---------------------------------------------------------------------------
+
+func TestQueryNonexistentVault(t *testing.T) {
+	if code := run([]string{"query", "--dir", filepath.Join(t.TempDir(), "nope"), "--query", "x"}); code != 1 {
+		t.Fatalf("query nonexistent exit code = %d, want 1", code)
+	}
+}
+
+func TestSummarizeWithNamespaceFlag(t *testing.T) {
+	vault := initTestVault(t)
+	// No LLM configured -> exit 1, but exercises the --namespace flag path.
+	if code := run([]string{"summarize", "--namespace", "default", "--dir", vault}); code != 1 {
+		t.Fatalf("summarize --namespace exit code = %d, want 1", code)
+	}
+}
+
+func TestReembedWithNamespaceFlag(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+	// --namespace warns but still rebuilds.
+	if code := run([]string{"reembed", "--namespace", "default", "--dir", vault}); code != 0 {
+		t.Fatalf("reembed --namespace exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// verify combinations
+// ---------------------------------------------------------------------------
+
+func TestVerifyNamespaceNoMatch(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+	// Filtering to a namespace with no nodes prints the "no nodes" branch.
+	if code := run([]string{"verify", "--namespace", "missing", "--dir", vault}); code != 0 {
+		t.Fatalf("verify --namespace missing exit code = %d, want 0", code)
+	}
+}
+
+func TestVerifyBridgesNoVaultID(t *testing.T) {
+	// A vault with a cross-vault bridge but no vault_id yields a warning.
+	local := filepath.Join(t.TempDir(), ".marmot")
+	remote := filepath.Join(t.TempDir(), ".marmot")
+	writeVaultWithID(t, local, "local-vault")
+	writeVaultWithID(t, remote, "remote-vault")
+	if code := run([]string{"bridge", local, remote}); code != 0 {
+		t.Fatalf("cross-vault bridge exit code = %d", code)
+	}
+	writeTestNode(t, local, "svc/a", "default")
+
+	// Rewrite local config to drop vault_id so the bridge-config warning fires.
+	noID := "---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"
+	if err := os.WriteFile(filepath.Join(local, "_config.md"), []byte(noID), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"verify", "--bridges", "--dir", local}); code != 0 {
+		t.Fatalf("verify --bridges no-id exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// namespace error / print branches
+// ---------------------------------------------------------------------------
+
+func TestNamespaceErrorPaths(t *testing.T) {
+	vault := initTestVault(t)
+	cases := [][]string{
+		{"namespace", "create", "--dir", vault},            // missing name
+		{"namespace", "update", "--dir", vault},            // missing name
+		{"namespace", "update", "--dir", vault, "_bad"},    // invalid name
+		{"namespace", "update", "--dir", vault, "ghost"},   // nonexistent manifest
+		{"namespace", "remove", "--dir", vault},            // missing name
+		{"namespace", "remove", "--dir", vault, "default"}, // refuses default
+		{"namespace", "remove", "--dir", vault, "_bad"},    // invalid name
+		{"namespace", "remove", "--dir", vault, "ghost"},   // manifest not present
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+func TestNamespaceListPlainWithRootPath(t *testing.T) {
+	vault := initTestVault(t)
+	if code := run([]string{"namespace", "create", "team-x", "--dir", vault, "--root-path", "../team-x"}); code != 0 {
+		t.Fatalf("namespace create exit code = %d", code)
+	}
+	writeTestNode(t, vault, "team-x/overview", "team-x")
+	// Plain (non-JSON) listing exercises the root-path print branch.
+	if out, code := captureRun([]string{"namespace", "list", "--dir", vault}); code != 0 || !strings.Contains(out, "root=") {
+		t.Fatalf("namespace list plain = %q code=%d", out, code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// warren error / print branches
+// ---------------------------------------------------------------------------
+
+func TestWarrenProjectErrorPaths(t *testing.T) {
+	root := t.TempDir()
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "wp"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	cases := [][]string{
+		{"warren", "project", "add", "--warren-dir", root},                    // missing project id
+		{"warren", "project", "add", "a", "b", "--warren-dir", root},          // too many args
+		{"warren", "project", "remove", "--warren-dir", root},                 // missing arg
+		{"warren", "project", "remove", "ghost", "--warren-dir", root},        // nonexistent
+		{"warren", "project", "rename", "--warren-dir", root},                 // wrong arg count
+		{"warren", "project", "rename", "a", "b", "c", "--warren-dir", root},  // too many
+		{"warren", "project", "rename", "ghost", "new", "--warren-dir", root}, // nonexistent
+		{"warren", "project", "import", "--warren-dir", root},                 // missing args
+		{"warren", "project", "list", "extra", "--warren-dir", root},          // unexpected positional
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+func TestWarrenBridgeErrorPaths(t *testing.T) {
+	root := t.TempDir()
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "wp"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	cases := [][]string{
+		{"warren", "bridge", "add", "--warren-dir", root},              // wrong arg count
+		{"warren", "bridge", "add", "a", "b", "--warren-dir", root},    // projects not registered
+		{"warren", "bridge", "list", "extra", "--warren-dir", root},    // unexpected positional
+		{"warren", "bridge", "remove", "--warren-dir", root},           // wrong arg count
+		{"warren", "bridge", "remove", "a", "b", "--warren-dir", root}, // nonexistent
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+func TestWarrenDoctorNonJSONReportsIssues(t *testing.T) {
+	// A Warren whose projects lack embedding DBs reports (warning) issues; the
+	// non-JSON branch prints them and still exits 0.
+	root := testWarrenRoot(t, "wp", "project-a", "project-b")
+	if code := run([]string{"warren", "doctor", "--warren-dir", root}); code != 0 {
+		t.Fatalf("warren doctor exit code = %d, want 0", code)
+	}
+}
+
+func TestWarrenFormatAndRegisterErrors(t *testing.T) {
+	cases := [][]string{
+		{"warren", "format", "--warren-dir", filepath.Join(t.TempDir(), "no-manifest")}, // no manifest
+		{"warren", "format", "extra", "--warren-dir", t.TempDir()},                      // unexpected positional
+		{"warren", "register", "--dir", filepath.Join(t.TempDir(), ".marmot")},          // wrong arg count
+		{"warren", "init", "--warren-dir", t.TempDir(), "id-a", "id-b"},                 // too many args
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+func TestWarrenInitPositionalID(t *testing.T) {
+	// Positional id form plus --root compatibility alias; interspersed flags
+	// are reordered, so the id may come before or after the flags.
+	if code := run([]string{"warren", "init", "--root", t.TempDir(), "myrepo"}); code != 0 {
+		t.Fatalf("warren init positional exit code = %d, want 0", code)
+	}
+	if code := run([]string{"warren", "init", "myrepo", "--root", t.TempDir()}); code != 0 {
+		t.Fatalf("warren init positional-first exit code = %d, want 0", code)
+	}
+	// A stray positional alongside --id is an error, not silently ignored.
+	if code := run([]string{"warren", "init", "--root", t.TempDir(), "--id", "myrepo", "stray"}); code != 1 {
+		t.Fatalf("warren init --id with stray positional exit code = %d, want 1", code)
+	}
+}
+
+func TestWarrenInterspersedFlagsAfterPositionals(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	if code := run([]string{"warren", "register", "wp", warrenRoot, "--dir", marmotDir}); code != 0 {
+		t.Fatalf("warren register positional-first exit code = %d, want 0", code)
+	}
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "project-a", "--materialize"}); code != 0 {
+		t.Fatalf("warren mount trailing --materialize exit code = %d, want 0", code)
+	}
+	if code := run([]string{"warren", "edit", "project-a", "--warren", "wp", "--dir", marmotDir}); code != 0 {
+		t.Fatalf("warren edit positional-first exit code = %d, want 0", code)
+	}
+	if code := run([]string{"warren", "edit", "project-a", "--off", "--warren", "wp", "--dir", marmotDir}); code != 0 {
+		t.Fatalf("warren edit --off positional-first exit code = %d, want 0", code)
+	}
+}
+
+func TestWarrenMountAndEditErrors(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	cases := [][]string{
+		{"warren", "mount", "--dir", marmotDir},                             // missing --warren
+		{"warren", "mount", "--dir", marmotDir, "--warren", "ghost"},        // unregistered warren
+		{"warren", "edit", "--dir", marmotDir},                              // missing warren + project
+		{"warren", "edit", "--dir", marmotDir, "--warren", "ghost", "proj"}, // unregistered warren
+		{"warren", "status", "--dir", marmotDir, "--warren", "ghost"},       // unregistered warren
+	}
+	for _, args := range cases {
+		if code := run(args); code != 1 {
+			t.Fatalf("run(%v) exit code = %d, want 1", args, code)
+		}
+	}
+}
+
+func TestWarrenStatusJSON(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatalf("register exit code = %d", code)
+	}
+	if code := run([]string{"warren", "status", "--dir", marmotDir, "--warren", "wp", "--json"}); code != 0 {
+		t.Fatalf("warren status --json exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// index pipeline: second run finds everything up to date
+// ---------------------------------------------------------------------------
+
+func TestIndexUpToDateSecondRun(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+	writeTestNode(t, vault, "node_b", "default")
+	if code := run([]string{"index", "--dir", vault}); code != 0 {
+		t.Fatalf("first index exit code = %d", code)
+	}
+	// Second index without --force: all nodes unchanged.
+	if out, code := captureRun([]string{"index", "--dir", vault}); code != 0 || !strings.Contains(out, "up to date") {
+		t.Fatalf("second index = %q code=%d", out, code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// static index with a classifier configured but no API key
+// ---------------------------------------------------------------------------
+
+func TestStaticIndexClassifierNoKey(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	root := t.TempDir()
+	vault := filepath.Join(root, ".marmot")
+	src := filepath.Join(root, "src")
+	if err := os.MkdirAll(filepath.Join(vault, ".marmot-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\nclassifier_provider: openai\n---\n"
+	if err := os.WriteFile(filepath.Join(vault, "_config.md"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "main.go"), []byte("package main\n\nfunc Hello() string { return \"hi\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"index", src, "--dir", vault}); code != 0 {
+		t.Fatalf("static index exit code = %d, want 0", code)
+	}
+	// Bool flags after the positional source path are reordered too.
+	if code := run([]string{"index", src, "--incremental", "--dir", vault}); code != 0 {
+		t.Fatalf("static index trailing --incremental exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// verify with staleness and bridges together
+// ---------------------------------------------------------------------------
+
+func TestVerifyStalenessAndBridges(t *testing.T) {
+	vault := filepath.Join(t.TempDir(), ".marmot")
+	writeVaultWithID(t, vault, "local-vault")
+	writeTestNode(t, vault, "node_a", "default")
+	if code := run([]string{"verify", "--staleness", "--bridges", "--dir", vault}); code != 0 {
+		t.Fatalf("verify --staleness --bridges exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// warren mount with no project args mounts every project in the manifest
+// ---------------------------------------------------------------------------
+
+func TestWarrenMountAllProjects(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "wp", "project-a", "project-b")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatalf("register exit code = %d", code)
+	}
+	// No positional projects -> mount all from the manifest.
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp"}); code != 0 {
+		t.Fatalf("warren mount-all exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// generatedProjectID resolves an existing project's metadata ID
+// ---------------------------------------------------------------------------
+
+func TestWarrenProjectAddGenerateIDFromMetadata(t *testing.T) {
+	root := t.TempDir()
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "wp"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	// Pre-seed metadata at the target path so generatedProjectID reads its ID.
+	marmotDir := filepath.Join(root, "projects", "seeded", ".marmot")
+	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "_warren.md"),
+		[]byte("---\nproject_id: seeded-svc\nwarren_id: wp\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"warren", "project", "add", "--generate-id", "--warren-dir", root, "--path", "projects/seeded/.marmot"}); code != 0 {
+		t.Fatalf("project add --generate-id (metadata) exit code = %d", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// status / buildEngine with namespaces, heat map and a generated summary
+// present (covers the richer reporting and wiring branches)
+// ---------------------------------------------------------------------------
+
+func TestStatusAndQueryWithNamespaceHeatSummary(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "svc/a", "default")
+	writeTestNode(t, vault, "svc/b", "default")
+	if code := run([]string{"namespace", "create", "svc", "--dir", vault}); code != 0 {
+		t.Fatalf("namespace create exit code = %d", code)
+	}
+
+	// Seed a heat map with a co-access pair.
+	hm := heatmap.New("default")
+	hm.RecordCoAccess([]string{"svc/a", "svc/b"}, 0.5)
+	if err := heatmap.Save(vault, hm); err != nil {
+		t.Fatalf("heatmap.Save: %v", err)
+	}
+
+	// Seed a generated summary for the default namespace.
+	if err := summary.WriteSummary(vault, "default", &summary.SummaryResult{
+		Namespace:   "default",
+		Content:     "Overview of the default namespace.",
+		NodeCount:   2,
+		GeneratedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("summary.WriteSummary: %v", err)
+	}
+
+	if out, code := captureRun([]string{"status", "--dir", vault}); code != 0 || !strings.Contains(out, "Heat map:") || !strings.Contains(out, "Summary: generated") {
+		t.Fatalf("status output missing heat/summary: %q code=%d", out, code)
+	}
+
+	// A query wires the engine with the namespace manager and heat map.
+	if code := run([]string{"query", "--dir", vault, "--query", "svc"}); code != 0 {
+		t.Fatalf("query exit code = %d, want 0", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// summarize core with an injected mock summarizer (offline; no LLM keys)
+// ---------------------------------------------------------------------------
+
+func TestSummarizeWithProvider(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "svc/a", "default")
+	writeTestNode(t, vault, "svc/b", "default")
+
+	mock := &llm.MockProvider{SummaryResult: "A concise summary of svc."}
+	if err := summarizeWithProvider(vault, "default", mock); err != nil {
+		t.Fatalf("summarizeWithProvider: %v", err)
+	}
+	if mock.GetSummarizeCalls() != 1 {
+		t.Fatalf("expected 1 summarize call, got %d", mock.GetSummarizeCalls())
+	}
+	// The summary file should now exist and status should report it.
+	if _, err := summary.ReadSummary(vault, "default"); err != nil {
+		t.Fatalf("ReadSummary after generate: %v", err)
+	}
+}
+
+func TestSummarizeWithProviderNoNodes(t *testing.T) {
+	vault := initTestVault(t)
+	mock := &llm.MockProvider{}
+	if err := summarizeWithProvider(vault, "default", mock); err != nil {
+		t.Fatalf("summarizeWithProvider (no nodes): %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// small helper unit tests
+// ---------------------------------------------------------------------------
+
+func TestToolResultTextEdgeCases(t *testing.T) {
+	if got := toolResultText(nil); got != "" {
+		t.Fatalf("toolResultText(nil) = %q, want empty", got)
+	}
+	if got := toolResultText(&mcp.CallToolResult{}); got != "" {
+		t.Fatalf("toolResultText(empty) = %q, want empty", got)
+	}
+}
+
+func TestTruncateHashForDisplay(t *testing.T) {
+	if got := truncateHashForDisplay("short"); got != "short" {
+		t.Fatalf("truncateHashForDisplay(short) = %q", got)
+	}
+	if got := truncateHashForDisplay("0123456789abcdef"); got != "01234567" {
+		t.Fatalf("truncateHashForDisplay(long) = %q, want 01234567", got)
+	}
+}
+
+func TestRuntimeBridgeKeyOrdering(t *testing.T) {
+	if runtimeBridgeKey("a", "b") != runtimeBridgeKey("b", "a") {
+		t.Fatal("runtimeBridgeKey should be order-independent")
+	}
+}
+
+func TestEmptyNamespaceManager(t *testing.T) {
+	mgr := emptyNamespaceManager("/tmp/vault")
+	if mgr.VaultDir != "/tmp/vault" || mgr.Namespaces == nil || mgr.Bridges == nil {
+		t.Fatalf("unexpected empty namespace manager: %+v", mgr)
+	}
+}

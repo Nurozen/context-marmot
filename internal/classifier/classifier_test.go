@@ -2,6 +2,8 @@ package classifier
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/embedding"
@@ -24,6 +26,14 @@ type mockEmbedder struct{}
 
 func (m *mockEmbedder) Embed(_ string) ([]float32, error) { return []float32{1.0, 0.0}, nil }
 func (m *mockEmbedder) Model() string                     { return "mock" }
+
+// errEmbedder always fails on Embed, to exercise the embed-error path.
+type errEmbedder struct{}
+
+func (m *errEmbedder) Embed(_ string) ([]float32, error) {
+	return nil, errors.New("embed failed")
+}
+func (m *errEmbedder) Model() string { return "mock" }
 
 // mockGraph is an in-memory mock for GraphReader.
 type mockGraph struct {
@@ -259,4 +269,201 @@ func TestClassify_NoContent(t *testing.T) {
 	if result.Reasoning != "no content to compare" {
 		t.Errorf("expected reasoning 'no content to compare', got %q", result.Reasoning)
 	}
+}
+
+// TestClassify_ContextTruncated — long Context (>6000 chars) is appended and truncated,
+// exercising the embed-text build branch. Uses the LLM path so a result flows through.
+func TestClassify_ContextTruncated(t *testing.T) {
+	mockLLM := &llm.MockProvider{Result: llm.ClassifyResult{
+		Action:       llm.ActionNOOP,
+		TargetNodeID: "ns/existing",
+	}}
+	c := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "ns/existing", Score: 0.9},
+	}}, mockLLM)
+	g := &mockGraph{nodes: map[string]*node.Node{
+		"ns/existing": {ID: "ns/existing", Summary: "existing", Status: "active"},
+	}}
+	incoming := &node.Node{
+		ID:      "ns/new",
+		Summary: "summary",
+		Context: strings.Repeat("x", 7000), // > 6000 to trigger truncation
+		Status:  "active",
+	}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionNOOP {
+		t.Errorf("expected NOOP, got %s", result.Action)
+	}
+}
+
+// TestClassify_ContextShort — short Context (<6000 chars) is appended without truncation.
+func TestClassify_ContextShort(t *testing.T) {
+	c := newClassifier(&mockStore{results: nil}, nil)
+	g := &mockGraph{nodes: map[string]*node.Node{}}
+	incoming := &node.Node{
+		ID:      "ns/new",
+		Summary: "summary",
+		Context: "extra context",
+		Status:  "active",
+	}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionADD {
+		t.Errorf("expected ADD, got %s", result.Action)
+	}
+}
+
+// TestClassify_EmbedError — Embedder.Embed fails → returns ADD with no error.
+func TestClassify_EmbedError(t *testing.T) {
+	c := &Classifier{
+		Store:    &mockStore{results: nil},
+		Embedder: &errEmbedder{},
+		LLM:      nil,
+	}
+	g := &mockGraph{nodes: map[string]*node.Node{}}
+	incoming := &node.Node{ID: "ns/new", Summary: "some summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionADD {
+		t.Errorf("expected ADD on embed error, got %s", result.Action)
+	}
+}
+
+// TestClassify_StoreError — FindSimilar returns an error → ADD "no similar nodes found".
+func TestClassify_StoreError(t *testing.T) {
+	c := newClassifier(&mockStore{err: errors.New("store failed")}, nil)
+	g := &mockGraph{nodes: map[string]*node.Node{}}
+	incoming := &node.Node{ID: "ns/new", Summary: "some summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionADD {
+		t.Errorf("expected ADD on store error, got %s", result.Action)
+	}
+	if result.Reasoning != "no similar nodes found" {
+		t.Errorf("expected reasoning 'no similar nodes found', got %q", result.Reasoning)
+	}
+}
+
+// TestClassify_CandidatesNotInGraph — all candidates are missing from the graph
+// (GetNode returns !ok) → llmCandidates empty → ADD.
+func TestClassify_CandidatesNotInGraph(t *testing.T) {
+	c := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "ns/ghost", Score: 0.9},
+	}}, nil)
+	g := &mockGraph{nodes: map[string]*node.Node{}} // ns/ghost not present
+	incoming := &node.Node{ID: "ns/new", Summary: "some summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionADD {
+		t.Errorf("expected ADD, got %s", result.Action)
+	}
+	if result.Reasoning != "no distinct similar nodes found" {
+		t.Errorf("expected reasoning 'no distinct similar nodes found', got %q", result.Reasoning)
+	}
+}
+
+// TestClassify_MissingCandidateSkipped — one candidate is missing from the graph
+// (GetNode !ok → continue) but a later one resolves, so the LLM path still runs.
+func TestClassify_MissingCandidateSkipped(t *testing.T) {
+	mockLLM := &llm.MockProvider{Result: llm.ClassifyResult{
+		Action:       llm.ActionUPDATE,
+		TargetNodeID: "ns/present",
+	}}
+	c := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "ns/ghost", Score: 0.9},
+		{NodeID: "ns/present", Score: 0.85},
+	}}, mockLLM)
+	g := &mockGraph{nodes: map[string]*node.Node{
+		"ns/present": {ID: "ns/present", Summary: "present", Status: "active"},
+	}}
+	incoming := &node.Node{ID: "ns/new", Summary: "some summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionUPDATE {
+		t.Errorf("expected UPDATE, got %s", result.Action)
+	}
+}
+
+// TestClassify_CapsAtFiveCandidates — more than 5 candidates resolve → the loop
+// breaks after 5 (only 5 are passed to the LLM).
+func TestClassify_CapsAtFiveCandidates(t *testing.T) {
+	results := make([]embedding.ScoredResult, 0, 7)
+	nodes := map[string]*node.Node{}
+	for _, id := range []string{"ns/a", "ns/b", "ns/c", "ns/d", "ns/e", "ns/f", "ns/g"} {
+		results = append(results, embedding.ScoredResult{NodeID: id, Score: 0.9})
+		nodes[id] = &node.Node{ID: id, Summary: "node " + id, Status: "active"}
+	}
+
+	var got llm.ClassifyRequest
+	mockLLM := &recordingProvider{result: llm.ClassifyResult{Action: llm.ActionADD}, captured: &got}
+	c := newClassifier(&mockStore{results: results}, mockLLM)
+	g := &mockGraph{nodes: nodes}
+	incoming := &node.Node{ID: "ns/new", Summary: "some summary", Status: "active"}
+
+	if _, err := c.Classify(context.Background(), incoming, g); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got.Candidates) != 5 {
+		t.Errorf("expected candidates capped at 5, got %d", len(got.Candidates))
+	}
+}
+
+// TestClassify_Fallback_ADD_BelowSupersede — LLM is nil, best candidate score is
+// above the search threshold but below ThresholdSUPERSEDE → fallback default ADD.
+func TestClassify_Fallback_ADD_BelowSupersede(t *testing.T) {
+	c := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "ns/weak", Score: 0.62}, // 0.60 <= 0.62 < 0.65
+	}}, nil)
+	g := &mockGraph{nodes: map[string]*node.Node{
+		"ns/weak": {ID: "ns/weak", Summary: "weakly similar", Status: "active"},
+	}}
+	incoming := &node.Node{ID: "ns/new", Summary: "some summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionADD {
+		t.Errorf("expected ADD, got %s (score 0.62 below ThresholdSUPERSEDE 0.65)", result.Action)
+	}
+	if result.Reasoning != "no sufficiently similar node" {
+		t.Errorf("expected reasoning 'no sufficiently similar node', got %q", result.Reasoning)
+	}
+}
+
+// recordingProvider captures the ClassifyRequest it receives for assertions.
+type recordingProvider struct {
+	result   llm.ClassifyResult
+	captured *llm.ClassifyRequest
+}
+
+func (m *recordingProvider) Classify(_ context.Context, req llm.ClassifyRequest) (llm.ClassifyResult, error) {
+	*m.captured = req
+	return m.result, nil
+}
+func (m *recordingProvider) Model() string { return "mock" }
+func (m *recordingProvider) Summarize(_ context.Context, _ llm.SummarizeRequest) (string, error) {
+	return "", nil
+}
+func (m *recordingProvider) Chat(_ context.Context, _ llm.ChatRequest) (string, error) {
+	return "", nil
 }
