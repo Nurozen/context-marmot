@@ -18,6 +18,29 @@ Run integration tests:
 go test -race -tags integration -count=1 ./internal/
 ```
 
+## End-to-end tests
+
+The `e2e/` package exercises the built binary against a static fixture vault
+(`e2e/fixture/`): CLI flows (index, status, query, verify, sdk, staleness
+detection), the MCP server over stdio JSON-RPC (all six tools), and the
+embedded web UI over HTTP.
+
+```bash
+make e2e         # Go e2e suite (builds the binary itself)
+make e2e-ui      # Playwright browser validation of the graph UI
+make e2e-all     # Both
+```
+
+Browser tests need one-time setup:
+
+```bash
+cd web && npm install && npx playwright install chromium
+```
+
+The Playwright suite (`web/e2e/ui.spec.ts`) starts a UI server on a temp copy
+of the fixture vault via `web/e2e/serve.sh`, then validates graph rendering,
+node detail interaction, and search — failing on any console or page error.
+
 ## Node Format
 
 Nodes are markdown files with YAML frontmatter:

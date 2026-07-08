@@ -5,7 +5,7 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: build build-eval build-ui build-full dev-ui test lint clean fmt vet tidy eval benchmark
+.PHONY: build build-eval build-ui build-full dev-ui test lint clean fmt vet tidy eval benchmark e2e e2e-ui e2e-all
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/marmot
@@ -22,6 +22,17 @@ test-v:
 test-cover:
 	go test -race -count=1 -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out -o coverage.html
+
+# End-to-end: CLI flows, MCP server over stdio JSON-RPC, embedded UI over HTTP.
+e2e:
+	go test -tags e2e -count=1 -v ./e2e/
+
+# Browser-level UI validation (requires npm install in web/ and
+# `npx playwright install chromium`).
+e2e-ui: build
+	cd web && npm run e2e
+
+e2e-all: e2e e2e-ui
 
 lint: vet
 	@which golangci-lint > /dev/null 2>&1 || echo "golangci-lint not installed"

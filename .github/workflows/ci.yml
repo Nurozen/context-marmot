@@ -74,3 +74,51 @@ jobs:
           install-mode: goinstall
           version: v2.1.6
           args: --timeout=5m
+
+  e2e:
+    name: E2E + UI validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      # web/embed.go embeds web/dist, so the frontend must exist before
+      # any Go build (including the binary the e2e suite builds itself).
+      - name: Build frontend
+        run: cd web && npm ci && npx vite build
+
+      - name: Go e2e suite (CLI, MCP stdio, UI HTTP)
+        run: make e2e
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+
+      - name: Install Playwright Chromium
+        run: cd web && npx playwright install --with-deps chromium
+
+      - name: Playwright UI validation
+        run: make e2e-ui
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

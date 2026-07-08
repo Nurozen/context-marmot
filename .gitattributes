@@ -1,0 +1,5 @@
+# The e2e fixture vault bakes a SHA-256 of e2e/fixture/src/auth.go into
+# e2e/fixture/vault/auth/login.md. Line-ending conversion on checkout
+# (e.g. autocrlf on Windows) would change the file bytes and break the hash,
+# so fixture files must never be rewritten.
+e2e/fixture/** -text

@@ -53,3 +53,10 @@ CLAUDE.md
 .playwright-mcp/
 .claude/
 .codex/
+
+# Playwright
+web/test-results/
+web/playwright-report/
+
+# Session task-scratch file (see user workflow)
+human.md
