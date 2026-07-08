@@ -29,7 +29,7 @@ type ctxEmbedder struct {
 
 func (c *ctxEmbedder) EmbedContext(_ context.Context, text string) ([]float32, error) {
 	c.calls++
-	return c.Embedder.Embed(text)
+	return c.Embed(text)
 }
 
 // failEmbedder always fails, exercising embed error branches.
