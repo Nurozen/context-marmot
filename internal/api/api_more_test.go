@@ -147,23 +147,47 @@ func TestHandleVersion(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	var resp map[string]int64
+	var resp VersionResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["version"] != 0 {
-		t.Errorf("expected initial version 0, got %d", resp["version"])
+	if resp.Version != 0 {
+		t.Errorf("expected initial version 0, got %d", resp.Version)
+	}
+	if resp.AppVersion != "dev" {
+		t.Errorf("expected default app_version %q, got %q", "dev", resp.AppVersion)
 	}
 
 	// After a change, the version bumps.
 	server.NotifyChange()
 	rec2 := doRequest(t, handler, "GET", "/api/version", "")
-	var resp2 map[string]int64
+	var resp2 VersionResponse
 	if err := json.NewDecoder(rec2.Body).Decode(&resp2); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp2["version"] != 1 {
-		t.Errorf("expected version 1 after NotifyChange, got %d", resp2["version"])
+	if resp2.Version != 1 {
+		t.Errorf("expected version 1 after NotifyChange, got %d", resp2.Version)
+	}
+
+	// The build version threaded from cmd/marmot surfaces as app_version.
+	server.WithAppVersion("v0.1.10-test")
+	rec3 := doRequest(t, handler, "GET", "/api/version", "")
+	var resp3 VersionResponse
+	if err := json.NewDecoder(rec3.Body).Decode(&resp3); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp3.AppVersion != "v0.1.10-test" {
+		t.Errorf("expected app_version %q, got %q", "v0.1.10-test", resp3.AppVersion)
+	}
+	// An empty version string must not clobber the current value.
+	server.WithAppVersion("")
+	rec4 := doRequest(t, handler, "GET", "/api/version", "")
+	var resp4 VersionResponse
+	if err := json.NewDecoder(rec4.Body).Decode(&resp4); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp4.AppVersion != "v0.1.10-test" {
+		t.Errorf("expected app_version to stay %q, got %q", "v0.1.10-test", resp4.AppVersion)
 	}
 }
 
@@ -180,6 +204,13 @@ func TestHandleSuggestions(t *testing.T) {
 	if err := engine.GetGraph().AddNode(orphan); err != nil {
 		t.Fatal(err)
 	}
+	// Superseded nodes are never analyzed and must not inflate node_count
+	// (the UI derives its "N nodes · X% curated" health summary from it).
+	old := &node.Node{ID: "lonely/old", Type: "concept", Namespace: "default", Status: node.StatusSuperseded, Summary: "old"}
+	if err := engine.GetGraph().AddNode(old); err != nil {
+		t.Fatal(err)
+	}
+	activeCount := len(engine.GetGraph().AllActiveNodes())
 
 	rec := doRequest(t, handler, "GET", "/api/curator/suggestions", "")
 	if rec.Code != http.StatusOK {
@@ -189,8 +220,8 @@ func TestHandleSuggestions(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.NodeCount == 0 {
-		t.Error("expected non-zero node count")
+	if resp.NodeCount != activeCount {
+		t.Errorf("expected node_count %d (active nodes only), got %d", activeCount, resp.NodeCount)
 	}
 	if len(resp.Suggestions) == 0 {
 		t.Error("expected at least one suggestion for the orphan node")
@@ -674,6 +705,57 @@ func TestServerWithAssets(t *testing.T) {
 	recAPI := doRequest(t, handler, "GET", "/api/version", "")
 	if recAPI.Code != http.StatusOK {
 		t.Errorf("expected API route to work with assets, got %d", recAPI.Code)
+	}
+}
+
+// Unknown /api/* paths must return a JSON 404 rather than falling through to
+// the SPA index.html (which returned 200 text/html and confused API clients).
+func TestUnknownAPIPathsReturnJSON404(t *testing.T) {
+	engine := setupTestEngine(t)
+	assets := fstest.MapFS{
+		"dist/index.html": {Data: []byte("<html><body>marmot spa</body></html>")},
+	}
+	server := NewServer(engine, assets)
+	handler := server.Handler()
+
+	for _, path := range []string{"/api", "/api/graph", "/api/nodes", "/api/definitely/not/a/route"} {
+		rec := doRequest(t, handler, "GET", path, "")
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s: expected 404, got %d: %s", path, rec.Code, rec.Body.String())
+			continue
+		}
+		if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+			t.Errorf("GET %s: expected JSON content type, got %q", path, ct)
+		}
+		var resp ErrorResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Errorf("GET %s: expected JSON error body, decode failed: %v", path, err)
+		} else if resp.Error == "" {
+			t.Errorf("GET %s: expected non-empty error message", path)
+		}
+	}
+
+	// A wrong method on a known route also gets the JSON 404, not index.html.
+	recPost := doRequest(t, handler, "POST", "/api/graph/default", "")
+	if recPost.Code != http.StatusNotFound {
+		t.Errorf("POST /api/graph/default: expected 404, got %d: %s", recPost.Code, recPost.Body.String())
+	}
+	if body := recPost.Body.String(); strings.Contains(body, "marmot spa") {
+		t.Errorf("POST /api/graph/default: got SPA fallback instead of JSON error: %s", body)
+	}
+
+	// Known routes and the SPA fallback keep working alongside the API check.
+	recOK := doRequest(t, handler, "GET", "/api/version", "")
+	if recOK.Code != http.StatusOK {
+		t.Errorf("expected /api/version 200, got %d", recOK.Code)
+	}
+	recGraph := doRequest(t, handler, "GET", "/api/graph/default", "")
+	if recGraph.Code != http.StatusOK {
+		t.Errorf("expected /api/graph/default 200, got %d", recGraph.Code)
+	}
+	recSPA := doRequest(t, handler, "GET", "/some/client/route", "")
+	if recSPA.Code != http.StatusOK || !strings.Contains(recSPA.Body.String(), "marmot spa") {
+		t.Errorf("expected SPA fallback for non-API route, got %d: %s", recSPA.Code, recSPA.Body.String())
 	}
 }
 

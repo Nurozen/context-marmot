@@ -971,9 +971,13 @@ func matchNamespace(nodeNS, requested string) bool {
 	return false
 }
 
-// handleVersion returns the current graph version counter.
+// handleVersion returns the current graph version counter (live-reload) and
+// the marmot build version.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]int64{"version": s.version.Load()})
+	writeJSON(w, http.StatusOK, VersionResponse{
+		Version:    s.version.Load(),
+		AppVersion: s.appVersion,
+	})
 }
 
 // handleSSE streams Server-Sent Events to the client. When the graph version
@@ -1317,9 +1321,17 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 
 	suggestions := curator.Analyze(g, s.engine.NodeStore, s.engine.EmbeddingStore, s.engine.Embedder, opts)
 
+	// Report the number of nodes the analysis actually covered: active nodes
+	// only (superseded nodes are never analyzed), scoped to the namespace
+	// filter when one was given. Using the raw graph size here inflated the
+	// "N nodes · X% curated" health summary with superseded nodes.
 	nodeCount := 0
 	if g != nil {
-		nodeCount = g.NodeCount()
+		if ns != "" {
+			nodeCount = len(nodeIDs)
+		} else {
+			nodeCount = len(g.AllActiveNodes())
+		}
 	}
 	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions, NodeCount: nodeCount})
 }

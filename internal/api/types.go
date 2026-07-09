@@ -157,6 +157,14 @@ type SuggestionsResponse struct {
 	NodeCount   int                  `json:"node_count"`
 }
 
+// VersionResponse is returned by GET /api/version. Version is the live-reload
+// graph version counter (bumped on every vault change); AppVersion is the
+// marmot build version injected via ldflags in cmd/marmot.
+type VersionResponse struct {
+	Version    int64  `json:"version"`
+	AppVersion string `json:"app_version"`
+}
+
 // ErrorResponse is returned for any API error.
 type ErrorResponse struct {
 	Error string `json:"error"`

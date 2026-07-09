@@ -215,11 +215,71 @@ type WriteResult struct {
 	Status string `json:"status"`
 }
 
+// knownWriteArgs is the set of top-level arguments accepted by context_write,
+// mirroring the tool schema registered in server.go.
+var knownWriteArgs = map[string]bool{
+	"id":        true,
+	"type":      true,
+	"namespace": true,
+	"summary":   true,
+	"context":   true,
+	"tags":      true,
+	"edges":     true,
+	"source":    true,
+}
+
+// writeArgAliases maps commonly misused argument names to the schema field
+// the caller almost certainly meant, so validation errors can point clients
+// (and their typos) at the right field.
+var writeArgAliases = map[string]string{
+	"content":     "context",
+	"body":        "context",
+	"text":        "context",
+	"description": "summary",
+	"title":       "summary",
+	"node_id":     "id",
+	"tag":         "tags",
+	"edge":        "edges",
+}
+
+// validateWriteArgNames rejects unknown top-level context_write arguments.
+// Historically unknown arguments were silently ignored, which turned client
+// typos (e.g. "content" instead of "context") into empty-body nodes. Keys
+// with a leading underscore are tolerated as protocol/client metadata.
+// Returns an empty string when the arguments are valid.
+func validateWriteArgNames(args map[string]any) string {
+	var unknown []string
+	for k := range args {
+		if knownWriteArgs[k] || strings.HasPrefix(k, "_") {
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	if len(unknown) == 0 {
+		return ""
+	}
+	sort.Strings(unknown)
+	parts := make([]string, 0, len(unknown))
+	for _, k := range unknown {
+		if want, ok := writeArgAliases[k]; ok {
+			parts = append(parts, fmt.Sprintf("%q (did you mean %q?)", k, want))
+		} else {
+			parts = append(parts, fmt.Sprintf("%q", k))
+		}
+	}
+	return fmt.Sprintf("unknown argument(s) %s — valid arguments are: id, type, namespace, summary, context, tags, edges, source",
+		strings.Join(parts, ", "))
+}
+
 // HandleContextWrite is the handler for the context_write MCP tool.
 // It constructs a Node, validates structural acyclicity, persists via the
 // node store, and updates the embedding index.
 func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
+
+	if msg := validateWriteArgNames(args); msg != "" {
+		return mcp.NewToolResultError(msg), nil
+	}
 
 	id := req.GetString("id", "")
 	if id == "" {
@@ -247,6 +307,9 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 
 	summary := req.GetString("summary", "")
 	nodeCtx := req.GetString("context", "")
+	if strings.TrimSpace(summary) == "" && strings.TrimSpace(nodeCtx) == "" {
+		return mcp.NewToolResultError(`summary or context is required: put a searchable 1-2 sentence description in "summary" and the full node body in "context" — refusing to create an empty node`), nil
+	}
 
 	// Parse tags.
 	var tags []string

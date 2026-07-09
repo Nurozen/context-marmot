@@ -10,16 +10,31 @@ import (
 // alwaysIgnore is the set of directory names that are always ignored,
 // regardless of .gitignore content.
 var alwaysIgnore = map[string]bool{
-	".git":        true,
-	".marmot":     true,
+	".git":         true,
+	".marmot":      true,
 	"node_modules": true,
-	"vendor":      true,
-	"__pycache__": true,
+	"vendor":       true,
+	"__pycache__":  true,
 }
 
 // alwaysIgnoreFiles is the set of file names that are always ignored.
 var alwaysIgnoreFiles = map[string]bool{
 	".DS_Store": true,
+}
+
+// alwaysIgnoreExtensions is the set of file extensions (lowercased) that are
+// always ignored: logs, lock files, and editor/tool droppings carry no
+// semantic content worth indexing.
+var alwaysIgnoreExtensions = map[string]bool{
+	".log":  true,
+	".err":  true,
+	".lock": true,
+	".tmp":  true,
+	".bak":  true,
+	".swp":  true,
+	".swo":  true,
+	".orig": true,
+	".rej":  true,
 }
 
 // ignorePattern represents a single parsed gitignore pattern.
@@ -81,15 +96,24 @@ func (m *IgnoreMatcher) ShouldIgnore(relPath string, isDir bool) bool {
 	}
 
 	// Also check every path component against alwaysIgnore (handles nested
-	// vendor/ etc.).
+	// vendor/ etc.) and skip hidden (dot-prefixed) files and directories:
+	// dot-dirs hold tool/editor configuration (.git, .codex, .vscode,
+	// .cursor, .marmot, ...) rather than source, and node IDs derived from
+	// them would be rejected by node.ValidateNodeID anyway.
 	for _, part := range strings.Split(relPath, "/") {
 		if alwaysIgnore[part] {
+			return true
+		}
+		if len(part) > 1 && part[0] == '.' && part != ".." {
 			return true
 		}
 	}
 
 	// Evaluate gitignore patterns in order; last matching pattern wins.
-	ignored := false
+	// Non-semantic extensions (logs, lock files, editor droppings) are
+	// ignored by default but can be rescued by an explicit negation
+	// pattern (e.g. "!important.log").
+	ignored := !isDir && alwaysIgnoreExtensions[strings.ToLower(filepath.Ext(base))]
 	for _, p := range m.patterns {
 		if p.dirOnly && !isDir {
 			continue

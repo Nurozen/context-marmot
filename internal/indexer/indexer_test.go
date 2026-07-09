@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,9 +31,8 @@ func (m *mockNodeStore) SaveNode(n *node.Node) error {
 }
 
 func (m *mockNodeStore) LoadNode(path string) (*node.Node, error) {
-	// path is typically id + ".md"; extract the id
-	id := strings.TrimSuffix(filepath.Base(path), ".md")
-	// Also try the full path as an id key (runner uses NodePath which is id+".md")
+	// NodePath returns id + ".md"; strip the extension to recover the id.
+	id := strings.TrimSuffix(path, ".md")
 	if n, ok := m.nodes[id]; ok {
 		return n, nil
 	}
@@ -2234,3 +2234,339 @@ func TestHashString(t *testing.T) {
 // Suppress unused import warnings
 var _ = embedding.ScoredResult{}
 var _ = llm.ActionADD
+
+// ===========================================================================
+// 11. Runner determinism & diagnostics regression tests
+// ===========================================================================
+
+// scriptedClassifier returns a scripted result per incoming node and counts calls.
+type scriptedClassifier struct {
+	calls int
+	fn    func(incoming *node.Node) llm.ClassifyResult
+}
+
+func (c *scriptedClassifier) Classify(_ context.Context, incoming *node.Node, _ GraphReader) (llm.ClassifyResult, error) {
+	c.calls++
+	return c.fn(incoming), nil
+}
+
+// emptyGraph is a GraphReader with no nodes.
+type emptyGraph struct{}
+
+func (emptyGraph) GetNode(string) (*node.Node, bool) { return nil, false }
+
+// supersedeParentClassifier mimics the embedding-distance fallback misfire:
+// every entity with a parent path is classified as SUPERSEDE against its parent.
+func supersedeParentClassifier() *scriptedClassifier {
+	return &scriptedClassifier{fn: func(incoming *node.Node) llm.ClassifyResult {
+		if i := strings.LastIndex(incoming.ID, "/"); i > 0 {
+			return llm.ClassifyResult{
+				Action:       llm.ActionSUPERSEDE,
+				TargetNodeID: incoming.ID[:i],
+			}
+		}
+		return llm.ClassifyResult{Action: llm.ActionADD}
+	}}
+}
+
+func writeCartTree(t *testing.T, srcDir string) {
+	t.Helper()
+	writeFile(t, srcDir, "go.mod", "module example.com/test\n\ngo 1.21\n")
+	writeFile(t, srcDir, "main.go", `package main
+
+// ComputeCartTotal sums line item prices.
+func ComputeCartTotal() int { return 0 }
+`)
+	writeFile(t, srcDir, "web/src/cart.ts", `// Cart rendering helpers.
+export function renderCartSummary(): string {
+  return "cart";
+}
+`)
+}
+
+// Regression test for manual_test.md agent-1 issue 1: re-indexing an unchanged
+// tree must be a complete no-op (added=0 updated=0 superseded=0), even when a
+// (fallback) classifier wants to supersede parent nodes with their children.
+func TestRunner_ReindexUnchangedTreeIsNoop(t *testing.T) {
+	srcDir := t.TempDir()
+	vaultDir := t.TempDir()
+	writeCartTree(t, srcDir)
+
+	ns := newMockNodeStore()
+	es := newMockEmbedStore()
+	emb := &mockEmbedder{}
+	cfg := RunnerConfig{SrcDir: srcDir, VaultDir: vaultDir, Namespace: "test"}
+
+	cls1 := supersedeParentClassifier()
+	runner1 := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, cls1, emptyGraph{})
+	result1, err := runner1.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first Run error: %v", err)
+	}
+	if result1.Added == 0 {
+		t.Fatalf("expected added nodes on first run, got %s", result1)
+	}
+	// The classifier tried to supersede live entities of the same tree; the
+	// runner must have degraded those to plain ADDs.
+	if result1.Superseded != 0 {
+		t.Errorf("first run superseded live sibling entities: %s", result1)
+	}
+	for id, n := range ns.nodes {
+		if n.Status == node.StatusSuperseded {
+			t.Errorf("node %s superseded by %s after first run", id, n.SupersededBy)
+		}
+	}
+
+	// Second identical run: must be a pure no-op and never consult the classifier.
+	cls2 := supersedeParentClassifier()
+	runner2 := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, cls2, emptyGraph{})
+	result2, err := runner2.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run error: %v", err)
+	}
+	if result2.Added != 0 || result2.Updated != 0 || result2.Superseded != 0 || result2.Errors != 0 {
+		t.Errorf("second run on unchanged tree is not a no-op: %s", result2)
+	}
+	if result2.Skipped != result2.Total {
+		t.Errorf("expected all %d entities skipped, got %d", result2.Total, result2.Skipped)
+	}
+	if cls2.calls != 0 {
+		t.Errorf("classifier consulted %d times for existing unchanged entities", cls2.calls)
+	}
+	for id, n := range ns.nodes {
+		if n.Status != node.StatusActive {
+			t.Errorf("node %s not active after re-index: status=%s superseded_by=%s", id, n.Status, n.SupersededBy)
+		}
+	}
+}
+
+// A changed file must produce plain UPDATEs against the same node IDs; the
+// classifier must not be consulted for entities that already exist.
+func TestRunner_ChangedFileIsPlainUpdate(t *testing.T) {
+	srcDir := t.TempDir()
+	vaultDir := t.TempDir()
+	writeCartTree(t, srcDir)
+
+	ns := newMockNodeStore()
+	es := newMockEmbedStore()
+	emb := &mockEmbedder{}
+	cfg := RunnerConfig{SrcDir: srcDir, VaultDir: vaultDir, Namespace: "test"}
+
+	runner1 := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, nil, nil)
+	if _, err := runner1.Run(context.Background()); err != nil {
+		t.Fatalf("first Run error: %v", err)
+	}
+
+	// Modify an existing function body (same entity IDs, new hash).
+	writeFile(t, srcDir, "main.go", `package main
+
+// ComputeCartTotal sums line item prices with tax.
+func ComputeCartTotal() int { return 42 }
+`)
+
+	cls := supersedeParentClassifier()
+	runner2 := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, cls, emptyGraph{})
+	result2, err := runner2.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run error: %v", err)
+	}
+	if result2.Updated == 0 {
+		t.Errorf("expected updates for changed file, got %s", result2)
+	}
+	if result2.Superseded != 0 {
+		t.Errorf("changed file must not supersede other entities: %s", result2)
+	}
+	if cls.calls != 0 {
+		t.Errorf("classifier consulted %d times for existing entities", cls.calls)
+	}
+}
+
+// The classifier must still be able to supersede a pre-existing node that is
+// NOT part of the indexed tree (rename/move detection stays intact).
+func TestRunner_ClassifierSupersedesPreexistingNode(t *testing.T) {
+	srcDir := t.TempDir()
+	vaultDir := t.TempDir()
+	writeFile(t, srcDir, "go.mod", "module example.com/test\n\ngo 1.21\n")
+	writeFile(t, srcDir, "main.go", `package main
+
+// Hello greets.
+func Hello() {}
+`)
+
+	ns := newMockNodeStore()
+	ns.nodes["legacy/oldHello"] = &node.Node{
+		ID:     "legacy/oldHello",
+		Status: node.StatusActive,
+		Source: node.Source{Hash: "deadbeef"},
+	}
+	es := newMockEmbedStore()
+	emb := &mockEmbedder{}
+
+	cls := &scriptedClassifier{fn: func(incoming *node.Node) llm.ClassifyResult {
+		if strings.HasSuffix(incoming.ID, "/Hello") {
+			return llm.ClassifyResult{Action: llm.ActionSUPERSEDE, TargetNodeID: "legacy/oldHello"}
+		}
+		return llm.ClassifyResult{Action: llm.ActionADD}
+	}}
+
+	cfg := RunnerConfig{SrcDir: srcDir, VaultDir: vaultDir, Namespace: "test"}
+	runner := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, cls, emptyGraph{})
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if result.Superseded != 1 {
+		t.Errorf("expected exactly one supersede, got %s", result)
+	}
+	old := ns.nodes["legacy/oldHello"]
+	if old.Status != node.StatusSuperseded {
+		t.Errorf("expected legacy node superseded, got status %s", old.Status)
+	}
+	if !strings.HasSuffix(old.SupersededBy, "/Hello") {
+		t.Errorf("expected legacy node superseded by the new Hello node, got %q", old.SupersededBy)
+	}
+}
+
+// failingNodeStore refuses every SaveNode call.
+type failingNodeStore struct {
+	*mockNodeStore
+}
+
+func (f *failingNodeStore) SaveNode(n *node.Node) error {
+	return fmt.Errorf("save refused for %s", n.ID)
+}
+
+// Regression test for manual_test.md agent-1 issue 2: SaveNode failures must
+// surface per-node diagnostics, not just an opaque errors=N counter.
+func TestRunner_SaveErrorsAreReported(t *testing.T) {
+	srcDir := t.TempDir()
+	vaultDir := t.TempDir()
+	writeFile(t, srcDir, "go.mod", "module example.com/test\n\ngo 1.21\n")
+	writeFile(t, srcDir, "main.go", `package main
+
+func Hello() {}
+`)
+
+	ns := &failingNodeStore{mockNodeStore: newMockNodeStore()}
+	es := newMockEmbedStore()
+	emb := &mockEmbedder{}
+
+	cfg := RunnerConfig{SrcDir: srcDir, VaultDir: vaultDir, Namespace: "test"}
+	runner := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, nil, nil)
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	if result.Errors == 0 {
+		t.Fatal("expected save errors to be counted")
+	}
+	if len(result.ErrorDetails) != result.Errors {
+		t.Fatalf("expected %d error details, got %d", result.Errors, len(result.ErrorDetails))
+	}
+	found := false
+	for _, d := range result.ErrorDetails {
+		if strings.Contains(d, "save node") && strings.Contains(d, "save refused for") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected diagnostics naming the failing node, got %v", result.ErrorDetails)
+	}
+}
+
+// Regression test for manual_test.md agent-1 issues 2/3: dot-directories,
+// dotfiles, and non-semantic files (logs) must not be indexed at all.
+func TestRunner_SkipsHiddenAndNonSemanticFiles(t *testing.T) {
+	srcDir := t.TempDir()
+	vaultDir := t.TempDir()
+	writeFile(t, srcDir, "go.mod", "module example.com/test\n\ngo 1.21\n")
+	writeFile(t, srcDir, "main.go", `package main
+
+func Hello() {}
+`)
+	writeFile(t, srcDir, ".codex/config.toml", "[mcp_servers.context-marmot]\ncommand = \"marmot\"\n")
+	writeFile(t, srcDir, ".vscode/mcp.json", `{"servers":{}}`)
+	writeFile(t, srcDir, ".mcp.json", `{"mcpServers":{}}`)
+	writeFile(t, srcDir, "serve_baseline.err", "some stray log output\n")
+	writeFile(t, srcDir, "build.log", "compiling...\n")
+
+	ns := newMockNodeStore()
+	es := newMockEmbedStore()
+	emb := &mockEmbedder{}
+
+	cfg := RunnerConfig{SrcDir: srcDir, VaultDir: vaultDir, Namespace: "test"}
+	runner := NewRunner(cfg, NewDefaultRegistry(), ns, es, emb, nil, nil)
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	if result.Errors != 0 {
+		t.Errorf("expected zero errors, got %d (%v)", result.Errors, result.ErrorDetails)
+	}
+	if len(ns.nodes) == 0 {
+		t.Fatal("expected main.go entities to be indexed")
+	}
+	for id := range ns.nodes {
+		if strings.Contains(id, "codex") || strings.Contains(id, "vscode") ||
+			strings.Contains(id, "mcp") || strings.Contains(id, "serve_baseline") ||
+			strings.Contains(id, "build") {
+			t.Errorf("hidden/non-semantic file was indexed as node %s", id)
+		}
+	}
+}
+
+func TestIgnoreMatcher_HiddenPaths(t *testing.T) {
+	m := NewIgnoreMatcher(t.TempDir(), nil)
+
+	hidden := []struct {
+		path  string
+		isDir bool
+	}{
+		{".codex", true},
+		{".vscode", true},
+		{".cursor", true},
+		{".marmot-backup", true},
+		{".codex/config.toml", false},
+		{".vscode/mcp.json", false},
+		{".mcp.json", false},
+		{"src/.hidden.ts", false},
+		{"src/.cache", true},
+	}
+	for _, tc := range hidden {
+		if !m.ShouldIgnore(tc.path, tc.isDir) {
+			t.Errorf("expected %q (isDir=%v) to be ignored", tc.path, tc.isDir)
+		}
+	}
+
+	visible := []struct {
+		path  string
+		isDir bool
+	}{
+		{"main.go", false},
+		{"src", true},
+		{"src/cart.ts", false},
+		{"go.mod", false},
+	}
+	for _, tc := range visible {
+		if m.ShouldIgnore(tc.path, tc.isDir) {
+			t.Errorf("expected %q (isDir=%v) not to be ignored", tc.path, tc.isDir)
+		}
+	}
+}
+
+func TestIgnoreMatcher_NonSemanticExtensions(t *testing.T) {
+	m := NewIgnoreMatcher(t.TempDir(), nil)
+
+	for _, p := range []string{"serve.err", "build.log", "Cargo.lock", "notes.tmp", "main.go.orig", "file.swp"} {
+		if !m.ShouldIgnore(p, false) {
+			t.Errorf("expected %q to be ignored", p)
+		}
+	}
+	for _, p := range []string{"main.go", "cart.ts", "README.md", "config.yaml"} {
+		if m.ShouldIgnore(p, false) {
+			t.Errorf("expected %q not to be ignored", p)
+		}
+	}
+}

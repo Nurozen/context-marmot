@@ -751,3 +751,158 @@ func TestCheckStructuralAcyclicity_BehavioralOnlyCycle(t *testing.T) {
 		t.Error("purely behavioral cycle should be treated as acyclic (structural only)")
 	}
 }
+
+// --- Regression tests for manual-test issues 4, 5, 8 ---
+
+// Issue 4: indexers hash the whole file ([0,0]) but store Lines [1, N]; verify
+// recomputes with the stored range. The two paths must agree byte-for-byte or
+// every fresh index immediately reports hash_mismatch/stale.
+func TestComputeSourceHash_FullRangeMatchesWholeFile(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		lines   int // physical line count as bufio.Scanner sees it
+	}{
+		{"trailing newline", "package main\n\nfunc main() {}\n", 3},
+		{"no trailing newline", "line 1\nline 2", 2},
+		{"crlf line endings", "module example.com/proj\r\n\r\ngo 1.26\r\n", 3},
+		{"single newline only", "\n", 1},
+		{"end limit past eof", "a\nb\n", 5},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "source.txt")
+			if err := os.WriteFile(path, []byte(tc.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			whole, err := ComputeSourceHash(path, [2]int{0, 0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ranged, err := ComputeSourceHash(path, [2]int{1, tc.lines})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if whole != ranged {
+				t.Errorf("hash([1,%d]) = %s, want whole-file hash %s", tc.lines, ranged, whole)
+			}
+		})
+	}
+}
+
+func TestComputeSourceHash_PartialRangeExcludesOtherLines(t *testing.T) {
+	dir := t.TempDir()
+	path1 := filepath.Join(dir, "a.txt")
+	path2 := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(path1, []byte("keep 1\nkeep 2\ntail A\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path2, []byte("keep 1\nkeep 2\ntail B changed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := ComputeSourceHash(path1, [2]int{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := ComputeSourceHash(path2, [2]int{1, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 != h2 {
+		t.Error("range hash should be unaffected by lines outside the range")
+	}
+
+	h3, err := ComputeSourceHash(path1, [2]int{2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h1 == h3 {
+		t.Error("different ranges should produce different hashes")
+	}
+}
+
+// Issue 5: dangling edges whose relations are indexer-emitted references to
+// symbols outside the indexed tree (stdlib, third-party, cross-package) are
+// informational; a dangling containment edge is still an error.
+func TestVerifyIntegrity_ExternalReferenceDanglingEdgesAreInfo(t *testing.T) {
+	nodes := []*node.Node{
+		{
+			ID: "main",
+			Edges: []node.Edge{
+				{Target: "fmt", Relation: node.Imports, Class: node.Structural},
+				{Target: "errors/New", Relation: node.Calls, Class: node.Behavioral},
+				{Target: "missing/child", Relation: node.Contains, Class: node.Structural},
+			},
+		},
+	}
+
+	issues := VerifyIntegrity(nodes, "")
+
+	sevByTarget := make(map[string]Severity)
+	for _, issue := range issues {
+		if issue.IssueType != DanglingEdge {
+			continue
+		}
+		for _, target := range []string{"fmt", "errors/New", "missing/child"} {
+			if strings.Contains(issue.Message, `"`+target+`"`) {
+				sevByTarget[target] = issue.Severity
+			}
+		}
+	}
+
+	if got := sevByTarget["fmt"]; got != Info {
+		t.Errorf("dangling imports edge to stdlib should be info, got %q", got)
+	}
+	if got := sevByTarget["errors/New"]; got != Info {
+		t.Errorf("dangling calls edge to stdlib symbol should be info, got %q", got)
+	}
+	if got := sevByTarget["missing/child"]; got != Error {
+		t.Errorf("dangling contains edge should stay an error, got %q", got)
+	}
+}
+
+// Issue 8: a node created and superseded within the same index run has
+// valid_until == valid_from. That zero-length validity window is legal and
+// must not warn; only an inverted interval (until before from) is an issue.
+func TestVerifyIntegrity_EqualValidFromUntilIsNotAnIssue(t *testing.T) {
+	ts := "2026-07-08T10:00:00Z"
+	nodes := []*node.Node{
+		{
+			ID:           "web/src/cart",
+			Status:       node.StatusSuperseded,
+			SupersededBy: "web/src/cart/renderCartSummary",
+			ValidFrom:    ts,
+			ValidUntil:   ts,
+		},
+		{ID: "web/src/cart/renderCartSummary", Status: node.StatusActive},
+	}
+
+	for _, issue := range VerifyIntegrity(nodes, "") {
+		if strings.Contains(issue.Message, "valid_from") {
+			t.Errorf("equal valid_from/valid_until should not be flagged: %+v", issue)
+		}
+	}
+}
+
+func TestVerifyIntegrity_InvertedValidityWindowWarns(t *testing.T) {
+	nodes := []*node.Node{
+		{
+			ID:         "web/src/cart",
+			ValidFrom:  "2026-07-08T10:00:00Z",
+			ValidUntil: "2026-07-08T09:00:00Z",
+		},
+	}
+
+	found := false
+	for _, issue := range VerifyIntegrity(nodes, "") {
+		if strings.Contains(issue.Message, "valid_from") && issue.Severity == Warning {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("valid_until before valid_from should produce a warning")
+	}
+}

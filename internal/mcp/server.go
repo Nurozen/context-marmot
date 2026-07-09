@@ -243,10 +243,24 @@ Use this when an agent needs to intentionally create, inspect, update, diagnose,
 	s.mcpServer.AddTool(namespaceTool, s.engine.HandleContextNamespace)
 }
 
+// newStdioServer builds the stdio transport for this server. Tool calls are
+// processed by a single worker so requests within one session execute
+// strictly in arrival order: context_write persists and embeds synchronously
+// before it acks, so a context_query pipelined after a write in the same
+// session is guaranteed to see the written node (read-your-writes). The
+// default mcp-go pool of 5 workers can reorder pipelined tool calls.
+// Separate sessions (e.g. daemon proxy connections) still run concurrently —
+// each gets its own StdioServer.
+func (s *Server) newStdioServer() *server.StdioServer {
+	stdio := server.NewStdioServer(s.mcpServer)
+	server.WithWorkerPoolSize(1)(stdio)
+	return stdio
+}
+
 // ListenStdio starts the MCP server on stdin/stdout. It blocks until the
 // context is cancelled or the input stream closes.
 func (s *Server) ListenStdio(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
-	stdio := server.NewStdioServer(s.mcpServer)
+	stdio := s.newStdioServer()
 	stdio.SetErrorLogger(log.New(io.Discard, "", 0))
 	return stdio.Listen(ctx, stdin, stdout)
 }
@@ -254,6 +268,6 @@ func (s *Server) ListenStdio(ctx context.Context, stdin io.Reader, stdout io.Wri
 // Serve starts the MCP server on os.Stdin/os.Stdout. Convenience wrapper
 // for the common CLI use case.
 func (s *Server) Serve(ctx context.Context) error {
-	stdio := server.NewStdioServer(s.mcpServer)
+	stdio := s.newStdioServer()
 	return stdio.Listen(ctx, nil, nil)
 }

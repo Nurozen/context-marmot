@@ -2,6 +2,7 @@ package classifier
 
 import (
 	"context"
+	"strings"
 
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/llm"
@@ -114,8 +115,22 @@ func (c *Classifier) Classify(ctx context.Context, incoming *node.Node, g GraphR
 		})
 	}
 
-	// Step 10: Fallback — use embedding distance thresholds with the best candidate.
-	best := filtered[0] // filtered is already sorted by score descending
+	// Step 10: Fallback — use embedding distance thresholds with the best
+	// candidate that is not hierarchically related to the incoming node.
+	// A parent (e.g. a file node) and its children (its functions)
+	// legitimately have near-identical embeddings; they are distinct
+	// entities and must never NOOP/UPDATE/SUPERSEDE each other.
+	var best *embedding.ScoredResult
+	for i := range filtered {
+		if isHierarchicallyRelated(incoming.ID, filtered[i].NodeID) {
+			continue
+		}
+		best = &filtered[i]
+		break
+	}
+	if best == nil {
+		return llm.ClassifyResult{Action: llm.ActionADD, Reasoning: "only hierarchically related nodes are similar"}, nil
+	}
 	switch {
 	case best.Score >= ThresholdNOOP:
 		return llm.ClassifyResult{
@@ -141,4 +156,10 @@ func (c *Classifier) Classify(ctx context.Context, incoming *node.Node, g GraphR
 	default:
 		return llm.ClassifyResult{Action: llm.ActionADD, Reasoning: "no sufficiently similar node"}, nil
 	}
+}
+
+// isHierarchicallyRelated reports whether one node ID is a path-style
+// ancestor of the other, e.g. "web/src/cart" and "web/src/cart/renderCartSummary".
+func isHierarchicallyRelated(a, b string) bool {
+	return strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }

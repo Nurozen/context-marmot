@@ -151,6 +151,14 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
+> **Codex CLI users:** Codex (observed with v0.143) gates MCP servers behind its
+> own approval/trust model. In headless runs (`codex exec`), project-level
+> `.codex/config.toml` MCP servers may be hidden, and MCP tool calls are
+> auto-cancelled (`"user cancelled MCP tool call"`) under the default read-only
+> sandbox. Run codex with `--dangerously-bypass-approvals-and-sandbox` (or mark
+> the project as trusted) for the context-marmot tools to be listed and
+> executable. This is Codex approval behavior, not a marmot limitation.
+
 ### Mount a Warren for multi-project context
 
 A Warren is a git-backed collection of project `.marmot/` vaults. It lets a local
@@ -179,6 +187,14 @@ Mounted projects are dormant until `marmot warren mount` activates them. Active
 Warren projects are included in MCP/CLI graph queries and appear as a separate
 `Warren <id>` view in `marmot ui`. Local namespace views such as `default` remain
 local-scoped.
+
+Cross-vault resolution uses a **global routing table** at `~/.marmot/routes.yml`
+(populated by `marmot route add` and `marmot warren register`). Every
+`marmot query`/`marmot serve` loads it, so even a brand-new vault reports
+`vault registry: N remote vaults registered` if other vaults are registered on
+the machine. Set `MARMOT_ROUTES=off` (or `none`/`0`) to run without the global
+table — useful for hermetic tests and scratch vaults — or point
+`MARMOT_ROUTES=/path/to/routes.yml` at an alternate table.
 
 See [docs/warrens.md](docs/warrens.md) for Warren layout, read/write policy,
 authoring commands, bridge policy, materialization, and UI/API behavior.

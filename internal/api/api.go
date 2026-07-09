@@ -20,6 +20,9 @@ type Server struct {
 	mux    *http.ServeMux
 	assets fs.FS // embedded frontend assets (may be nil for API-only mode)
 
+	// Marmot build version (set via ldflags in cmd/marmot); "dev" when unset.
+	appVersion string
+
 	// Live-reload: file watcher pushes version bumps to SSE clients.
 	version    atomic.Int64
 	sseClients sync.Map // map of chan struct{} for each connected SSE client
@@ -40,6 +43,7 @@ func NewServer(engine *mcpserver.Engine, assets fs.FS) *Server {
 	s := &Server{
 		engine:       engine,
 		assets:       assets,
+		appVersion:   "dev",
 		undoStack:    curator.NewUndoStack(),
 		codeExecutor: codemode.NewExecutor(engine),
 	}
@@ -83,6 +87,13 @@ func (s *Server) registerRoutes() {
 		indexHTML, _ := fs.ReadFile(subFS, "index.html")
 		s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
+			// Unknown /api/* paths (or wrong methods on known ones) reach
+			// this catch-all — return a JSON 404 instead of serving
+			// index.html with status 200, which confused API consumers.
+			if path == "/api" || strings.HasPrefix(path, "/api/") {
+				writeError(w, http.StatusNotFound, "unknown API endpoint: "+r.Method+" "+path)
+				return
+			}
 			if path == "/" || path == "/index.html" {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusOK)
@@ -118,6 +129,14 @@ func (s *Server) ListenAndServe(addr string) error {
 // endpoint supports natural language messages in addition to slash commands.
 func (s *Server) WithLLMChat(provider llm.ChatProvider) {
 	s.llmChat = provider
+}
+
+// WithAppVersion sets the marmot build version surfaced by GET /api/version.
+// cmd/marmot threads the ldflags-injected version string through here.
+func (s *Server) WithAppVersion(version string) {
+	if version != "" {
+		s.appVersion = version
+	}
 }
 
 // corsMiddleware adds permissive CORS headers for local development.

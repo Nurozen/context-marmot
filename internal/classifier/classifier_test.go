@@ -467,3 +467,88 @@ func (m *recordingProvider) Summarize(_ context.Context, _ llm.SummarizeRequest)
 func (m *recordingProvider) Chat(_ context.Context, _ llm.ChatRequest) (string, error) {
 	return "", nil
 }
+
+// TestClassify_Fallback_SkipsParentChild — regression for manual_test.md
+// agent-1 issue 1: a file/module node and its own child function have
+// near-identical embeddings, but the fallback must never NOOP/UPDATE/SUPERSEDE
+// across a parent/child (path-prefix) relationship.
+func TestClassify_Fallback_SkipsParentChild(t *testing.T) {
+	// Child function vs. its parent file node: only related candidate → ADD.
+	c := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "web/src/cart", Score: 0.75},
+	}}, nil)
+	g := &mockGraph{nodes: map[string]*node.Node{
+		"web/src/cart": {ID: "web/src/cart", Summary: "cart module", Status: "active"},
+	}}
+	incoming := &node.Node{ID: "web/src/cart/renderCartSummary", Summary: "renders the cart summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionADD {
+		t.Errorf("expected ADD for parent candidate, got %s (target %s)", result.Action, result.TargetNodeID)
+	}
+
+	// Parent file node vs. its own child: same rule in the other direction.
+	c2 := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "web/src/cart/renderCartSummary", Score: 0.97},
+	}}, nil)
+	g2 := &mockGraph{nodes: map[string]*node.Node{
+		"web/src/cart/renderCartSummary": {ID: "web/src/cart/renderCartSummary", Summary: "renders the cart summary", Status: "active"},
+	}}
+	incoming2 := &node.Node{ID: "web/src/cart", Summary: "cart module", Status: "active"}
+
+	result2, err := c2.Classify(context.Background(), incoming2, g2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result2.Action != llm.ActionADD {
+		t.Errorf("expected ADD for child candidate, got %s (target %s)", result2.Action, result2.TargetNodeID)
+	}
+}
+
+// TestClassify_Fallback_PrefersUnrelatedCandidate — when both a related
+// (parent) and an unrelated candidate are similar, the fallback must use the
+// unrelated one.
+func TestClassify_Fallback_PrefersUnrelatedCandidate(t *testing.T) {
+	c := newClassifier(&mockStore{results: []embedding.ScoredResult{
+		{NodeID: "web/src/cart", Score: 0.80},       // parent — must be skipped
+		{NodeID: "web/src/legacyCart", Score: 0.70}, // unrelated — usable
+	}}, nil)
+	g := &mockGraph{nodes: map[string]*node.Node{
+		"web/src/cart":       {ID: "web/src/cart", Summary: "cart module", Status: "active"},
+		"web/src/legacyCart": {ID: "web/src/legacyCart", Summary: "legacy cart summary renderer", Status: "active"},
+	}}
+	incoming := &node.Node{ID: "web/src/cart/renderCartSummary", Summary: "renders the cart summary", Status: "active"}
+
+	result, err := c.Classify(context.Background(), incoming, g)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Action != llm.ActionSUPERSEDE {
+		t.Errorf("expected SUPERSEDE against unrelated candidate, got %s", result.Action)
+	}
+	if result.TargetNodeID != "web/src/legacyCart" {
+		t.Errorf("expected target web/src/legacyCart, got %q", result.TargetNodeID)
+	}
+}
+
+func TestIsHierarchicallyRelated(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"web/src/cart", "web/src/cart/renderCartSummary", true},
+		{"web/src/cart/renderCartSummary", "web/src/cart", true},
+		{"web/src/cart", "web/src/cartography", false},
+		{"web/src/cart", "web/src/legacyCart", false},
+		{"main", "main/Hello", true},
+		{"a", "b", false},
+	}
+	for _, tc := range cases {
+		if got := isHierarchicallyRelated(tc.a, tc.b); got != tc.want {
+			t.Errorf("isHierarchicallyRelated(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}

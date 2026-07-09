@@ -271,7 +271,7 @@ func buildEngine(dir string) (*engineResult, error) {
 		}
 		vr := namespace.NewVaultRegistry(vaultID, dir, bridges, rt)
 		engine.WithVaultRegistry(vr)
-		fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered\n", len(vr.KnownVaultIDs()))
+		fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered (global routing table; MARMOT_ROUTES=off disables)\n", len(vr.KnownVaultIDs()))
 	}
 
 	// Detach the heat map when a live serve owner exists: it records heat for
@@ -699,6 +699,7 @@ func runUIPipeline(dir string, port int, noOpen bool) error {
 
 	// Create API server with embedded frontend assets.
 	apiServer := api.NewServer(result.Engine, web.Assets)
+	apiServer.WithAppVersion(version)
 
 	// Wire the Graph Curator chat provider. Both OpenAI and Anthropic providers
 	// implement llm.ChatProvider; reuse whichever was configured for the
@@ -1367,7 +1368,10 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 		return fmt.Errorf("indexer run: %w", err)
 	}
 
-	// 12. Print results.
+	// 12. Print results, with a diagnostic line for every counted error.
+	for _, detail := range result.ErrorDetails {
+		fmt.Fprintf(os.Stderr, "index error: %s\n", detail)
+	}
 	fmt.Printf("Static analysis complete: %s\n", result)
 	return nil
 }

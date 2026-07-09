@@ -1,6 +1,11 @@
 // Package routes manages the global vault routing table at ~/.marmot/routes.yml.
 // It maps vault IDs to filesystem paths, enabling cross-vault resolution
 // independent of bridge manifest paths.
+//
+// The table location can be overridden with the MARMOT_ROUTES environment
+// variable: a path value redirects the table, while "off", "none", or "0"
+// disables the global table entirely (useful for hermetic tests and scratch
+// vaults that must not inherit the user's registered vaults).
 package routes
 
 import (
@@ -40,9 +45,22 @@ func SetOverridePath(path string) {
 }
 
 // defaultPathLocked returns the routing table path (caller must hold mu).
+// Precedence: SetOverridePath > MARMOT_ROUTES env > ~/.marmot/routes.yml.
+// MARMOT_ROUTES=off|none|0 disables the global routing table entirely
+// (Load returns an empty table), which keeps hermetic tooling and fresh
+// scratch vaults from inheriting the user's global vault registry.
+// Any other non-empty MARMOT_ROUTES value is used as the routes file path.
 func defaultPathLocked() string {
 	if overridePath != "" {
 		return overridePath
+	}
+	switch env := os.Getenv("MARMOT_ROUTES"); env {
+	case "":
+		// fall through to the default location
+	case "off", "none", "0":
+		return ""
+	default:
+		return env
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -102,7 +120,7 @@ func SaveTo(rt *RoutingTable, path string) error {
 	defer mu.Unlock()
 
 	if path == "" {
-		return fmt.Errorf("empty routing table path")
+		return fmt.Errorf("empty routing table path (routing disabled via MARMOT_ROUTES?)")
 	}
 
 	dir := filepath.Dir(path)
@@ -135,7 +153,7 @@ func Update(fn func(rt *RoutingTable) error) error {
 
 	path := defaultPathLocked()
 	if path == "" {
-		return fmt.Errorf("empty routing table path")
+		return fmt.Errorf("empty routing table path (routing disabled via MARMOT_ROUTES?)")
 	}
 
 	// Read under lock (bypass LoadFrom which also takes lock)

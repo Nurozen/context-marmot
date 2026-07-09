@@ -31,9 +31,24 @@ const (
 type Severity string
 
 const (
+	Info    Severity = "info"
 	Warning Severity = "warning"
 	Error   Severity = "error"
 )
+
+// externalCandidateRelations are edge relations the static indexers emit
+// toward symbols they reference but never create nodes for (stdlib,
+// third-party, cross-package targets). A dangling edge with one of these
+// relations is informational rather than an error: the target may simply be
+// external to the indexed tree. Containment and curated relations are not
+// listed, so a dangling "contains" (or user-asserted) edge stays an error.
+var externalCandidateRelations = map[node.EdgeRelation]bool{
+	node.Imports:    true,
+	node.Calls:      true,
+	node.Extends:    true,
+	node.Implements: true,
+	node.References: true,
+}
 
 // IntegrityIssue describes a single problem found during integrity verification.
 type IntegrityIssue struct {
@@ -81,6 +96,12 @@ func ComputeNodeHash(n *node.Node) string {
 // ComputeSourceHash computes a SHA-256 hash of the referenced source file.
 // If lines specifies a non-zero range (lines[0] > 0), only those lines
 // (1-indexed, inclusive) are hashed. Otherwise the entire file is hashed.
+//
+// The line-range path hashes the exact bytes of each line including its
+// terminator, so a range covering the whole file (e.g. [1, lineCount])
+// produces the same hash as the whole-file path. Indexers store hashes and
+// line ranges computed with this function; verify recomputes with the stored
+// range, so the two views must agree byte-for-byte.
 func ComputeSourceHash(sourcePath string, lines [2]int) (string, error) {
 	if sourcePath == "" {
 		return "", fmt.Errorf("empty source path")
@@ -95,24 +116,27 @@ func ComputeSourceHash(sourcePath string, lines [2]int) (string, error) {
 	h := sha256.New()
 
 	if lines[0] > 0 {
-		// Hash only the specified line range (1-indexed, inclusive).
-		scanner := bufio.NewScanner(f)
+		// Hash only the specified line range (1-indexed, inclusive),
+		// preserving each line's original bytes and terminator.
+		r := bufio.NewReader(f)
 		lineNum := 0
-		for scanner.Scan() {
-			lineNum++
-			if lineNum < lines[0] {
-				continue
+		for {
+			data, readErr := r.ReadBytes('\n')
+			if len(data) > 0 {
+				lineNum++
+				if lineNum >= lines[0] && lineNum <= lines[1] {
+					h.Write(data)
+				}
 			}
-			if lineNum > lines[1] {
+			if readErr == io.EOF {
 				break
 			}
-			if lineNum > lines[0] {
-				h.Write([]byte("\n"))
+			if readErr != nil {
+				return "", fmt.Errorf("read source %s: %w", sourcePath, readErr)
 			}
-			h.Write(scanner.Bytes())
-		}
-		if err := scanner.Err(); err != nil {
-			return "", fmt.Errorf("read source %s: %w", sourcePath, err)
+			if lineNum >= lines[1] {
+				break
+			}
 		}
 	} else {
 		// Hash the entire file using the already-open file handle.
@@ -198,13 +222,22 @@ func VerifyIntegrityScoped(nodes []*node.Node, knownIDs map[string]bool, project
 	for _, n := range nodes {
 		// Check for dangling edges. Skip @-prefixed targets (cross-vault
 		// references that can't be validated against the local node set).
+		// Reference relations the indexers emit toward symbols they never
+		// create nodes for (stdlib, third-party, cross-package) are
+		// informational; other relations are hard errors.
 		for _, e := range n.Edges {
 			if !strings.HasPrefix(e.Target, "@") && !idSet[e.Target] {
+				severity := Error
+				message := fmt.Sprintf("edge targets unknown node %q (relation: %s)", e.Target, e.Relation)
+				if externalCandidateRelations[e.Relation] {
+					severity = Info
+					message = fmt.Sprintf("edge targets unindexed symbol %q (relation: %s) — likely external/stdlib", e.Target, e.Relation)
+				}
 				issues = append(issues, IntegrityIssue{
 					NodeID:    n.ID,
 					IssueType: DanglingEdge,
-					Message:   fmt.Sprintf("edge targets unknown node %q (relation: %s)", e.Target, e.Relation),
-					Severity:  Error,
+					Message:   message,
+					Severity:  severity,
 				})
 			}
 		}
@@ -260,15 +293,17 @@ func VerifyIntegrityScoped(nodes []*node.Node, knownIDs map[string]bool, project
 				Severity:  Warning,
 			})
 		}
-		// ValidUntil must be after ValidFrom if both are set.
+		// ValidUntil must not precede ValidFrom if both are set. Equal
+		// timestamps are legal: a node created and superseded within the
+		// same index run has a zero-length validity window.
 		if n.ValidFrom != "" && n.ValidUntil != "" {
 			from, errF := time.Parse(time.RFC3339, n.ValidFrom)
 			until, errU := time.Parse(time.RFC3339, n.ValidUntil)
-			if errF == nil && errU == nil && !until.After(from) {
+			if errF == nil && errU == nil && until.Before(from) {
 				issues = append(issues, IntegrityIssue{
 					NodeID:    n.ID,
 					IssueType: HashMismatch, // reuse closest existing type
-					Message:   fmt.Sprintf("valid_until %q is not after valid_from %q", n.ValidUntil, n.ValidFrom),
+					Message:   fmt.Sprintf("valid_until %q is before valid_from %q", n.ValidUntil, n.ValidFrom),
 					Severity:  Warning,
 				})
 			}

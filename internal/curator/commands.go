@@ -630,15 +630,35 @@ func executeVerify(_ context.Context, _ *SlashCommand, engine *mcp.Engine, selec
 	}
 	issues := verify.VerifyIntegrityScoped(nodes, knownIDs, projectRoot)
 
+	// Verify intentionally covers superseded nodes too (their supersession
+	// chains and validity windows are part of graph integrity), so break the
+	// count down to avoid confusing it with the active-node count shown in
+	// the graph view.
+	scope := fmt.Sprintf("%d node(s)", len(nodes))
+	if active := countActive(nodes); active != len(nodes) {
+		scope = fmt.Sprintf("%d node(s) (%d active, %d superseded)", len(nodes), active, len(nodes)-active)
+	}
+
 	if len(issues) == 0 {
 		return &CommandResult{
 			Success: true,
-			Message: fmt.Sprintf("verified %d node(s) with no issues", len(nodes)),
+			Message: fmt.Sprintf("verified %s with no issues", scope),
 		}, nil
 	}
 
 	return &CommandResult{
 		Success: true,
-		Message: fmt.Sprintf("found %d issue(s) across %d node(s)", len(issues), len(nodes)),
+		Message: fmt.Sprintf("found %d issue(s) across %s", len(issues), scope),
 	}, nil
+}
+
+// countActive returns how many of the given nodes are active.
+func countActive(nodes []*node.Node) int {
+	active := 0
+	for _, n := range nodes {
+		if n.Status == node.StatusActive {
+			active++
+		}
+	}
+	return active
 }

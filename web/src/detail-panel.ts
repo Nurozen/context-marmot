@@ -151,8 +151,13 @@ export class DetailPanel {
     }
 
     // ── Edges (grouped by relation) ──
-    if (node.edges.length > 0) {
-      const edgesSection = this.createSection(`Edges (${node.edges.length})`);
+    // The API's `edges` array holds only the edges declared on this node
+    // (outgoing), while `edge_count` is the total in+out degree. Label both
+    // so the panel agrees with the hover card ("N out / M in").
+    const outCount = node.edges.length;
+    const inCount = Math.max(0, (node.edge_count ?? outCount) - outCount);
+    if (outCount > 0 || inCount > 0) {
+      const edgesSection = this.createSection(`Edges (${outCount} out / ${inCount} in)`);
       const grouped = this.groupEdges(node.edges, node.id);
       const list = document.createElement('ul');
       list.className = 'edge-list';
@@ -184,6 +189,16 @@ export class DetailPanel {
       }
 
       edgesSection.appendChild(list);
+
+      if (inCount > 0) {
+        const note = document.createElement('p');
+        note.textContent = `${inCount} incoming edge${inCount > 1 ? 's' : ''} from other nodes (not listed).`;
+        note.style.fontSize = '10px';
+        note.style.color = 'var(--text-muted)';
+        note.style.marginTop = '4px';
+        edgesSection.appendChild(note);
+      }
+
       this.content.appendChild(edgesSection);
     }
 

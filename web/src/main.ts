@@ -78,6 +78,11 @@ async function init(): Promise<void> {
     void loadGraph();
   });
 
+  /* Listen for curator requesting an issues refresh (e.g. /verify) */
+  document.addEventListener('curator-refresh-issues', () => {
+    void issuesPanel.load(issuesNamespaceFilter());
+  });
+
   initKeyboard({
     onSearch: () => search.focus(),
     onEscape: () => {
@@ -193,6 +198,25 @@ async function init(): Promise<void> {
     void loadGraph();
   });
 
+  /* ── Filter sidebar toggle (overlay drawer on narrow viewports) ── */
+  const filterPanel = document.getElementById('filter-panel');
+  const filterToggle = document.getElementById('filter-toggle');
+  const narrowViewport = window.matchMedia('(max-width: 900px)');
+  const syncFilterPanel = (): void => {
+    // Collapsed by default on narrow viewports (where it overlays the
+    // canvas); always visible inline on wide viewports.
+    filterPanel?.classList.toggle('collapsed', narrowViewport.matches);
+  };
+  syncFilterPanel();
+  narrowViewport.addEventListener('change', syncFilterPanel);
+  filterToggle?.addEventListener('click', () => {
+    filterPanel?.classList.toggle('collapsed');
+  });
+  // Tapping the canvas dismisses the overlay drawer on narrow viewports.
+  document.getElementById('graph-container')?.addEventListener('click', () => {
+    if (narrowViewport.matches) filterPanel?.classList.add('collapsed');
+  });
+
   /* Load initial graph */
   await loadGraph();
 
@@ -255,14 +279,17 @@ async function loadGraph(): Promise<void> {
     curator.updateGraphData(currentData, currentNamespace);
 
     /* Load curation suggestions after graph data is available */
-    issuesPanel.load(
-      currentNamespace === '_all' || currentNamespace.startsWith('_warren/')
-        ? undefined
-        : currentNamespace,
-    );
+    issuesPanel.load(issuesNamespaceFilter());
   } catch (err) {
     console.error('Failed to load graph:', err);
   }
+}
+
+/** Namespace filter for the issues panel: aggregate views get no filter. */
+function issuesNamespaceFilter(): string | undefined {
+  return currentNamespace === '_all' || currentNamespace.startsWith('_warren/')
+    ? undefined
+    : currentNamespace;
 }
 
 /* ------------------------------------------------------------------ */

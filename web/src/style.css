@@ -241,6 +241,31 @@ html, body {
   transition: transform 400ms var(--ease-spring);
 }
 
+/* Filter-drawer toggle — only shown on narrow viewports where the filter
+   panel becomes an overlay (see the responsive media queries below). */
+#filter-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  font-size: 14px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+#filter-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
 #search-input {
   width: 100%;
   max-width: 400px;
@@ -1186,6 +1211,50 @@ html, body {
 
 /* ── Responsive ───────────────────────────────────────────────── */
 @media (max-width: 900px) {
+  :root {
+    --detail-w: 300px;
+  }
+
+  /* The toolbar no longer fits on one row: let it wrap and give the
+     search box a full-width second row so it stays usable. Because the
+     toolbar height is now content-driven, #main-area must stop using the
+     fixed calc(100vh - --toolbar-h - ...) and flex instead. */
+  #toolbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: var(--toolbar-h);
+    padding: 8px 12px;
+    row-gap: 8px;
+  }
+
+  .toolbar-center {
+    order: 3;
+    flex: 1 1 100%;
+    max-width: none;
+    margin: 0;
+  }
+
+  #search-input {
+    max-width: none;
+  }
+
+  .toolbar-right {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  #main-area {
+    height: auto;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /* Filter panel becomes an overlay drawer, collapsed by default and
+     toggled via the #filter-toggle button (wired in main.ts). */
+  #filter-toggle {
+    display: inline-flex;
+  }
+
   #filter-panel {
     position: absolute;
     left: 0;
@@ -1207,10 +1276,6 @@ html, body {
     z-index: 30;
     box-shadow: -4px 0 32px rgba(0, 0, 0, 0.6);
   }
-
-  :root {
-    --detail-w: 300px;
-  }
 }
 
 @media (max-width: 600px) {
@@ -1220,19 +1285,26 @@ html, body {
 
   :root {
     --detail-w: 100vw;
-    --sidebar-w: 100vw;
+    /* Keep the drawer narrower than the viewport so the canvas stays
+       visible behind it and tapping the graph can dismiss context. */
+    --sidebar-w: min(300px, 85vw);
   }
 
   #toolbar {
-    padding: 0 10px;
+    padding: 8px 10px;
     gap: 8px;
   }
 
-  .toolbar-center {
-    max-width: none;
+  /* The minimap steals too much space on a phone; the legend gets the
+     full width instead of overlapping it. */
+  #minimap {
+    display: none;
   }
 
-  #search-input {
+  #legend {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
     max-width: none;
   }
 }

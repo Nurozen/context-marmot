@@ -16,6 +16,10 @@ interface SimNode extends d3.SimulationNodeDatum {
   summary: string;
   context: string;
   edge_count: number;
+  /** Outgoing edges declared on the node itself */
+  out_count: number;
+  /** Incoming edges from other nodes (edge_count - out_count) */
+  in_count: number;
   is_stale: boolean;
   tags: string[];
   superseded_by?: string;
@@ -193,6 +197,7 @@ export class GraphView {
     /* Build SimNodes — restore positions for returning nodes */
     this.nodes = data.nodes.map((n) => {
       const prev = prevPositions.get(n.id);
+      const outCount = n.edges?.length ?? 0;
       return {
         id: n.id,
         type: n.type,
@@ -201,6 +206,8 @@ export class GraphView {
         summary: n.summary,
         context: n.context,
         edge_count: n.edge_count,
+        out_count: outCount,
+        in_count: Math.max(0, n.edge_count - outCount),
         is_stale: n.is_stale,
         tags: n.tags ?? [],
         superseded_by: n.superseded_by,
@@ -794,7 +801,7 @@ export class GraphView {
 
     const typeInfo = document.createElement('div');
     typeInfo.className = 'tt-type';
-    typeInfo.textContent = `${d.type} \u00B7 ${d.edge_count} edges`;
+    typeInfo.textContent = `${d.type} \u00B7 ${d.out_count} out / ${d.in_count} in`;
     el.appendChild(typeInfo);
 
     const summary = document.createElement('div');
