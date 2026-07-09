@@ -204,6 +204,12 @@ transparently relays its stdio MCP session to the owner over a unix socket, so
 all clients see one consistent, always-fresh graph. If the owner dies, a
 surviving serve re-elects itself and takes over.
 
+Ownership is **per-vault**, not per-machine: serves pointed at different vaults
+(e.g. one per project) each elect their own owner and never interact; only
+serves sharing a vault join the same daemon. Election locks on the vault's
+`daemon.lock` inode, so relative/absolute/symlinked spellings of the same vault
+path all join the same election.
+
 - **Currently opt-in** (dark launch): set `MARMOT_DAEMON=1` in the serve
   process's environment. Without it, every serve runs standalone exactly as
   before.
