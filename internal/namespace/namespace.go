@@ -257,7 +257,7 @@ func SaveNamespace(nsDir string, ns *Namespace) error {
 	buf.WriteString("---\n")
 	buf.Write(yamlBytes)
 	buf.WriteString("---\n\n")
-	buf.WriteString(fmt.Sprintf("Namespace configuration for %s.\n", ns.Name))
+	fmt.Fprintf(&buf, "Namespace configuration for %s.\n", ns.Name)
 
 	path := filepath.Join(nsDir, "_namespace.md")
 	tmp, err := os.CreateTemp(nsDir, ".namespace-*.md.tmp")
@@ -423,8 +423,8 @@ func SaveBridge(vaultDir string, b *Bridge) error {
 	buf.WriteString("---\n")
 	buf.Write(yamlBytes)
 	buf.WriteString("---\n\n")
-	buf.WriteString(fmt.Sprintf("Bridge between [[%s/_namespace]] and [[%s/_namespace]].\n\n", b.Source, b.Target))
-	buf.WriteString(fmt.Sprintf("Allowed cross-namespace relation types: %s.\n\n", formatRelationList(b.AllowedRelations)))
+	fmt.Fprintf(&buf, "Bridge between [[%s/_namespace]] and [[%s/_namespace]].\n\n", b.Source, b.Target)
+	fmt.Fprintf(&buf, "Allowed cross-namespace relation types: %s.\n\n", formatRelationList(b.AllowedRelations))
 	buf.WriteString("Actual edges are declared in individual node files and auto-discovered by the engine.\n")
 
 	filename := BridgeKey(b.Source, b.Target) + ".md"
@@ -692,7 +692,7 @@ func writeCrossVaultBridgeTemp(vaultDir string, b *Bridge) (string, string, erro
 	buf.WriteString("---\n")
 	buf.Write(yamlBytes)
 	buf.WriteString("---\n")
-	buf.WriteString(fmt.Sprintf("# Cross-Vault Bridge: %s <-> %s\n", b.SourceVaultID, b.TargetVaultID))
+	fmt.Fprintf(&buf, "# Cross-Vault Bridge: %s <-> %s\n", b.SourceVaultID, b.TargetVaultID)
 
 	path := filepath.Join(bridgeDir, filename)
 	tmpPath := path + ".tmp"

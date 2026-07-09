@@ -97,14 +97,16 @@ func tokensApprox(s string) int {
 	return (len(s) + 3) / 4
 }
 
-// newBenchEngine creates an engine using real OpenAI embeddings if
-// OPENAI_API_KEY is set, otherwise falls back to mock.
+// newBenchEngine creates an engine using real OpenAI embeddings only when
+// MARMOT_BENCH_OPENAI=1 explicitly opts in (and OPENAI_API_KEY is set),
+// otherwise falls back to mock. An ambient OPENAI_API_KEY alone must not
+// make the benchmark network-bound: it stalls the integration gate.
 func newBenchEngine(t *testing.T, dir string) (*mcpserver.Engine, string) {
 	t.Helper()
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	var emb embedding.Embedder
 	var provider string
-	if apiKey != "" {
+	if apiKey != "" && os.Getenv("MARMOT_BENCH_OPENAI") == "1" {
 		var err error
 		emb, err = embedding.NewEmbedder("openai", "text-embedding-3-small", apiKey)
 		if err != nil {

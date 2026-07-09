@@ -92,21 +92,15 @@ func TestStress_WriteDeleteVerifyActive(t *testing.T) {
 		}
 	}
 
-	// Verify: active-only query excludes superseded nodes.
-	xmlActive := queryNodes(t, eng, map[string]any{
+	// Exercise the active-only query path. The mock embedder's rankings are
+	// too arbitrary to assert superseded nodes are excluded from the top hits;
+	// the include_superseded=true contrast below is the meaningful check.
+	_ = queryNodes(t, eng, map[string]any{
 		"query":              "Stress test node delete verification",
 		"depth":              1,
 		"budget":             50000,
 		"include_superseded": false,
 	})
-	for i := 0; i < deleteCount; i++ {
-		id := fmt.Sprintf("stress/node-%03d", i)
-		if strings.Contains(xmlActive, id) {
-			// The mock embedder may return some of these; verify they are at least
-			// not the top hits. We check that the active nodes dominate the result.
-			// A weak check: count active vs superseded mentions.
-		}
-	}
 
 	// Verify: include_superseded=true query can find superseded nodes.
 	xmlAll := queryNodes(t, eng, map[string]any{

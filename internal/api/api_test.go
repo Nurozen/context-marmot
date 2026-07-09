@@ -35,15 +35,15 @@ func writeTestNode(t *testing.T, marmotDir, id, nodeType, summary string, edges 
 	// Build YAML frontmatter.
 	var buf strings.Builder
 	buf.WriteString("---\n")
-	buf.WriteString(fmt.Sprintf("id: %s\n", id))
-	buf.WriteString(fmt.Sprintf("type: %s\n", nodeType))
+	fmt.Fprintf(&buf, "id: %s\n", id)
+	fmt.Fprintf(&buf, "type: %s\n", nodeType)
 	buf.WriteString("namespace: default\n")
 	buf.WriteString("status: active\n")
 	if len(edges) > 0 {
 		buf.WriteString("edges:\n")
 		for _, e := range edges {
-			buf.WriteString(fmt.Sprintf("    - target: %s\n", e.target))
-			buf.WriteString(fmt.Sprintf("      relation: %s\n", e.relation))
+			fmt.Fprintf(&buf, "    - target: %s\n", e.target)
+			fmt.Fprintf(&buf, "      relation: %s\n", e.relation)
 		}
 	}
 	buf.WriteString("---\n\n")

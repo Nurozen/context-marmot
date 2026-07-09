@@ -280,7 +280,7 @@ func TestEdge_Go_LargeFunction(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("package mypkg\n\nfunc BigFunc() {\n")
 	for i := 0; i < 1005; i++ {
-		sb.WriteString(fmt.Sprintf("\t_ = %d\n", i))
+		fmt.Fprintf(&sb, "\t_ = %d\n", i)
 	}
 	sb.WriteString("}\n")
 	writeFile(t, dir, "large.go", sb.String())
@@ -742,7 +742,7 @@ func TestEdge_Generic_Exactly100Lines(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("# File with exactly 100 lines\n")
 	for i := 2; i <= 100; i++ {
-		sb.WriteString(fmt.Sprintf("line_%d = %d\n", i, i))
+		fmt.Fprintf(&sb, "line_%d = %d\n", i, i)
 	}
 	writeFile(t, dir, "hundred.py", sb.String())
 
@@ -765,7 +765,7 @@ func TestEdge_Generic_101Lines_ShouldCap(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString("# File with 101 lines\n")
 	for i := 2; i <= 101; i++ {
-		sb.WriteString(fmt.Sprintf("line_%d = %d\n", i, i))
+		fmt.Fprintf(&sb, "line_%d = %d\n", i, i)
 	}
 	writeFile(t, dir, "hundredone.py", sb.String())
 

@@ -12,10 +12,10 @@ import (
 // CompactedResult holds the XML output of graph compaction together with
 // accounting metadata.
 type CompactedResult struct {
-	XML          string   // Well-formed XML string.
-	TokenEstimate int     // Approximate token count (chars/4).
-	NodeCount    int      // Number of nodes included (full + compact).
-	TruncatedIDs []string // Node IDs that exceeded the token budget.
+	XML           string   // Well-formed XML string.
+	TokenEstimate int      // Approximate token count (chars/4).
+	NodeCount     int      // Number of nodes included (full + compact).
+	TruncatedIDs  []string // Node IDs that exceeded the token budget.
 }
 
 // Compact serialises a Subgraph into token-budget-aware XML.
@@ -27,22 +27,22 @@ func Compact(g GraphResolver, subgraph *Subgraph, budget int) *CompactedResult {
 	if subgraph == nil || len(subgraph.Nodes) == 0 {
 		xml := `<context_result tokens="0" nodes="0">` + "\n" + `</context_result>`
 		return &CompactedResult{
-			XML:          xml,
+			XML:           xml,
 			TokenEstimate: estimateTokens(xml),
-			NodeCount:    0,
+			NodeCount:     0,
 		}
 	}
 
 	var (
-		fullParts      []string
-		compactParts   []string
-		truncatedIDs   []string
-		usedChars      int
-		includedCount  int
+		fullParts     []string
+		compactParts  []string
+		truncatedIDs  []string
+		usedChars     int
+		includedCount int
 	)
 
 	// Reserve some budget for the wrapper elements and truncated section.
-	wrapperOverhead := 120 // rough estimate for context_result tags + truncated section
+	wrapperOverhead := 120        // rough estimate for context_result tags + truncated section
 	effectiveBudget := budget * 4 // convert token budget to char budget
 	if effectiveBudget < wrapperOverhead {
 		effectiveBudget = wrapperOverhead
@@ -78,7 +78,7 @@ func Compact(g GraphResolver, subgraph *Subgraph, budget int) *CompactedResult {
 
 	totalTokens := estimateTokens(strings.Join(fullParts, "") + strings.Join(compactParts, ""))
 
-	b.WriteString(fmt.Sprintf(`<context_result tokens="%d" nodes="%d">`, totalTokens, includedCount))
+	fmt.Fprintf(&b, `<context_result tokens="%d" nodes="%d">`, totalTokens, includedCount)
 	b.WriteString("\n")
 
 	for _, p := range fullParts {
@@ -92,7 +92,7 @@ func Compact(g GraphResolver, subgraph *Subgraph, budget int) *CompactedResult {
 	if len(truncatedIDs) > 0 {
 		b.WriteString("  <truncated>\n")
 		for _, id := range truncatedIDs {
-			b.WriteString(fmt.Sprintf("    <node_ref id=%q reason=\"budget\"/>\n", id))
+			fmt.Fprintf(&b, "    <node_ref id=%q reason=\"budget\"/>\n", id)
 		}
 		b.WriteString("  </truncated>\n")
 	}
@@ -115,15 +115,15 @@ func renderFullNode(g GraphResolver, n *node.Node, depth int) string {
 	if status == "" {
 		status = "active"
 	}
-	b.WriteString(fmt.Sprintf("  <node id=%q type=%q depth=\"%d\" status=%q>\n",
-		n.ID, n.Type, depth, status))
+	fmt.Fprintf(&b, "  <node id=%q type=%q depth=\"%d\" status=%q>\n",
+		n.ID, n.Type, depth, status)
 
-	b.WriteString(fmt.Sprintf("    <summary>%s</summary>\n",
-		html.EscapeString(n.Summary)))
+	fmt.Fprintf(&b, "    <summary>%s</summary>\n",
+		html.EscapeString(n.Summary))
 
 	if n.SupersededBy != "" {
-		b.WriteString(fmt.Sprintf("    <superseded_by>%s</superseded_by>\n",
-			html.EscapeString(n.SupersededBy)))
+		fmt.Fprintf(&b, "    <superseded_by>%s</superseded_by>\n",
+			html.EscapeString(n.SupersededBy))
 	}
 
 	// Edges from graph (outbound).
@@ -131,16 +131,16 @@ func renderFullNode(g GraphResolver, n *node.Node, depth int) string {
 	if len(edges) > 0 {
 		b.WriteString("    <edges>\n")
 		for _, e := range edges {
-			b.WriteString(fmt.Sprintf("      <edge target=%q relation=%q/>\n",
-				e.Target, string(e.Relation)))
+			fmt.Fprintf(&b, "      <edge target=%q relation=%q/>\n",
+				e.Target, string(e.Relation))
 		}
 		b.WriteString("    </edges>\n")
 	}
 
 	// Context section (code content).
 	if n.Context != "" {
-		b.WriteString(fmt.Sprintf("    <context language=\"\">%s</context>\n",
-			html.EscapeString(n.Context)))
+		fmt.Fprintf(&b, "    <context language=\"\">%s</context>\n",
+			html.EscapeString(n.Context))
 	}
 
 	b.WriteString("  </node>\n")
@@ -155,23 +155,23 @@ func renderCompactNode(n *node.Node, depth int) string {
 	if status == "" {
 		status = "active"
 	}
-	b.WriteString(fmt.Sprintf("  <node_compact id=%q type=%q depth=\"%d\" status=%q>\n",
-		n.ID, n.Type, depth, status))
+	fmt.Fprintf(&b, "  <node_compact id=%q type=%q depth=\"%d\" status=%q>\n",
+		n.ID, n.Type, depth, status)
 
-	b.WriteString(fmt.Sprintf("    <summary>%s</summary>\n",
-		html.EscapeString(n.Summary)))
+	fmt.Fprintf(&b, "    <summary>%s</summary>\n",
+		html.EscapeString(n.Summary))
 
 	if n.SupersededBy != "" {
-		b.WriteString(fmt.Sprintf("    <superseded_by>%s</superseded_by>\n",
-			html.EscapeString(n.SupersededBy)))
+		fmt.Fprintf(&b, "    <superseded_by>%s</superseded_by>\n",
+			html.EscapeString(n.SupersededBy))
 	}
 
 	if n.Source.Path != "" {
 		if n.Source.Lines[0] != 0 || n.Source.Lines[1] != 0 {
-			b.WriteString(fmt.Sprintf("    <source path=%q lines=\"%d-%d\"/>\n",
-				n.Source.Path, n.Source.Lines[0], n.Source.Lines[1]))
+			fmt.Fprintf(&b, "    <source path=%q lines=\"%d-%d\"/>\n",
+				n.Source.Path, n.Source.Lines[0], n.Source.Lines[1])
 		} else {
-			b.WriteString(fmt.Sprintf("    <source path=%q/>\n", n.Source.Path))
+			fmt.Fprintf(&b, "    <source path=%q/>\n", n.Source.Path)
 		}
 	}
 
