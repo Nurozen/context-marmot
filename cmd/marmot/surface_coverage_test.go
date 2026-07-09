@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nurozen/context-marmot/internal/daemon"
 	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/llm"
 	"github.com/nurozen/context-marmot/internal/routes"
@@ -136,12 +139,203 @@ func TestCmdSetupNonexistent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestServeCommandEOF(t *testing.T) {
+	// Gate explicitly off: this pins the default standalone path (no election,
+	// no daemon files) regardless of the developer's environment.
+	t.Setenv("MARMOT_DAEMON", "")
 	vault := initTestVault(t)
 	withStdin(t, "", func() {
 		if code := run([]string{"serve", "--dir", vault}); code != 0 {
 			t.Fatalf("serve exit code = %d, want 0", code)
 		}
 	})
+	// The default path must never create daemon artifacts.
+	dataDir := filepath.Join(vault, ".marmot-data")
+	for _, name := range []string{"daemon.lock", "daemon.info.json"} {
+		if _, err := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
+			t.Errorf("standalone serve created %s (stat err = %v)", name, err)
+		}
+	}
+}
+
+// TestServeCommandEOFDaemon drives the same EOF path with the dark-launch
+// gate on: the process wins the election, serves stdio until EOF, WaitIdle
+// returns immediately (no proxies), and teardown leaves the vault clean —
+// lock free, daemon.sock and daemon.info.json removed. Shutdown is exercised
+// via stdin EOF only; no test in this package may send SIGINT/SIGTERM.
+func TestServeCommandEOFDaemon(t *testing.T) {
+	t.Setenv("MARMOT_DAEMON", "1")
+	t.Setenv("MARMOT_NO_DAEMON", "")
+	vault := initTestVault(t)
+	withStdin(t, "", func() {
+		if code := run([]string{"serve", "--dir", vault}); code != 0 {
+			t.Fatalf("serve (daemon) exit code = %d, want 0", code)
+		}
+	})
+
+	dataDir := filepath.Join(vault, ".marmot-data")
+	if _, err := os.Stat(filepath.Join(dataDir, "daemon.info.json")); !os.IsNotExist(err) {
+		t.Errorf("daemon.info.json still present after serve exit (stat err = %v)", err)
+	}
+	if _, err := os.Stat(daemon.SocketPath(dataDir)); !os.IsNotExist(err) {
+		t.Errorf("daemon socket still present after serve exit (stat err = %v)", err)
+	}
+	// Lock free: a fresh acquire must succeed immediately.
+	lock, err := daemon.TryAcquire(dataDir)
+	if err != nil {
+		t.Fatalf("daemon.lock not free after serve exit: %v", err)
+	}
+	_ = lock.Release()
+}
+
+// startFakeOwner makes this test process a dial-able "live owner" of vault:
+// it takes the daemon lock, listens on the vault's socket (answering every
+// received line with reply, when non-empty), and publishes daemon.info.json.
+// Cleanup releases everything.
+func startFakeOwner(t *testing.T, vault, reply string) daemon.Info {
+	t.Helper()
+	dataDir := filepath.Join(vault, ".marmot-data")
+	lock, err := daemon.TryAcquire(dataDir)
+	if err != nil {
+		t.Fatalf("TryAcquire: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Release() })
+
+	sock := daemon.SocketPath(dataDir)
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen %q: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					if reply != "" {
+						_, _ = c.Write([]byte(reply + "\n"))
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	info := daemon.Info{PID: os.Getpid(), Socket: sock, Version: "test", StartedAt: time.Now().UTC()}
+	if err := lock.WriteInfo(info); err != nil {
+		t.Fatalf("WriteInfo: %v", err)
+	}
+	return info
+}
+
+// TestServeSecondIsProxy runs `serve` with the gate on while the daemon lock
+// is already held and a dial-able owner socket is published: the serve must
+// become a proxy and relay the client's line to the owner and the owner's
+// answer back to stdout. A full in-process two-serve flow is not feasible
+// here — both serves would race over the one global os.Stdin/os.Stdout pair —
+// so the owner side is faked in-process and the real owner+proxy pairing is
+// covered end-to-end by the e2e suite (TestConcurrentServes).
+func TestServeSecondIsProxy(t *testing.T) {
+	t.Setenv("MARMOT_DAEMON", "1")
+	t.Setenv("MARMOT_NO_DAEMON", "")
+	vault := initTestVault(t)
+	const reply = `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"fake-owner-ack"}]}}`
+	startFakeOwner(t, vault, reply)
+
+	// Sanity: the published owner info is what the election loop will read.
+	if _, err := daemon.ReadInfo(filepath.Join(vault, ".marmot-data")); err != nil {
+		t.Fatalf("daemon.info.json unreadable: %v", err)
+	}
+
+	var out string
+	var code int
+	withStdin(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`+"\n", func() {
+		out, code = captureRun([]string{"serve", "--dir", vault})
+	})
+	if code != 0 {
+		t.Fatalf("proxy serve exit code = %d, want 0 (stdout: %q)", code, out)
+	}
+	if !strings.Contains(out, "fake-owner-ack") {
+		t.Fatalf("proxy did not relay the owner's answer; stdout = %q", out)
+	}
+}
+
+// TestServeStaleOwnerInfoBounded pins the plan-2.11 wedge bound for the
+// stale-info case: the flock is held AND daemon.info.json is readable but
+// points at a socket nothing listens on (a wedged owner, a reaped tmp
+// socket, or a SIGKILLed predecessor's leftovers plus a wedged successor).
+// The election loop must give up with a clear error within the wedge window
+// instead of spinning silently forever at 50ms intervals.
+func TestServeStaleOwnerInfoBounded(t *testing.T) {
+	t.Setenv("MARMOT_DAEMON", "1")
+	t.Setenv("MARMOT_NO_DAEMON", "")
+	vault := initTestVault(t)
+	dataDir := filepath.Join(vault, ".marmot-data")
+
+	// Hold the flock without ever listening: a wedged owner.
+	lock, err := daemon.TryAcquire(dataDir)
+	if err != nil {
+		t.Fatalf("TryAcquire: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Release() })
+	// Publish info pointing at a socket that refuses every dial.
+	sock := daemon.SocketPath(dataDir)
+	_ = os.Remove(sock)
+	if err := lock.WriteInfo(daemon.Info{PID: os.Getpid(), Socket: sock, Version: "test", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteInfo: %v", err)
+	}
+
+	oldWait := ownerWedgeWait
+	ownerWedgeWait = 500 * time.Millisecond
+	t.Cleanup(func() { ownerWedgeWait = oldWait })
+
+	start := time.Now()
+	var code int
+	withStdin(t, "", func() {
+		code = run([]string{"serve", "--dir", vault})
+	})
+	if code != 1 {
+		t.Fatalf("serve with wedged owner exit code = %d, want 1", code)
+	}
+	// Generous ceiling: the point is "bounded", not a precise duration.
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("serve took %v to give up on a wedged owner; wedge bound not applied", elapsed)
+	}
+}
+
+// TestWatchRefusedWhenOwnerAlive: `watch` duplicates the owner's watcher role
+// and must be refused while an owner is dial-able.
+func TestWatchRefusedWhenOwnerAlive(t *testing.T) {
+	vault := initTestVault(t)
+	startFakeOwner(t, vault, "")
+
+	err := watchLoop(context.Background(), vault)
+	if err == nil {
+		t.Fatal("watchLoop succeeded with a live owner; want refusal")
+	}
+	if !strings.Contains(err.Error(), "watch is redundant") {
+		t.Fatalf("watchLoop error = %v, want mention of 'watch is redundant'", err)
+	}
+}
+
+// TestIndexForceRefusedWhenOwnerAlive: `index --force` deletes embeddings.db
+// out from under the owner's open WAL connection and must be refused. A plain
+// index (no --force) stays allowed — WAL makes its writes safe.
+func TestIndexForceRefusedWhenOwnerAlive(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+	startFakeOwner(t, vault, "")
+
+	if code := run([]string{"index", "--force", "--dir", vault}); code != 1 {
+		t.Fatalf("index --force with live owner exit code = %d, want 1", code)
+	}
+	if code := run([]string{"index", "--dir", vault}); code != 0 {
+		t.Fatalf("plain index with live owner exit code = %d, want 0", code)
+	}
 }
 
 func TestServeCommandNoVault(t *testing.T) {

@@ -7,7 +7,7 @@
 //	marmot setup      [--dir .marmot]                            Generate MCP tool configs
 //	marmot index      [--dir .marmot] [--force] [<path>] [--incremental]  Index nodes or source code
 //	marmot query      --query "..." [flags]                      Query the knowledge graph
-//	marmot serve      [--dir .marmot]                            Start MCP server on stdio
+//	marmot serve      [--dir .marmot] [--no-daemon]               Start MCP server on stdio
 //	marmot verify     [--dir .marmot] [--namespace] [--staleness] [--bridges] Run integrity checks
 //	marmot status     [--dir .marmot]                            Show vault statistics
 //	marmot watch      [--dir .marmot]                            Watch for file changes and auto-reindex
@@ -314,6 +314,7 @@ func runQuery(dir, query string, depth, budget int) error {
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	noDaemon := fs.Bool("no-daemon", false, "serve standalone without daemon election (mirrors MARMOT_NO_DAEMON=1)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -321,19 +322,19 @@ func cmdServe(args []string) int {
 		*dir = discoverVault()
 	}
 
-	if err := runServe(*dir); err != nil {
+	if err := runServe(*dir, *noDaemon); err != nil {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func runServe(dir string) error {
+func runServe(dir string, noDaemon bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
 	}
 
-	return runServePipeline(dir)
+	return runServePipeline(dir, noDaemon)
 }
 
 // ---------------------------------------------------------------------------

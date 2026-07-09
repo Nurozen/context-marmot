@@ -195,6 +195,26 @@ Once connected, agents get five tools:
 | `context_verify` | Check node staleness, dangling edges, and structural integrity. |
 | `context_delete` | Soft-delete (supersede) a node. Excluded from future queries by default. |
 
+### Serve and the single-owner daemon
+
+Each MCP client spawns its own `marmot serve` process, so several serves often
+share one vault. Daemon mode makes that safe: **the first serve owns the vault**
+(one engine, one summary scheduler, one graph watcher) and every later serve
+transparently relays its stdio MCP session to the owner over a unix socket, so
+all clients see one consistent, always-fresh graph. If the owner dies, a
+surviving serve re-elects itself and takes over.
+
+- **Currently opt-in** (dark launch): set `MARMOT_DAEMON=1` in the serve
+  process's environment. Without it, every serve runs standalone exactly as
+  before.
+- **Opt out** explicitly with `marmot serve --no-daemon` or
+  `MARMOT_NO_DAEMON=1`; both win over `MARMOT_DAEMON=1`. Windows always runs
+  standalone.
+- **NFS caveat**: election uses `flock(2)` on
+  `.marmot/.marmot-data/daemon.lock`, whose semantics are unreliable on
+  NFS/network filesystems — set `MARMOT_NO_DAEMON=1` for vaults that live on
+  one.
+
 ## CLI Reference
 
 | Command | Description |
@@ -205,7 +225,7 @@ Once connected, agents get five tools:
 | `marmot index [--dir .marmot] [--force] [<path>] [--incremental]` | Index node files or run static analysis on source code. `--force` rebuilds all embeddings. |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
 | `marmot verify [--dir .marmot]` | Run integrity and staleness checks |
-| `marmot serve [--dir .marmot]` | Start the MCP server on stdio |
+| `marmot serve [--dir .marmot] [--no-daemon]` | Start the MCP server on stdio (see [serve and the single-owner daemon](#serve-and-the-single-owner-daemon)) |
 | `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, namespaces, heat map |
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
 | `marmot namespace create/list/update/doctor/remove ...` | Manage per-namespace `_namespace.md` manifests |

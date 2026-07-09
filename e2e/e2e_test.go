@@ -11,7 +11,9 @@ package e2e
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -29,6 +32,14 @@ import (
 var binPath string
 
 func TestMain(m *testing.M) {
+	// MARMOT_E2E_BIN points the harness at a prebuilt marmot binary instead
+	// of building the working tree. Used for red-first baseline verification
+	// (running the contention tests against a pre-fix commit's binary).
+	if pre := os.Getenv("MARMOT_E2E_BIN"); pre != "" {
+		binPath = pre
+		os.Exit(m.Run())
+	}
+
 	tmp, err := os.MkdirTemp("", "marmot-e2e-bin-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: temp dir: %v\n", err)
@@ -197,19 +208,55 @@ type rpcResponse struct {
 	Error  json.RawMessage `json:"error"`
 }
 
+// syncBuffer is a goroutine-safe buffer for capturing a child process's
+// stderr while the test inspects it concurrently.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // mcpSession drives a `marmot serve` process over newline-delimited JSON-RPC.
 type mcpSession struct {
-	t     *testing.T
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	lines chan string
+	t         *testing.T
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	lines     chan string
+	stderr    *syncBuffer
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func startMCP(t *testing.T, proj string) *mcpSession {
 	t.Helper()
+	return startMCPEnv(t, proj, hermeticEnv(proj))
+}
+
+// startMCPDaemon spawns `marmot serve` with the WS2 single-owner daemon
+// enabled (dark-launch gate: MARMOT_DAEMON=1 in the child env). The first
+// such serve per vault wins the flock and owns the engine; later ones relay
+// their stdio session to the owner over the vault's unix socket.
+func startMCPDaemon(t *testing.T, proj string) *mcpSession {
+	t.Helper()
+	return startMCPEnv(t, proj, append(hermeticEnv(proj), "MARMOT_DAEMON=1"))
+}
+
+func startMCPEnv(t *testing.T, proj string, env []string) *mcpSession {
+	t.Helper()
 	cmd := exec.Command(binPath, "serve", "--dir", ".marmot")
 	cmd.Dir = proj
-	cmd.Env = hermeticEnv(proj)
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +265,8 @@ func startMCP(t *testing.T, proj string) *mcpSession {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stderr = io.Discard
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start serve: %v", err)
 	}
@@ -235,18 +283,8 @@ func startMCP(t *testing.T, proj string) *mcpSession {
 		}
 	}()
 
-	s := &mcpSession{t: t, cmd: cmd, stdin: stdin, lines: lines}
-	t.Cleanup(func() {
-		_ = stdin.Close()
-		done := make(chan struct{})
-		go func() { _ = cmd.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-done
-		}
-	})
+	s := &mcpSession{t: t, cmd: cmd, stdin: stdin, lines: lines, stderr: stderr}
+	t.Cleanup(func() { _ = s.closeAndWait(5 * time.Second) })
 
 	s.send(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}`)
 	if resp := s.recv(0); resp.Error != nil {
@@ -254,6 +292,28 @@ func startMCP(t *testing.T, proj string) *mcpSession {
 	}
 	s.send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	return s
+}
+
+// closeAndWait closes stdin (the MCP client's EOF) and waits for the serve
+// process to exit within budget, killing it on overrun. Safe to call more
+// than once; later calls return the first call's result. Registered as the
+// session's t.Cleanup, so tests that call it explicitly can assert on the
+// shutdown budget without double-Waiting the process.
+func (s *mcpSession) closeAndWait(budget time.Duration) error {
+	s.closeOnce.Do(func() {
+		_ = s.stdin.Close()
+		done := make(chan error, 1)
+		go func() { done <- s.cmd.Wait() }()
+		select {
+		case err := <-done:
+			s.closeErr = err
+		case <-time.After(budget):
+			_ = s.cmd.Process.Kill()
+			<-done
+			s.closeErr = fmt.Errorf("serve did not exit within %v of stdin EOF (killed)", budget)
+		}
+	})
+	return s.closeErr
 }
 
 func (s *mcpSession) send(line string) {
@@ -266,22 +326,32 @@ func (s *mcpSession) send(line string) {
 // recv reads responses until it sees the given id, or times out.
 func (s *mcpSession) recv(id int) rpcResponse {
 	s.t.Helper()
-	timeout := time.After(30 * time.Second)
+	resp, err := s.recvErr(id, 30*time.Second)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return resp
+}
+
+// recvErr reads responses until it sees the given id or the timeout elapses.
+// Unlike recv it never fails the test, so it is safe off the test goroutine.
+func (s *mcpSession) recvErr(id int, timeout time.Duration) (rpcResponse, error) {
+	deadline := time.After(timeout)
 	for {
 		select {
 		case line, ok := <-s.lines:
 			if !ok {
-				s.t.Fatalf("server closed stream waiting for id %d", id)
+				return rpcResponse{}, fmt.Errorf("server closed stream waiting for id %d", id)
 			}
 			var resp rpcResponse
 			if err := json.Unmarshal([]byte(line), &resp); err != nil {
 				continue // skip notifications/log lines
 			}
 			if n, ok := resp.ID.(float64); ok && int(n) == id {
-				return resp
+				return resp, nil
 			}
-		case <-timeout:
-			s.t.Fatalf("timeout waiting for response id %d", id)
+		case <-deadline:
+			return rpcResponse{}, fmt.Errorf("timeout after %v waiting for response id %d", timeout, id)
 		}
 	}
 }
@@ -289,14 +359,32 @@ func (s *mcpSession) recv(id int) rpcResponse {
 // callTool invokes an MCP tool and returns the text content of the result.
 func (s *mcpSession) callTool(id int, tool string, args map[string]any) string {
 	s.t.Helper()
-	argsJSON, err := json.Marshal(args)
+	text, err := s.callToolErr(id, tool, args, 30*time.Second)
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	s.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, id, tool, argsJSON))
-	resp := s.recv(id)
+	return text
+}
+
+// callToolErr invokes an MCP tool with a per-call deadline and returns an
+// error instead of failing the test, so concurrent load loops running in
+// goroutines can collect failures (t.Fatal is only legal on the test
+// goroutine).
+func (s *mcpSession) callToolErr(id int, tool string, args map[string]any, timeout time.Duration) (string, error) {
+	argsJSON, err := json.Marshal(args)
+	if err != nil {
+		return "", fmt.Errorf("tool %s: marshal args: %w", tool, err)
+	}
+	req := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, id, tool, argsJSON)
+	if _, err := io.WriteString(s.stdin, req+"\n"); err != nil {
+		return "", fmt.Errorf("tool %s: send: %w", tool, err)
+	}
+	resp, err := s.recvErr(id, timeout)
+	if err != nil {
+		return "", fmt.Errorf("tool %s: %w", tool, err)
+	}
 	if resp.Error != nil {
-		s.t.Fatalf("tool %s rpc error: %s", tool, resp.Error)
+		return "", fmt.Errorf("tool %s rpc error: %s", tool, resp.Error)
 	}
 	var result struct {
 		Content []struct {
@@ -306,15 +394,15 @@ func (s *mcpSession) callTool(id int, tool string, args map[string]any) string {
 		IsError bool `json:"isError"`
 	}
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		s.t.Fatalf("tool %s: bad result: %v", tool, err)
+		return "", fmt.Errorf("tool %s: bad result: %w", tool, err)
 	}
 	if result.IsError {
-		s.t.Fatalf("tool %s returned error: %+v", tool, result.Content)
+		return "", fmt.Errorf("tool %s returned error: %+v", tool, result.Content)
 	}
 	if len(result.Content) == 0 {
-		s.t.Fatalf("tool %s returned no content", tool)
+		return "", fmt.Errorf("tool %s returned no content", tool)
 	}
-	return result.Content[0].Text
+	return result.Content[0].Text, nil
 }
 
 func TestMCPServer(t *testing.T) {
@@ -382,6 +470,514 @@ func TestMCPServer(t *testing.T) {
 	})
 	if strings.Contains(requery, `id="auth/logout"`) {
 		t.Errorf("superseded node still returned by query:\n%s", requery)
+	}
+}
+
+// --- Multi-process contention (canonical freeze regressions) ---
+
+// lockErr is the SQLite failure both contention tests must never observe in
+// tool responses or process stderr.
+const lockErr = "database is locked"
+
+// TestConcurrentServes pins reproduced failure mode 2 (a reader's SHARED lock
+// parks a writer's COMMIT on the PENDING lock; from then on all reads in all
+// processes wedge until the parked process dies): serve A runs a tight
+// context_query loop (long SearchActive scans holding SHARED locks) while
+// serve B runs a context_write burst (COMMITs) against the same vault,
+// sustained for ~10s. Every call must complete within a 5s per-call deadline,
+// nothing may report "database is locked", and both processes must exit
+// within the post-EOF shutdown budget.
+//
+// Under WS1 (the default, daemon off) each process keeps its own in-memory
+// graph, so only tool-call success is asserted here. The daemon-mode variant
+// TestConcurrentServesDaemon tightens this to cross-process read-your-writes
+// through the shared owner engine.
+func TestConcurrentServes(t *testing.T) {
+	proj := seedProject(t)
+	a := startMCP(t, proj)
+	b := startMCP(t, proj)
+
+	const (
+		sustain = 10 * time.Second
+		perCall = 5 * time.Second
+	)
+	deadline := time.Now().Add(sustain)
+
+	type loadResult struct {
+		calls int
+		errs  []string
+	}
+	// run drives one call per iteration until the sustain deadline, stopping
+	// on the first failure (a wedged server would only repeat the timeout).
+	run := func(call func(id, i int) (string, error), baseID int) chan loadResult {
+		out := make(chan loadResult, 1)
+		go func() {
+			var r loadResult
+			for i := 0; time.Now().Before(deadline); i++ {
+				r.calls++
+				text, err := call(baseID+i, i)
+				if err == nil && strings.Contains(text, lockErr) {
+					err = fmt.Errorf("response contains %q: %s", lockErr, text)
+				}
+				if err != nil {
+					r.errs = append(r.errs, err.Error())
+					break
+				}
+			}
+			out <- r
+		}()
+		return out
+	}
+
+	queries := run(func(id, _ int) (string, error) {
+		return a.callToolErr(id, "context_query", map[string]any{
+			"query":  "user login credentials session token",
+			"budget": 4000,
+		}, perCall)
+	}, 1000)
+	writes := run(func(id, i int) (string, error) {
+		return b.callToolErr(id, "context_write", map[string]any{
+			"id":      fmt.Sprintf("e2e/burst-%d", i),
+			"type":    "concept",
+			"summary": fmt.Sprintf("Concurrent write burst node %d exercising cross-process SQLite commits under sustained reads.", i),
+		}, perCall)
+	}, 1_000_000)
+
+	qr, wr := <-queries, <-writes
+	t.Logf("sustained %v: %d queries (A), %d writes (B)", sustain, qr.calls, wr.calls)
+	for _, e := range qr.errs {
+		t.Errorf("serve A query failed: %s", e)
+	}
+	for _, e := range wr.errs {
+		t.Errorf("serve B write failed: %s", e)
+	}
+	if qr.calls < 2 || wr.calls < 2 {
+		t.Errorf("load loops barely ran (queries=%d writes=%d); contention window too small", qr.calls, wr.calls)
+	}
+
+	// Both processes must exit within the post-EOF budget: a COMMIT parked on
+	// the PENDING lock keeps the process alive well past it.
+	if err := a.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("serve A shutdown: %v", err)
+	}
+	if err := b.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("serve B shutdown: %v", err)
+	}
+	if es := a.stderr.String(); strings.Contains(es, lockErr) {
+		t.Errorf("serve A stderr contains %q:\n%s", lockErr, es)
+	}
+	if es := b.stderr.String(); strings.Contains(es, lockErr) {
+		t.Errorf("serve B stderr contains %q:\n%s", lockErr, es)
+	}
+}
+
+// TestIndexDuringServe pins reproduced failure mode 1 (instant "database is
+// locked" on a concurrent write from a second process): serve A issues
+// context_write calls in a loop while `marmot index --dir .marmot` re-embeds
+// a pre-seeded batch of nodes into the same embeddings.db. The index run must
+// exit 0 AND report no swallowed upsert errors — the index pipeline prints
+// "warning: upsert ..." and keeps going (cmd/marmot/pipeline.go, mirroring
+// internal/indexer/runner.go's silent RunResult.Errors), so the exit code
+// alone proves nothing. All serve writes must succeed and a post-index
+// context_query must still return results.
+func TestIndexDuringServe(t *testing.T) {
+	proj := seedProject(t)
+
+	// Seed node files that have no embeddings yet so the index run performs a
+	// sustained upsert burst; the fixture's four nodes alone would finish
+	// before any contention window opens.
+	vault := filepath.Join(proj, ".marmot")
+	const bulkNodes = 300
+	for i := 0; i < bulkNodes; i++ {
+		id := fmt.Sprintf("bulk/node-%03d", i)
+		body := fmt.Sprintf("---\nid: %s\ntype: concept\nnamespace: default\nstatus: active\n---\n\nBulk fixture node %d giving marmot index a sustained upsert workload.\n", id, i)
+		path := filepath.Join(vault, "bulk", fmt.Sprintf("node-%03d.md", i))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := startMCP(t, proj)
+
+	type indexResult struct {
+		out string
+		err error
+	}
+	indexDone := make(chan indexResult, 1)
+	go func() {
+		out, err := runCLI(proj, "index", "--dir", ".marmot")
+		indexDone <- indexResult{out: out, err: err}
+	}()
+
+	// Write through serve until the index run completes.
+	var writeErrs []string
+	writesOK := 0
+	var res indexResult
+writeLoop:
+	for i := 0; ; i++ {
+		select {
+		case res = <-indexDone:
+			break writeLoop
+		default:
+		}
+		_, err := s.callToolErr(100+i, "context_write", map[string]any{
+			"id":      fmt.Sprintf("e2e/during-index-%d", i),
+			"type":    "concept",
+			"summary": fmt.Sprintf("Write %d issued while marmot index runs against the same vault.", i),
+		}, 5*time.Second)
+		if err != nil {
+			writeErrs = append(writeErrs, err.Error())
+			// The write side failed; still collect the index result (bounded)
+			// so its output can be reported.
+			select {
+			case res = <-indexDone:
+			case <-time.After(60 * time.Second):
+				t.Fatal("index run still not finished 60s after a serve write failure")
+			}
+			break writeLoop
+		}
+		writesOK++
+	}
+	t.Logf("index-during-serve: %d serve writes completed; index output: %s", writesOK, strings.TrimSpace(res.out))
+
+	if res.err != nil {
+		t.Errorf("index during serve failed: %v\n%s", res.err, res.out)
+	}
+	// Exit code 0 is not enough: upsert failures are swallowed as warnings.
+	for _, needle := range []string{"warning:", lockErr} {
+		if strings.Contains(res.out, needle) {
+			t.Errorf("index output contains %q (swallowed error):\n%s", needle, res.out)
+		}
+	}
+	if res.err == nil && !strings.Contains(res.out, "Indexed ") {
+		t.Errorf("index run did no work (want an \"Indexed N/M\" line):\n%s", res.out)
+	}
+	for _, e := range writeErrs {
+		t.Errorf("serve write during index failed: %s", e)
+	}
+
+	// The vault must still answer queries after the index run.
+	queryOut, err := s.callToolErr(1_000_000, "context_query", map[string]any{
+		"query":  "user login credentials session token",
+		"budget": 4000,
+	}, 10*time.Second)
+	if err != nil {
+		t.Errorf("post-index query: %v", err)
+	} else if !strings.Contains(queryOut, "auth/login") {
+		t.Errorf("post-index query missing auth/login:\n%s", queryOut)
+	}
+
+	if err := s.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("serve shutdown: %v", err)
+	}
+	if es := s.stderr.String(); strings.Contains(es, lockErr) {
+		t.Errorf("serve stderr contains %q:\n%s", lockErr, es)
+	}
+}
+
+// --- Single-owner daemon (WS2 dark launch, MARMOT_DAEMON=1) ---
+//
+// All daemon tests set MARMOT_DAEMON=1 in the child env (startMCPDaemon); the
+// default serve path stays byte-for-byte standalone and is covered by the
+// tests above. Per the plan's CI-flake guidance these tests assert on end
+// state (responses received, lock free, socket/info removed), never on
+// durations beyond the harness's existing 5s post-EOF shutdown budget.
+
+// daemonInfo mirrors the fields of daemon.info.json the tests need. The file
+// is published by the owner after its socket is listening and removed on
+// graceful shutdown.
+type daemonInfo struct {
+	PID    int    `json:"pid"`
+	Socket string `json:"socket"`
+}
+
+// readDaemonInfo polls <vault>/.marmot-data/daemon.info.json until it parses
+// (the owner publishes it after winning the flock and listening) and returns
+// it. Fails the test if none appears within 10s.
+func readDaemonInfo(t *testing.T, proj string) daemonInfo {
+	t.Helper()
+	path := filepath.Join(proj, ".marmot", ".marmot-data", "daemon.info.json")
+	deadline := time.Now().Add(10 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var info daemonInfo
+			if err := json.Unmarshal(data, &info); err == nil && info.PID != 0 && info.Socket != "" {
+				return info
+			}
+			lastErr = fmt.Errorf("parse %s: %v (content %q)", path, err, data)
+		} else {
+			lastErr = err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("daemon.info.json never became readable: %v", lastErr)
+	return daemonInfo{}
+}
+
+// splitOwnerProxy identifies which of two daemon-mode serve sessions holds
+// the vault (pid published in daemon.info.json) and which relays to it.
+func splitOwnerProxy(t *testing.T, proj string, a, b *mcpSession) (owner, proxy *mcpSession, info daemonInfo) {
+	t.Helper()
+	info = readDaemonInfo(t, proj)
+	switch info.PID {
+	case a.cmd.Process.Pid:
+		return a, b, info
+	case b.cmd.Process.Pid:
+		return b, a, info
+	default:
+		t.Fatalf("daemon.info.json pid %d matches neither serve (%d, %d)", info.PID, a.cmd.Process.Pid, b.cmd.Process.Pid)
+		return nil, nil, info
+	}
+}
+
+// assertVaultReleased asserts the daemon end state after a full shutdown: no
+// daemon.info.json, no socket file, and no flock held on daemon.lock (the
+// test takes and releases the flock itself to prove it is free).
+func assertVaultReleased(t *testing.T, proj, socket string) {
+	t.Helper()
+	dataDir := filepath.Join(proj, ".marmot", ".marmot-data")
+	if _, err := os.Stat(filepath.Join(dataDir, "daemon.info.json")); !os.IsNotExist(err) {
+		t.Errorf("daemon.info.json still present after shutdown (stat err: %v)", err)
+	}
+	if socket != "" {
+		if _, err := os.Stat(socket); !os.IsNotExist(err) {
+			t.Errorf("daemon socket %s still present after shutdown (stat err: %v)", socket, err)
+		}
+	}
+	lockPath := filepath.Join(dataDir, "daemon.lock")
+	f, err := os.Open(lockPath)
+	if os.IsNotExist(err) {
+		return // no lock file at all: trivially free
+	}
+	if err != nil {
+		t.Fatalf("open daemon.lock: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Errorf("daemon.lock is still flocked after shutdown: %v", err)
+	} else {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}
+}
+
+// TestConcurrentServesDaemon is the daemon-mode tightening of
+// TestConcurrentServes: with MARMOT_DAEMON=1 both serve processes execute on
+// the single owner engine, so a node written via serve A must be visible to a
+// context_query on serve B immediately (cross-process read-your-writes), and
+// vice versa — no reindex, no watcher debounce, no per-process graph copies.
+func TestConcurrentServesDaemon(t *testing.T) {
+	proj := seedProject(t)
+	a := startMCPDaemon(t, proj)
+	b := startMCPDaemon(t, proj)
+	owner, proxy, _ := splitOwnerProxy(t, proj, a, b)
+
+	// Write via A → read via B.
+	writeOut := a.callTool(10, "context_write", map[string]any{
+		"id":      "e2e/daemon-rw-a",
+		"type":    "concept",
+		"summary": "Cross process read your writes marker node written through serve A of the daemon pair.",
+	})
+	if !strings.Contains(writeOut, `"status":"created"`) {
+		t.Fatalf("write via A: expected created, got %s", writeOut)
+	}
+	queryOut := b.callTool(11, "context_query", map[string]any{
+		"query":  "cross process read your writes marker serve A",
+		"budget": 4000,
+	})
+	if !strings.Contains(queryOut, "e2e/daemon-rw-a") {
+		t.Errorf("query via B does not see node written via A:\n%s", queryOut)
+	}
+
+	// And the reverse direction (covers both proxy→owner and owner-session
+	// writes regardless of which process won the election).
+	writeOut = b.callTool(12, "context_write", map[string]any{
+		"id":      "e2e/daemon-rw-b",
+		"type":    "concept",
+		"summary": "Reverse direction marker node written through serve B of the daemon pair.",
+	})
+	if !strings.Contains(writeOut, `"status":"created"`) {
+		t.Fatalf("write via B: expected created, got %s", writeOut)
+	}
+	queryOut = a.callTool(13, "context_query", map[string]any{
+		"query":  "reverse direction marker node serve B",
+		"budget": 4000,
+	})
+	if !strings.Contains(queryOut, "e2e/daemon-rw-b") {
+		t.Errorf("query via A does not see node written via B:\n%s", queryOut)
+	}
+
+	// Orderly teardown: the proxy detaches first so the owner does not linger
+	// past the harness's shutdown budget.
+	if err := proxy.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("proxy shutdown: %v", err)
+	}
+	if err := owner.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("owner shutdown: %v", err)
+	}
+}
+
+// waitDaemonOwner polls daemon.info.json until it names pid as the owner —
+// used after a SIGKILL failover, where the dead owner's stale info file
+// lingers (no cleanup ran) until the re-elected survivor republishes over it.
+func waitDaemonOwner(t *testing.T, proj string, pid int) daemonInfo {
+	t.Helper()
+	path := filepath.Join(proj, ".marmot", ".marmot-data", "daemon.info.json")
+	deadline := time.Now().Add(15 * time.Second)
+	var last daemonInfo
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(path); err == nil {
+			var info daemonInfo
+			if err := json.Unmarshal(data, &info); err == nil {
+				last = info
+				if info.PID == pid {
+					return info
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("daemon.info.json never named pid %d as owner (last seen: %+v)", pid, last)
+	return daemonInfo{}
+}
+
+// TestOwnerFailover pins re-election: two daemon serves share one vault; the
+// owner (pid from daemon.info.json) is SIGKILLed — the kernel drops its flock
+// instantly and no cleanup runs — and the surviving serve must take over
+// ownership and answer the next tool call. A third serve then joins the new
+// owner and sees the post-failover write.
+//
+// The test waits for the survivor to republish daemon.info.json before
+// sending the post-failover write, so the request cannot race into the dying
+// owner's socket (the one loss mode the plan allows — an in-flight request at
+// the moment of death is a normal client-side timeout). With that sequenced
+// out, a SINGLE attempt must succeed: the process-wide ClientSession
+// guarantees the survivor's defeated proxy leaves no stdin reader behind that
+// could swallow the line across its promotion to owner.
+func TestOwnerFailover(t *testing.T) {
+	proj := seedProject(t)
+	a := startMCPDaemon(t, proj)
+	b := startMCPDaemon(t, proj)
+	owner, survivor, _ := splitOwnerProxy(t, proj, a, b)
+
+	if err := owner.cmd.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL owner: %v", err)
+	}
+
+	// The survivor must take over: daemon.info.json republished with its pid
+	// (the survivor's proxy outwaits its ~1s redial window, re-enters the
+	// election, wins the now-free flock, and listens).
+	newInfo := waitDaemonOwner(t, proj, survivor.cmd.Process.Pid)
+
+	// One attempt, no retry: nothing may swallow this line.
+	writeOut, writeErr := survivor.callToolErr(2000, "context_write", map[string]any{
+		"id":      "e2e/failover",
+		"type":    "concept",
+		"summary": "Failover marker node written by the surviving serve after the owner was killed.",
+	}, 10*time.Second)
+	if writeErr != nil {
+		t.Fatalf("survivor write after owner SIGKILL: %v\nsurvivor stderr:\n%s", writeErr, survivor.stderr.String())
+	}
+	if !strings.Contains(writeOut, `"status":"created"`) {
+		t.Fatalf("survivor write: expected created, got %s", writeOut)
+	}
+
+	// A third serve joins the new owner (its initialize handshake succeeding
+	// proves the join) and sees the post-failover write through the shared
+	// engine.
+	c := startMCPDaemon(t, proj)
+	queryOut := c.callTool(2100, "context_query", map[string]any{
+		"query":  "failover marker surviving serve owner killed",
+		"budget": 4000,
+	})
+	if !strings.Contains(queryOut, "e2e/failover") {
+		t.Errorf("third serve does not see the post-failover write:\n%s", queryOut)
+	}
+
+	// Orderly teardown: proxy before owner (t.Cleanup would also run in this
+	// order, but failing loudly here beats a silent kill in cleanup).
+	if err := c.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("third serve shutdown: %v", err)
+	}
+	if err := survivor.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("survivor shutdown: %v", err)
+	}
+	assertVaultReleased(t, proj, newInfo.Socket)
+}
+
+// TestDaemonShutdownBudget pins the owner's linger-then-exit lifecycle: when
+// the owner's own MCP client disconnects while a proxy is still attached, the
+// owner lingers headless and keeps serving the proxy; when the last proxy
+// disconnects, the owner fully exits within the harness's 5s budget and
+// leaves the vault clean — no daemon.lock flock, no daemon.sock, no
+// daemon.info.json.
+func TestDaemonShutdownBudget(t *testing.T) {
+	proj := seedProject(t)
+	a := startMCPDaemon(t, proj)
+	b := startMCPDaemon(t, proj)
+	owner, proxy, info := splitOwnerProxy(t, proj, a, b)
+
+	// Owner's client disconnects with the proxy attached → the owner must
+	// linger: the proxy's session keeps getting answers.
+	if err := owner.stdin.Close(); err != nil {
+		t.Fatalf("close owner stdin: %v", err)
+	}
+	out, err := proxy.callToolErr(3000, "context_query", map[string]any{
+		"query":  "user login credentials session token",
+		"budget": 4000,
+	}, 15*time.Second)
+	if err != nil {
+		t.Fatalf("proxy call after owner stdin EOF (owner should linger): %v", err)
+	}
+	if !strings.Contains(out, "auth/login") {
+		t.Errorf("lingering owner returned wrong query result:\n%s", out)
+	}
+
+	// Proxy disconnects → last session ends → the owner exits within budget.
+	if err := proxy.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("proxy shutdown: %v", err)
+	}
+	if err := owner.closeAndWait(5 * time.Second); err != nil {
+		t.Errorf("owner did not exit after the last proxy detached: %v", err)
+	}
+
+	assertVaultReleased(t, proj, info.Socket)
+}
+
+// TestDaemonNoResumeProxyExits pins the degraded mode of plan 2.6/2.11: with
+// MARMOT_PROXY_NO_RESUME=1 a proxy must NOT re-enter the election after its
+// owner dies mid-session — no handshake replay means any resurrected session
+// would be silently un-initialized — it exits nonzero on its own so the MCP
+// client restarts `marmot serve` itself.
+func TestDaemonNoResumeProxyExits(t *testing.T) {
+	proj := seedProject(t)
+	owner := startMCPDaemon(t, proj)
+	// The first serve alone must be the owner before the proxy joins, so the
+	// no-resume env var is guaranteed to land on the proxy side.
+	if info := readDaemonInfo(t, proj); info.PID != owner.cmd.Process.Pid {
+		t.Fatalf("first serve (pid %d) did not become owner (info pid %d)", owner.cmd.Process.Pid, info.PID)
+	}
+	proxy := startMCPEnv(t, proj, append(hermeticEnv(proj), "MARMOT_DAEMON=1", "MARMOT_PROXY_NO_RESUME=1"))
+
+	if err := owner.cmd.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL owner: %v", err)
+	}
+
+	// The proxy exits by itself — stdin stays open — and nonzero.
+	done := make(chan error, 1)
+	go func() { done <- proxy.cmd.Wait() }()
+	select {
+	case err := <-done:
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Fatalf("no-resume proxy exit = %v, want a nonzero exit\nproxy stderr:\n%s", err, proxy.stderr.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("no-resume proxy did not exit after owner death (re-entered the election instead?)")
 	}
 }
 
