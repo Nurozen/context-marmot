@@ -8,9 +8,9 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ncruces/go-sqlite3"
-	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // ScoredResult represents a search result with its similarity score.
@@ -38,10 +38,27 @@ type Store struct {
 
 // NewStore opens (or creates) an embedding store at the given path.
 // Use ":memory:" for an in-memory database.
+//
+// File-backed stores are opened in WAL mode with a 5s busy timeout so that
+// multiple marmot processes can share one embeddings.db: readers never block
+// the writer, and a busy writer retries instead of failing with
+// "database is locked". For ":memory:" the WAL pragma is a harmless no-op
+// (journal_mode stays "memory").
 func NewStore(dbPath string) (*Store, error) {
 	db, err := sqlite3.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	// Order matters: set the busy timeout first so the journal-mode switch
+	// itself retries if another process holds the lock.
+	if err := db.BusyTimeout(5 * time.Second); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	if err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
 
 	s := &Store{db: db}
@@ -49,7 +66,6 @@ func NewStore(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-
 	return s, nil
 }
 

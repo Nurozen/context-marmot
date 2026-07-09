@@ -511,6 +511,41 @@ func TestIndexErrorPaths(t *testing.T) {
 	}
 }
 
+// TestIndexForceRemovesWALSidecars verifies that index --force removes stale
+// WAL sidecar files alongside the embeddings DB, so an old -wal is never
+// replayed into the freshly created database.
+func TestIndexForceRemovesWALSidecars(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+
+	dataDir := filepath.Join(vault, ".marmot-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "embeddings.db")
+	// Pre-create stale sidecars (garbage content from a hypothetical killed process).
+	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.WriteFile(sidecar, []byte("stale sidecar"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if code := run([]string{"index", "--force", "--dir", vault}); code != 0 {
+		t.Fatalf("index --force exit code = %d, want 0", code)
+	}
+
+	// The stale sidecars must be gone: --force removed them before indexing,
+	// and the clean close checkpoints/removes the fresh ones.
+	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if data, err := os.ReadFile(sidecar); err == nil && string(data) == "stale sidecar" {
+			t.Errorf("stale sidecar %s survived index --force", sidecar)
+		}
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Errorf("expected fresh embeddings.db after index --force: %v", err)
+	}
+}
+
 func TestStaticIndexNonexistentSource(t *testing.T) {
 	vault := initTestVault(t)
 	if code := run([]string{"index", filepath.Join(t.TempDir(), "no-src"), "--dir", vault}); code != 1 {

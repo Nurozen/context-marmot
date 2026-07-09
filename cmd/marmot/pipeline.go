@@ -57,8 +57,10 @@ func runIndexPipeline(dir string, force bool) error {
 
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
 	if force {
-		// Remove existing embeddings DB to start fresh (model may have changed).
+		// Remove existing embeddings DB (and WAL sidecars) to start fresh (model may have changed).
 		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
 	}
 
 	embStore, err := embedding.NewStore(dbPath)
