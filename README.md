@@ -179,11 +179,17 @@ marmot warren mount --warren product-platform project-a project-b
 # Make one mounted project editable in this workspace
 marmot warren edit --warren product-platform project-a
 
-# Cache selected project graphs locally for offline use
-marmot warren burrow --materialize --warren product-platform project-b
+# Cache selected project graphs locally for offline use (burrow always materializes)
+marmot warren burrow --warren product-platform project-b
+
+# Undo: deactivate projects, delete caches, remove the Warren
+marmot warren unmount --warren product-platform project-a
+marmot warren burrow --drop --warren product-platform --all
+marmot warren unregister --warren product-platform
 ```
 
-Mounted projects are dormant until `marmot warren mount` activates them. Active
+Mounted projects are dormant until `marmot warren mount` activates them (a
+bare `mount`/`burrow` with no project IDs requires an explicit `--all`). Active
 Warren projects are included in MCP/CLI graph queries and appear as a separate
 `Warren <id>` view in `marmot ui`. Local namespace views such as `default` remain
 local-scoped.
@@ -256,17 +262,21 @@ path all join the same election.
 | `marmot warren project import <project-id> <source-.marmot> [--vault-id <id>]` | Copy an existing project vault into a Warren |
 | `marmot warren project add <project-id> --path <project-.marmot> [--vault-id <id>]` | Register an already placed project vault in a Warren |
 | `marmot warren project list/remove/rename ...` | List or maintain Warren project entries |
+| `marmot warren project set-readonly <project-id> [--off]` | Author-side write policy: veto consumer edits for one project |
 | `marmot warren bridge add/list/remove ...` | Maintain Warren-owned project bridge policy |
-| `marmot warren doctor [--json]` | Validate a Warren repository |
+| `marmot warren doctor [--workspace] [--json]` | Validate a Warren repository (or, with `--workspace`, this workspace's warren state) |
 | `marmot warren format` | Normalize a Warren manifest |
 | `marmot warren register <id> <path>` | Register a git-backed Warren repository in this workspace |
 | `marmot warren list [--json]` | List registered Warrens and local mount state |
-| `marmot warren mount --warren <id> <project-id>...` | Activate selected Warren projects for query/UI use |
-| `marmot warren burrow --materialize --warren <id> <project-id>...` | Activate and cache selected Warren projects under `.marmot-data/` |
-| `marmot warren status --warren <id> [--json]` | Show registered/active/editable/materialized project state |
-| `marmot warren edit [--off] --warren <id> <project-id>` | Toggle write access for one mounted Warren project |
-| `marmot warren refresh --warren <id>` | Refresh git-backed Warren state from disk |
-| `marmot warren propose --warren <id>` | Print a proposal-oriented summary for Warren changes |
+| `marmot warren mount --warren <id> <project-id>...\|--all` | Activate selected (or, with `--all`, every) Warren project for query/UI use |
+| `marmot warren unmount --warren <id> <project-id>...\|--all` | Deactivate Warren projects (non-destructive; burrow caches kept) |
+| `marmot warren burrow --warren <id> <project-id>...\|--all` | Activate and cache Warren projects under `.marmot-data/` (always materializes) |
+| `marmot warren burrow --drop --warren <id> <project-id>...\|--all` | Delete burrow caches (clears the materialized flag with the last one) |
+| `marmot warren unregister --warren <id> [--force]` | Remove a Warren from the workspace (refuses while mounts/caches exist unless forced) |
+| `marmot warren status --warren <id> [--json]` | Show registered/active/editable/materialized project state (flags unreachable checkouts) |
+| `marmot warren edit [--off] --warren <id> <project-id>` | Toggle write access for one Warren project (edit implies mount) |
+| `marmot warren refresh [--pull] --warren <id>` | Reload Warren state for live engines; `--pull` also fast-forwards the checkout and re-materializes stale burrow caches |
+| `marmot warren propose [--warren <id>] [<project-id>]` | Branch + commit one project's editable-mount edits for review (local-only; never pushes) |
 | `marmot summarize [--namespace ...]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
 | `marmot sdk [--out ./marmot-sdk.ts]` | Generate a type-safe TypeScript SDK from MCP tool schemas |

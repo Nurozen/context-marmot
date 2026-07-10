@@ -22,7 +22,7 @@ func TestSetEditableRefusesMaterialized(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	if _, err := Materialize(workspaceMarmotDir(workspace), "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(workspaceMarmotDir(workspace), "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestPreferredPathEditableWinsOverStaleFlags(t *testing.T) {
 	writeWarrenFixture(t, warrenRoot, "product-platform", "project-a")
 
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	// Hand-craft both-flags state, bypassing the refusal guards.

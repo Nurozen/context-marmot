@@ -631,7 +631,7 @@ func TestMaterializeCopiesProjectVaultToCache(t *testing.T) {
 	writeWarrenFixture(t, warrenRoot, "product-platform", "project-a")
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
 
-	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}

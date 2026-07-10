@@ -261,6 +261,46 @@ func TestResolveEmbeddingStoreHoldsReadLock(t *testing.T) {
 	}
 }
 
+// TestResolveEmbeddingStoreDoesNotBlockOnExclusiveLock: ResolveEmbeddingStore
+// runs under the registry's write mutex, and a foreign `index --force` holds
+// the exclusive vault.read.lock for its entire reindex — so the resolve must
+// take the shared lock NON-blocking and degrade (warned, unguarded open)
+// instead of wedging r.mu (and with it every ResolveGraph/Rebuild/
+// KnownVaultIDs and the daemon watcher's reloads) until the reindex ends.
+func TestResolveEmbeddingStoreDoesNotBlockOnExclusiveLock(t *testing.T) {
+	vaultDir := setupRemoteVault(t, "busy-vault")
+	seedRemoteEmbeddingDB(t, vaultDir)
+	lockPath := filepath.Join(vaultDir, ".marmot-data", "vault.read.lock")
+
+	// A foreign `index --force` mid-rebuild.
+	exRelease, ok, err := flock.TryExclusive(lockPath)
+	if err != nil || !ok {
+		t.Fatalf("TryExclusive: ok=%v err=%v", ok, err)
+	}
+	defer exRelease()
+
+	r := NewVaultRegistry("local", t.TempDir(), nil, routesFor(map[string]string{"busy-vault": vaultDir}))
+	defer r.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, resolveErr := r.ResolveEmbeddingStore("busy-vault")
+		done <- resolveErr
+	}()
+	select {
+	case err := <-done:
+		// Degraded (unguarded) open of the intact DB still works.
+		if err != nil {
+			t.Fatalf("ResolveEmbeddingStore degraded open failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ResolveEmbeddingStore blocked on the exclusive vault.read.lock while holding the registry mutex")
+	}
+
+	// The registry mutex is free: other registry operations proceed.
+	_ = r.KnownVaultIDs()
+}
+
 // TestRefreshNotLoadedTolerated pins the ErrNotLoaded sentinel so callers
 // (editable-write refresh, the refresh endpoint) can gate on errors.Is.
 func TestRefreshNotLoadedTolerated(t *testing.T) {

@@ -24,6 +24,18 @@ const (
 	MarmotDirName    = ".marmot"
 )
 
+// CurrentManifestVersion is the newest warren manifest schema this binary
+// fully understands. Version 2 added the per-project author-side `readonly`
+// write policy. Read paths stay permissive: LoadManifest warns on a newer
+// version and keeps working best-effort. Write paths refuse (see
+// checkManifestWritable): parsing goes through fixed structs, so a binary
+// that does not know a field would silently strip it on a Load->Save
+// round-trip — the version ceiling turns that silent data loss into a
+// refusal. True unknown-field preservation (a yaml.Node round-trip) was
+// considered and deliberately deferred until a concrete version-3 field
+// exists; the ceiling makes it unnecessary until then.
+const CurrentManifestVersion = 2
+
 // warnWriter receives degradation warnings (unreadable manifests/metadata).
 // Package-level so tests can capture it; production always uses stderr.
 var warnWriter io.Writer = os.Stderr
@@ -41,6 +53,11 @@ type Project struct {
 	ProjectID string   `yaml:"project_id" json:"project_id"`
 	Path      string   `yaml:"path" json:"path"`
 	Aliases   []string `yaml:"aliases,omitempty" json:"aliases,omitempty"`
+	// ReadOnly is the warren author's write policy: consumers cannot make
+	// the project editable or write nodes back to it. Setting it bumps the
+	// manifest to version 2 so pre-readonly binaries refuse to rewrite (and
+	// silently strip) it. Manifest schema v2.
+	ReadOnly bool `yaml:"readonly,omitempty" json:"readonly,omitempty"`
 }
 
 // Bridge describes curated cross-project relations in a Warren.
@@ -73,7 +90,12 @@ type WorkspaceWarren struct {
 
 // ProjectStatus summarizes the local workspace state for a Warren project.
 type ProjectStatus struct {
-	WarrenID     string `json:"warren_id"`
+	WarrenID string `json:"warren_id"`
+	// WarrenPath is the registered warren checkout root, carried so write
+	// paths (WriteEditableNode) can re-read the manifest's author-side
+	// write policy at write time. Empty on statuses built before the field
+	// existed; the policy re-check is skipped then.
+	WarrenPath   string `json:"warren_path,omitempty"`
 	ProjectID    string `json:"project_id"`
 	Path         string `json:"path"`
 	VaultID      string `json:"vault_id,omitempty"`
@@ -149,6 +171,9 @@ func Init(root, warrenID string) (*Manifest, error) {
 			m, body = &Manifest{WarrenID: warrenID}, ""
 		} else if m.WarrenID != warrenID {
 			return fmt.Errorf("warren already initialized as %q", m.WarrenID)
+		}
+		if err := checkManifestWritable(m); err != nil {
+			return err
 		}
 		if err := SaveManifest(root, m, body); err != nil {
 			return err
@@ -228,6 +253,9 @@ func ImportProject(root, sourceMarmotDir string, project Project, opts ImportOpt
 func importProjectLocked(root, sourceMarmotDir string, project Project, opts ImportOptions) (*Manifest, error) {
 	manifest, body, err := LoadManifest(root)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkManifestWritable(manifest); err != nil {
 		return nil, err
 	}
 	source, err := filepath.Abs(sourceMarmotDir)
@@ -443,6 +471,24 @@ func RenameProject(root, oldID, newID string) (*Manifest, error) {
 	return manifest, nil
 }
 
+// SetProjectReadOnly flips the warren author's write policy for one project.
+// ReadOnly projects cannot be made editable by consumers (SetEditable) and
+// reject write-backs (WriteEditableNode) even under stale mount state.
+func SetProjectReadOnly(root, projectID string, readOnly bool) (*Manifest, error) {
+	if err := ValidateProjectID(projectID); err != nil {
+		return nil, err
+	}
+	return updateManifest(root, func(manifest *Manifest) error {
+		for i := range manifest.Projects {
+			if manifest.Projects[i].ProjectID == projectID {
+				manifest.Projects[i].ReadOnly = readOnly
+				return nil
+			}
+		}
+		return fmt.Errorf("project %q does not exist", projectID)
+	})
+}
+
 // AddBridge adds or merges allowed relations for a cross-project bridge.
 func AddBridge(root string, bridge Bridge) (*Manifest, error) {
 	normalizeBridge(&bridge)
@@ -532,6 +578,18 @@ func Doctor(root string) (DoctorReport, error) {
 	report := DoctorReport{WarrenID: manifest.WarrenID}
 	known := projectSet(manifest.Projects)
 	vaultIDs := make(map[string]string)
+	// The manifest flock file lives next to _warren.md inside the (usually
+	// git-backed) warren repo; committing it would fight other clones' locks.
+	// Only meaningful when the root actually is a git repo (fixtures and
+	// plain-dir warrens stay quiet).
+	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil && !gitignoreHasEntry(root, ManifestFileName+".lock") {
+		report.Issues = append(report.Issues, DoctorIssue{
+			Severity: "info",
+			Code:     "lockfile_not_ignored",
+			Message:  fmt.Sprintf("add %s.lock to .gitignore (the manifest flock file must not be committed)", ManifestFileName),
+			Path:     ".gitignore",
+		})
+	}
 	if dirExists(filepath.Join(root, ".marmot-data", "warrens")) {
 		report.Issues = append(report.Issues, DoctorIssue{
 			Severity: "warning",
@@ -540,8 +598,21 @@ func Doctor(root string) (DoctorReport, error) {
 			Path:     ".marmot-data/warrens",
 		})
 	}
+	projectModels := make(map[string][]string)
 	for _, project := range manifest.Projects {
 		projectPath := filepath.Join(root, filepath.FromSlash(project.Path))
+		// An absolute path: only resolves on the author's machine; it is
+		// legal at runtime (validateProjectPath accepts it) but breaks every
+		// clone of the warren.
+		if filepath.IsAbs(filepath.FromSlash(project.Path)) {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "warning",
+				Code:      "absolute_project_path",
+				Message:   fmt.Sprintf("project %q uses an absolute path; the warren will not work when cloned elsewhere", project.ProjectID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+		}
 		info, statErr := os.Stat(projectPath)
 		if statErr != nil {
 			report.Issues = append(report.Issues, DoctorIssue{
@@ -605,7 +676,8 @@ func Doctor(root string) (DoctorReport, error) {
 				vaultIDs[meta.VaultID] = project.ProjectID
 			}
 		}
-		if _, err := os.Stat(filepath.Join(projectPath, ".marmot-data", "embeddings.db")); err != nil {
+		dbPath := filepath.Join(projectPath, ".marmot-data", "embeddings.db")
+		if _, err := os.Stat(dbPath); err != nil {
 			report.Issues = append(report.Issues, DoctorIssue{
 				Severity:  "warning",
 				Code:      "embeddings_missing",
@@ -613,8 +685,29 @@ func Doctor(root string) (DoctorReport, error) {
 				ProjectID: project.ProjectID,
 				Path:      project.Path,
 			})
+			continue
+		}
+		models, hasStatus, dbErr := inspectEmbeddingsDB(dbPath)
+		if dbErr != nil {
+			// Degrade, don't break doctor: an unreadable/corrupt DB is
+			// worth a note but must not mask the structural checks above.
+			fmt.Fprintf(warnWriter, "warning: project %q embeddings database could not be inspected: %v\n", project.ProjectID, dbErr)
+			continue
+		}
+		if !hasStatus {
+			report.Issues = append(report.Issues, DoctorIssue{
+				Severity:  "warning",
+				Code:      "schema_stale",
+				Message:   fmt.Sprintf("project %q embeddings database was indexed by an older marmot (missing the status column) and cannot serve remote searches; re-import the project", project.ProjectID),
+				ProjectID: project.ProjectID,
+				Path:      project.Path,
+			})
+		}
+		if len(models) > 0 {
+			projectModels[project.ProjectID] = models
 		}
 	}
+	report.Issues = append(report.Issues, modelSkewIssues(manifest.Projects, projectModels)...)
 	for _, bridge := range manifest.Bridges {
 		if !known[bridge.Source] {
 			report.Issues = append(report.Issues, DoctorIssue{
@@ -630,6 +723,124 @@ func Doctor(root string) (DoctorReport, error) {
 				Message:  fmt.Sprintf("bridge target project %q is not registered", bridge.Target),
 			})
 		}
+	}
+	return report, nil
+}
+
+// inspectEmbeddingsDB opens a project embeddings DB strictly read-only
+// (doctor must never mutate the vaults it inspects) and reports its stored
+// model set plus whether the soft-delete status column exists.
+func inspectEmbeddingsDB(dbPath string) (models []string, hasStatus bool, err error) {
+	store, err := embedding.NewStoreReadOnly(dbPath)
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = store.Close() }()
+	hasStatus, err = store.HasStatusColumn()
+	if err != nil {
+		return nil, false, err
+	}
+	models, err = store.Models()
+	if err != nil {
+		return nil, false, err
+	}
+	return models, hasStatus, nil
+}
+
+// modelSkewIssues emits one warning per project whose stored embedding
+// models differ from the first indexed project's: SearchActive filters
+// WHERE model = ?, so cross-project semantic search between skewed projects
+// silently returns nothing. projects supplies deterministic (manifest)
+// order; projectModels holds each indexed project's sorted model set.
+func modelSkewIssues(projects []Project, projectModels map[string][]string) []DoctorIssue {
+	var issues []DoctorIssue
+	baseProject := ""
+	var baseModels []string
+	for _, project := range projects {
+		models, ok := projectModels[project.ProjectID]
+		if !ok {
+			continue
+		}
+		if baseProject == "" {
+			baseProject, baseModels = project.ProjectID, models
+			continue
+		}
+		if equalStringSlices(baseModels, models) {
+			continue
+		}
+		issues = append(issues, DoctorIssue{
+			Severity:  "warning",
+			Code:      "model_skew",
+			Message:   fmt.Sprintf("project %q embeddings use model(s) %s but project %q uses %s; cross-project semantic search between these will return no results", baseProject, strings.Join(baseModels, ","), project.ProjectID, strings.Join(models, ",")),
+			ProjectID: project.ProjectID,
+			Path:      project.Path,
+		})
+	}
+	return issues
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// gitignoreHasEntry reports whether <root>/.gitignore carries entry as an
+// exact line (the read-only mirror of the CLI's ensureGitignoreEntry).
+func gitignoreHasEntry(root, entry string) bool {
+	data, err := os.ReadFile(filepath.Join(root, ".gitignore"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return true
+		}
+	}
+	return false
+}
+
+// DoctorWorkspace checks workspace-level warren consistency — today, vault-ID
+// collisions across the local vault and every registered warren's active
+// projects. Mount refuses *new* collisions; this catches legacy state
+// written by older binaries (or hand edits), where queries resolve to one
+// claimant arbitrarily.
+func DoctorWorkspace(workspaceMarmotDir, workspaceRoot string) (DoctorReport, error) {
+	state, _, err := LoadWorkspaceState(workspaceRoot)
+	if err != nil {
+		return DoctorReport{}, err
+	}
+	report := DoctorReport{}
+	claims := vaultIDClaims(workspaceMarmotDir, state)
+	vaultIDs := make([]string, 0, len(claims))
+	for vaultID := range claims {
+		vaultIDs = append(vaultIDs, vaultID)
+	}
+	sort.Strings(vaultIDs)
+	for _, vaultID := range vaultIDs {
+		owners := claims[vaultID]
+		if len(owners) < 2 {
+			continue
+		}
+		names := make([]string, 0, len(owners))
+		for _, owner := range owners {
+			if owner.WarrenID == "" {
+				names = append(names, owner.ProjectID)
+				continue
+			}
+			names = append(names, owner.WarrenID+"/"+owner.ProjectID)
+		}
+		report.Issues = append(report.Issues, DoctorIssue{
+			Severity: "error",
+			Code:     "vault_id_collision_workspace",
+			Message:  fmt.Sprintf("vault ID %q is claimed by %s; queries resolve to one of them arbitrarily — unmount or re-import with distinct vault IDs", vaultID, strings.Join(names, " and ")),
+		})
 	}
 	return report, nil
 }
@@ -682,6 +893,11 @@ func LoadManifest(root string) (*Manifest, string, error) {
 	body, err := parseMarkdownYAML(data, &m)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse Warren manifest: %w", err)
+	}
+	// Read paths stay permissive on newer manifests (best-effort queries keep
+	// working); write paths refuse via checkManifestWritable.
+	if m.Version > CurrentManifestVersion {
+		fmt.Fprintf(warnWriter, "warning: warren manifest %s is version %d (this marmot supports <= %d); fields may be ignored, do not edit with this binary\n", path, m.Version, CurrentManifestVersion)
 	}
 	if m.WarrenID == "" {
 		m.WarrenID = GenerateProjectID(filepath.Base(root))
@@ -842,29 +1058,44 @@ func RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot string) (*Works
 
 // Mount marks projects active in the local workspace.
 func Mount(workspaceRoot, warrenID string, projects []string, materialized bool) (*WorkspaceState, error) {
+	wsMarmotDir := workspaceMarmotDir(workspaceRoot)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
 			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
 		}
-		known, err := registeredProjectSet(entry.Path)
+		manifest, _, err := LoadManifest(entry.Path)
 		if err != nil {
 			return err
 		}
-		for _, project := range projects {
-			if err := ValidateProjectID(project); err != nil {
+		registered := make(map[string]Project, len(manifest.Projects))
+		for _, project := range manifest.Projects {
+			registered[project.ProjectID] = project
+		}
+		claimed := claimedVaultIDs(wsMarmotDir, state)
+		for _, projectID := range projects {
+			if err := ValidateProjectID(projectID); err != nil {
 				return err
 			}
-			if !known[project] {
-				return fmt.Errorf("project %q is not registered in Warren %q", project, warrenID)
+			project, known := registered[projectID]
+			if !known {
+				return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
 			}
 			// A materialized (burrowed) cache never syncs edits back to the
 			// checkout, so materializing an editable project would silently
 			// strand its future edits in the cache.
-			if materialized && containsName(entry.EditableProjects, project) {
-				return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or mount without --materialize", project, warrenID, project, warrenID)
+			if materialized && containsName(entry.EditableProjects, projectID) {
+				return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or mount without --materialize", projectID, warrenID, projectID, warrenID)
 			}
-			entry.ActiveProjects = addName(entry.ActiveProjects, project)
+			// Vault IDs form one flat routing namespace per workspace: a
+			// duplicate would be resolved last-mount-wins at runtime, silently
+			// answering queries from the wrong project. Refuse at mount time.
+			vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
+			if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
+				return err
+			}
+			claimed[vaultID] = vaultClaim{WarrenID: warrenID, ProjectID: projectID}
+			entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
 		}
 		if materialized {
 			entry.Materialized = true
@@ -876,6 +1107,7 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 
 // SetEditable toggles a single project's local writable state.
 func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*WorkspaceState, error) {
+	wsMarmotDir := workspaceMarmotDir(workspaceRoot)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
@@ -884,12 +1116,26 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 		if err := ValidateProjectID(projectID); err != nil {
 			return err
 		}
-		known, err := registeredProjectSet(entry.Path)
+		manifest, _, err := LoadManifest(entry.Path)
 		if err != nil {
 			return err
 		}
-		if !known[projectID] {
+		var project Project
+		known := false
+		for _, p := range manifest.Projects {
+			if p.ProjectID == projectID {
+				project, known = p, true
+				break
+			}
+		}
+		if !known {
 			return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
+		}
+		// Author-side write policy (manifest schema v2): the warren owner
+		// marked the project read-only, so no workspace may enable edit.
+		// Disabling (--off) stays allowed regardless.
+		if editable && project.ReadOnly {
+			return fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", projectID)
 		}
 		// Refuse editable on a burrowed project: edits would land in the
 		// materialized cache and never sync back to the checkout, while
@@ -898,9 +1144,18 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 		// ground truth is the existence of the burrow cache dir. Disabling
 		// (--off) stays allowed regardless.
 		if editable && entry.Materialized {
-			cached := materializedProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, projectID)
+			cached := materializedProjectPath(wsMarmotDir, warrenID, projectID)
 			if dirExists(cached) {
-				return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — delete the burrow cache at %s or re-mount without --materialize before enabling edit", projectID, warrenID, cached)
+				return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — drop the burrow first ('marmot warren burrow --drop --warren %s %s') or re-mount without --materialize before enabling edit", projectID, warrenID, warrenID, projectID)
+			}
+		}
+		// Edit implies mount: when the project is not yet active this is an
+		// auto-mount, so it gets the same vault-ID collision refusal as Mount.
+		if !containsName(entry.ActiveProjects, projectID) {
+			claimed := claimedVaultIDs(wsMarmotDir, state)
+			vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
+			if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
+				return err
 			}
 		}
 		entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
@@ -925,6 +1180,334 @@ func TouchWorkspaceState(workspaceRoot string) error {
 	return err
 }
 
+// Unmount deactivates projects in the local workspace (and drops their
+// editable flag). Burrow caches are deliberately untouched — unmount must be
+// non-destructive so mount→unmount round-trips; use DropMaterialized to
+// delete caches. Validation is against the workspace state, not the Warren
+// manifest, so unmounting works even when the checkout is gone: this is the
+// escape hatch for unreachable warrens.
+func Unmount(workspaceRoot, warrenID string, projects []string) (*WorkspaceState, error) {
+	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+		entry, ok := state.Warrens[warrenID]
+		if !ok {
+			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+		}
+		for _, project := range projects {
+			if err := ValidateProjectID(project); err != nil {
+				return err
+			}
+			if !containsName(entry.ActiveProjects, project) {
+				return fmt.Errorf("project %q is not mounted from warren %q in this workspace", project, warrenID)
+			}
+		}
+		entry.ActiveProjects = removeNames(entry.ActiveProjects, projects)
+		entry.EditableProjects = removeNames(entry.EditableProjects, projects)
+		state.Warrens[warrenID] = entry
+		return nil
+	})
+}
+
+// DropMaterialized deletes projects' burrow caches (the whole
+// <workspaceMarmotDir>/.marmot-data/warrens/<warrenID>/projects/<p>/ dir)
+// and clears the entry's Materialized flag once no cache remains. Caches are
+// deleted BEFORE the state write: the workspace _warren.md rewrite is the
+// change signal live daemon owners watch, so the reload it triggers must
+// observe the final cache layout. Within the owner's ~1s debounce window a
+// live routing table can still point at a just-deleted cache; those queries
+// fail loudly (once-per-vault warnings) — the same bounded exposure as a
+// re-burrow swap.
+func DropMaterialized(workspaceMarmotDir, workspaceRoot, warrenID string, projects []string) error {
+	state, _, err := LoadWorkspaceState(workspaceRoot)
+	if err != nil {
+		return err
+	}
+	if _, ok := state.Warrens[warrenID]; !ok {
+		return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+	}
+	for _, project := range projects {
+		if err := ValidateProjectID(project); err != nil {
+			return err
+		}
+		if !dirExists(materializedProjectPath(workspaceMarmotDir, warrenID, project)) {
+			return fmt.Errorf("project %q has no burrow cache in warren %q", project, warrenID)
+		}
+	}
+	for _, project := range projects {
+		cacheDir := filepath.Dir(materializedProjectPath(workspaceMarmotDir, warrenID, project))
+		if err := os.RemoveAll(cacheDir); err != nil {
+			return fmt.Errorf("drop burrow cache for %q: %w", project, err)
+		}
+	}
+	_, err = updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+		entry, ok := state.Warrens[warrenID]
+		if !ok {
+			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+		}
+		if len(MaterializedProjects(workspaceMarmotDir, warrenID)) == 0 {
+			entry.Materialized = false
+		}
+		state.Warrens[warrenID] = entry
+		return nil
+	})
+	return err
+}
+
+// ClearStaleMaterialized clears a warren entry's Materialized flag when no
+// burrow cache remains on disk. Mount sets the flag before the CLI's
+// Materialize loop creates any cache, so a first-project materialize
+// failure (rolled back by unmounting) can strand the flag with zero caches
+// behind it — and with the stale flag, ActiveMounts' unreadable-manifest
+// branch silently serves materializedStatuses instead of emitting the A6
+// "mounts skipped" warning, while `burrow --drop` has nothing to drop. Safe
+// to call any time: it re-checks the cache ground truth under the state
+// flock and is a no-op while caches (or no entry) exist.
+func ClearStaleMaterialized(workspaceMarmotDir, workspaceRoot, warrenID string) error {
+	_, err := updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+		entry, ok := state.Warrens[warrenID]
+		if !ok || !entry.Materialized {
+			return nil
+		}
+		if len(MaterializedProjects(workspaceMarmotDir, warrenID)) == 0 {
+			entry.Materialized = false
+			state.Warrens[warrenID] = entry
+		}
+		return nil
+	})
+	return err
+}
+
+// MaterializedProjects lists the project IDs that currently have a burrow
+// cache dir for the given warren in this workspace — the per-project ground
+// truth behind the warren-level Materialized flag, and the expansion set for
+// `burrow --drop --all`.
+func MaterializedProjects(workspaceMarmotDir, warrenID string) []string {
+	dir := filepath.Join(workspaceMarmotDir, ".marmot-data", "warrens", warrenID, "projects")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && dirExists(filepath.Join(dir, e.Name(), MarmotDirName)) {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Unregister removes a warren's entry from the workspace state. It refuses
+// while projects are still mounted or burrow caches still exist, unless
+// force; with force it also deletes the warren's whole cache tree. The
+// no---force precondition checks, the cache-tree removal, and the entry
+// delete all run inside the workspace state flock: checking on an unlocked
+// snapshot and acting later is exactly the cross-process check-then-act
+// race the A5 flock exists to prevent (a concurrent `warren mount`/`burrow`
+// from another process would have its just-created caches deleted and its
+// mounts silently dropped). As in DropMaterialized, caches are removed
+// before the state write so live observers reload against the final layout.
+func Unregister(workspaceMarmotDir, workspaceRoot, warrenID string, force bool) error {
+	_, err := updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+		entry, ok := state.Warrens[warrenID]
+		if !ok {
+			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+		}
+		if !force {
+			if len(entry.ActiveProjects) > 0 {
+				return fmt.Errorf("warren %q still has mounted project(s) %s; run 'marmot warren unmount --warren %s --all' first, or pass --force",
+					warrenID, strings.Join(entry.ActiveProjects, ", "), warrenID)
+			}
+			if cached := MaterializedProjects(workspaceMarmotDir, warrenID); len(cached) > 0 {
+				return fmt.Errorf("warren %q still has burrow cache(s) for %s; run 'marmot warren burrow --drop --warren %s --all' first, or pass --force",
+					warrenID, strings.Join(cached, ", "), warrenID)
+			}
+		}
+		if err := os.RemoveAll(filepath.Join(workspaceMarmotDir, ".marmot-data", "warrens", warrenID)); err != nil {
+			return fmt.Errorf("remove warren cache tree: %w", err)
+		}
+		delete(state.Warrens, warrenID)
+		return nil
+	})
+	return err
+}
+
+// vaultClaim records which mounted project (or the local vault) owns a vault
+// ID in this workspace. A zero WarrenID means the local workspace vault.
+type vaultClaim struct {
+	WarrenID  string
+	ProjectID string
+}
+
+// vaultIDClaims maps every vault ID claimed in this workspace — by the local
+// vault itself or by any registered warren's active projects — to ALL of its
+// claimants, in deterministic order (local vault first, then warrens sorted
+// by ID). Resolution matches ActiveMounts (metadata vault_id, falling back
+// to the project ID), because that is exactly what reaches the routing
+// table. Warrens whose checkout is unreadable contribute their materialized
+// statuses (if any) and are otherwise skipped: an unresolvable vault ID can
+// never collide. It is the single claim builder shared by the mount-time
+// refusal (claimedVaultIDs) and DoctorWorkspace's collision report.
+func vaultIDClaims(workspaceMarmotDir string, state *WorkspaceState) map[string][]vaultClaim {
+	claims := make(map[string][]vaultClaim)
+	if local := sourceVaultID(workspaceMarmotDir); local != "" {
+		claims[local] = append(claims[local], vaultClaim{ProjectID: "the local workspace vault"})
+	}
+	warrenIDs := make([]string, 0, len(state.Warrens))
+	for warrenID := range state.Warrens {
+		warrenIDs = append(warrenIDs, warrenID)
+	}
+	sort.Strings(warrenIDs)
+	for _, warrenID := range warrenIDs {
+		entry := state.Warrens[warrenID]
+		manifest, _, err := LoadManifest(entry.Path)
+		if err != nil {
+			if entry.Materialized {
+				for _, status := range materializedStatuses(workspaceMarmotDir, warrenID, entry) {
+					if status.VaultID == "" {
+						continue
+					}
+					claims[status.VaultID] = append(claims[status.VaultID], vaultClaim{WarrenID: warrenID, ProjectID: status.ProjectID})
+				}
+			}
+			continue
+		}
+		projectMap := make(map[string]Project, len(manifest.Projects))
+		for _, project := range manifest.Projects {
+			projectMap[project.ProjectID] = project
+		}
+		for _, projectID := range entry.ActiveProjects {
+			project, ok := projectMap[projectID]
+			if !ok {
+				continue
+			}
+			vaultID := mountVaultID(workspaceMarmotDir, warrenID, entry, project)
+			claims[vaultID] = append(claims[vaultID], vaultClaim{WarrenID: warrenID, ProjectID: projectID})
+		}
+	}
+	return claims
+}
+
+// claimedVaultIDs reduces vaultIDClaims to each vault ID's first (highest
+// precedence) claimant — what the mount-time collision refusal checks
+// against.
+func claimedVaultIDs(workspaceMarmotDir string, state *WorkspaceState) map[string]vaultClaim {
+	claimed := make(map[string]vaultClaim)
+	for vaultID, owners := range vaultIDClaims(workspaceMarmotDir, state) {
+		claimed[vaultID] = owners[0]
+	}
+	return claimed
+}
+
+// mountVaultID resolves the vault ID a project would claim in the routing
+// table when mounted: its metadata vault_id if readable, else the project ID
+// (the same fallback ActiveMounts uses).
+func mountVaultID(workspaceMarmotDir, warrenID string, entry WorkspaceWarren, project Project) string {
+	path := preferredProjectPath(workspaceMarmotDir, warrenID, entry, project)
+	if meta, _, err := LoadProjectMetadata(path); err == nil && meta != nil && meta.VaultID != "" {
+		return meta.VaultID
+	}
+	return project.ProjectID
+}
+
+// refuseVaultIDCollision errors when vaultID is already claimed by another
+// mounted warren project. A collision with the local workspace vault only
+// warns: mounting the warren copy of *this* project (same vault ID) is the
+// documented way to activate warren bridges for local writes, so it must
+// stay allowed — but the routing-table shadowing it causes should be
+// visible.
+func refuseVaultIDCollision(claimed map[string]vaultClaim, vaultID, warrenID, projectID string) error {
+	claim, taken := claimed[vaultID]
+	if !taken || (claim.WarrenID == warrenID && claim.ProjectID == projectID) {
+		return nil
+	}
+	if claim.WarrenID == "" {
+		fmt.Fprintf(warnWriter, "warning: vault ID %q of project %s/%s matches the local workspace vault; cross-vault queries for %q will resolve to the mounted copy\n", vaultID, warrenID, projectID, vaultID)
+		return nil
+	}
+	return fmt.Errorf("vault ID %q of project %s/%s collides with %s/%s already mounted in this workspace", vaultID, warrenID, projectID, claim.WarrenID, claim.ProjectID)
+}
+
+// SplitQualifiedVaultID splits a qualified "@vault-id/node-id" reference into
+// its vault and node parts. It is the single parser shared by the HTTP API
+// and MCP write paths.
+func SplitQualifiedVaultID(id string) (vaultID, nodeID string, ok bool) {
+	if !strings.HasPrefix(id, "@") {
+		return "", "", false
+	}
+	rest := strings.TrimPrefix(id, "@")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// EmbedText builds the embedding text for a warren editable-node write: the
+// node's summary plus a bounded context snippet, matching the local write
+// path's shape. It is the single formula shared by the HTTP API and MCP
+// write paths.
+func EmbedText(n *node.Node) string {
+	embedText := n.Summary
+	if n.Context != "" {
+		ctxSnip := n.Context
+		if len(ctxSnip) > 6000 {
+			ctxSnip = ctxSnip[:6000]
+		}
+		embedText = n.Summary + "\n\n" + ctxSnip
+	}
+	return embedText
+}
+
+// WriteEditableNode persists n into an editable warren mount's checkout and,
+// when vec is non-nil, upserts its embedding into the mount's own
+// embeddings.db (an intentional read-write remote open — this IS the
+// editable write path). It is the single write-back helper shared by the
+// HTTP API and MCP so the two paths cannot diverge, and the enforcement
+// point for future manifest write policy. The node save error is fatal; an
+// embedding failure never rolls back the durable node write and is returned
+// as a warning string instead, which callers must surface.
+func WriteEditableNode(mount ProjectStatus, n *node.Node, vec []float32, summaryHash, model string) (warning string, err error) {
+	if !mount.Editable {
+		return "", fmt.Errorf("warren project %q is read-only in this workspace", mount.ProjectID)
+	}
+	// Author-side write-policy backstop: re-read the manifest at write time
+	// so a stale mount state (editable flag granted before the author marked
+	// the project readonly) cannot slip a write through. Unlike the read
+	// paths this fails CLOSED — a write is an explicit action whose refusal
+	// is visible, so an unreadable manifest refuses instead of degrading.
+	// Statuses without a WarrenPath (built by older code or hand-rolled)
+	// carry no policy source and skip the re-check.
+	if mount.WarrenPath != "" {
+		manifest, _, loadErr := LoadManifest(mount.WarrenPath)
+		if loadErr != nil {
+			return "", fmt.Errorf("warren manifest unreadable at %s; refusing write to project %q: %w", mount.WarrenPath, mount.ProjectID, loadErr)
+		}
+		for _, project := range manifest.Projects {
+			if project.ProjectID == mount.ProjectID && project.ReadOnly {
+				return "", fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", mount.ProjectID)
+			}
+		}
+	}
+	store := node.NewStore(mount.Path)
+	if err := store.SaveNode(n); err != nil {
+		return "", fmt.Errorf("save warren node: %w", err)
+	}
+	if vec == nil {
+		return "", nil
+	}
+	embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
+	if storeErr != nil {
+		return "embedding not updated: " + storeErr.Error(), nil
+	}
+	if upsertErr := embStore.Upsert(n.ID, vec, summaryHash, model); upsertErr != nil {
+		warning = "embedding not updated: " + upsertErr.Error()
+	}
+	if closeErr := embStore.Close(); closeErr != nil && warning == "" {
+		warning = "embedding not updated: " + closeErr.Error()
+	}
+	return warning, nil
+}
+
 // Status returns project statuses for one registered Warren.
 func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 	state, _, err := LoadWorkspaceState(workspaceRoot)
@@ -940,7 +1523,25 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 		if entry.Materialized {
 			return materializedStatuses(workspaceMarmotDir(workspaceRoot), warrenID, entry), nil
 		}
-		return nil, err
+		// The checkout is unreachable (moved, deleted, or unparseable):
+		// degrade to rows built from workspace state instead of erroring
+		// opaquely, so `warren status` can still show what is mounted and
+		// the unmount escape hatch keeps working.
+		fmt.Fprintf(warnWriter, "warning: warren %q manifest unreadable at %s: %v (status degraded to workspace state)\n", warrenID, entry.Path, err)
+		statuses := make([]ProjectStatus, 0, len(entry.ActiveProjects))
+		for _, projectID := range entry.ActiveProjects {
+			statuses = append(statuses, ProjectStatus{
+				WarrenID:   warrenID,
+				WarrenPath: entry.Path,
+				ProjectID:  projectID,
+				Path:       filepath.Join(entry.Path, filepath.FromSlash(defaultProjectPath(projectID))),
+				Registered: false,
+				Active:     true,
+				Editable:   containsName(entry.EditableProjects, projectID),
+				Available:  false,
+			})
+		}
+		return statuses, nil
 	}
 	projects := make([]ProjectStatus, 0, len(manifest.Projects))
 	for _, project := range manifest.Projects {
@@ -956,13 +1557,17 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 		}
 		_, statErr := os.Stat(marmotDir)
 		projects = append(projects, ProjectStatus{
-			WarrenID:     warrenID,
-			ProjectID:    project.ProjectID,
-			Path:         marmotDir,
-			VaultID:      vaultID,
-			Registered:   true,
-			Active:       containsName(entry.ActiveProjects, project.ProjectID),
-			Editable:     containsName(entry.EditableProjects, project.ProjectID),
+			WarrenID:   warrenID,
+			WarrenPath: entry.Path,
+			ProjectID:  project.ProjectID,
+			Path:       marmotDir,
+			VaultID:    vaultID,
+			Registered: true,
+			Active:     containsName(entry.ActiveProjects, project.ProjectID),
+			// Author-side readonly policy trumps the workspace's editable
+			// flag, so the UI save button and MCP/API rejections follow the
+			// manifest without any client change.
+			Editable:     containsName(entry.EditableProjects, project.ProjectID) && !project.ReadOnly,
 			Materialized: entry.Materialized && dirExists(materializedProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, project.ProjectID)),
 			Available:    statErr == nil,
 		})
@@ -1005,13 +1610,16 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 				vaultID = meta.VaultID
 			}
 			mounts = append(mounts, ProjectStatus{
-				WarrenID:     warrenID,
-				ProjectID:    projectID,
-				Path:         marmotPath,
-				VaultID:      vaultID,
-				Registered:   true,
-				Active:       true,
-				Editable:     containsName(entry.EditableProjects, projectID),
+				WarrenID:   warrenID,
+				WarrenPath: entry.Path,
+				ProjectID:  projectID,
+				Path:       marmotPath,
+				VaultID:    vaultID,
+				Registered: true,
+				Active:     true,
+				// Author-side readonly policy trumps the workspace's
+				// editable flag (see Status).
+				Editable:     containsName(entry.EditableProjects, projectID) && !project.ReadOnly,
 				Materialized: entry.Materialized && marmotPath == materializedProjectPath(marmotDir, warrenID, projectID),
 				Available:    dirExists(marmotPath),
 			})
@@ -1032,7 +1640,14 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 // Perm bits). The copy goes to a temp sibling and is swapped in with a
 // rename, so a failed burrow never leaves a half-written cache and a
 // re-burrow never resurrects files deleted from the source.
-func Materialize(workspaceMarmotDir, warrenID string, project Project, warrenRoot string) (string, error) {
+//
+// sourceCommit is the warren checkout's HEAD, resolved by the caller (this
+// package stays exec-free, so it cannot ask git itself); pass "" for
+// non-git warrens. It is pinned in the cache's provenance record so refresh
+// --pull can skip up-to-date caches. A provenance write failure only warns:
+// the cache itself is durable, and a missing/unreadable provenance is
+// defined as "stale", so the failure mode is one extra re-copy.
+func Materialize(workspaceMarmotDir, warrenID string, project Project, warrenRoot, sourceCommit string) (string, error) {
 	source := filepath.Join(warrenRoot, filepath.FromSlash(project.Path))
 	target := materializedProjectPath(workspaceMarmotDir, warrenID, project.ProjectID)
 	// Flush the source DB's WAL so the sidecar-excluding copy is complete.
@@ -1050,6 +1665,9 @@ func Materialize(workspaceMarmotDir, warrenID string, project Project, warrenRoo
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.RemoveAll(tmp)
 		return "", fmt.Errorf("commit burrow cache: %w", err)
+	}
+	if err := SaveBurrowProvenance(workspaceMarmotDir, warrenID, project.ProjectID, newBurrowProvenance(project, sourceCommit)); err != nil {
+		fmt.Fprintf(warnWriter, "warning: burrow cache for %s/%s committed but its provenance was not recorded: %v (the cache will be treated as stale by 'warren refresh --pull')\n", warrenID, project.ProjectID, err)
 	}
 	return target, nil
 }
@@ -1077,6 +1695,7 @@ func materializedStatuses(workspaceMarmotDir, warrenID string, entry WorkspaceWa
 		}
 		statuses = append(statuses, ProjectStatus{
 			WarrenID:     warrenID,
+			WarrenPath:   entry.Path,
 			ProjectID:    projectID,
 			Path:         cached,
 			VaultID:      vaultID,
@@ -1119,18 +1738,6 @@ func preferredProjectPath(workspaceMarmotDir, warrenID string, entry WorkspaceWa
 
 func materializedProjectPath(workspaceMarmotDir, warrenID, projectID string) string {
 	return filepath.Join(workspaceMarmotDir, ".marmot-data", "warrens", warrenID, "projects", projectID, MarmotDirName)
-}
-
-func registeredProjectSet(warrenRoot string) (map[string]bool, error) {
-	manifest, _, err := LoadManifest(warrenRoot)
-	if err != nil {
-		return nil, err
-	}
-	known := make(map[string]bool, len(manifest.Projects))
-	for _, project := range manifest.Projects {
-		known[project.ProjectID] = true
-	}
-	return known, nil
 }
 
 // ValidateProjectID checks that a Warren project ID is safe for YAML keys and paths.
@@ -1191,6 +1798,17 @@ func updateWorkspaceState(workspaceRoot string, fn func(*WorkspaceState) error) 
 	return state, nil
 }
 
+// checkManifestWritable refuses to rewrite a manifest newer than this binary
+// understands: struct-based parsing silently drops unknown YAML fields, so
+// saving would strip them. Every mutating manifest path (updateManifest,
+// import, init-on-existing) calls this after loading.
+func checkManifestWritable(m *Manifest) error {
+	if m.Version > CurrentManifestVersion {
+		return fmt.Errorf("manifest version %d exceeds supported %d; upgrade marmot before editing this warren", m.Version, CurrentManifestVersion)
+	}
+	return nil
+}
+
 // updateManifest runs a LoadManifest -> mutate -> SaveManifest cycle on the
 // Warren manifest under an exclusive cross-process flock (sibling
 // _warren.md.lock file), preserving the markdown body. Every manifest
@@ -1205,6 +1823,9 @@ func updateManifest(root string, fn func(*Manifest) error) (*Manifest, error) {
 	err = flock.WithLock(path+".lock", func() error {
 		m, body, err := LoadManifest(root)
 		if err != nil {
+			return err
+		}
+		if err := checkManifestWritable(m); err != nil {
 			return err
 		}
 		if err := fn(m); err != nil {
@@ -1312,6 +1933,16 @@ func defaultWorkspaceState() *WorkspaceState {
 func normalizeManifest(m *Manifest) {
 	if m.Version == 0 {
 		m.Version = 1
+	}
+	// The readonly write policy is a version-2 field: bump so pre-v2
+	// binaries refuse to rewrite (and silently strip) it.
+	if m.Version < 2 {
+		for _, project := range m.Projects {
+			if project.ReadOnly {
+				m.Version = 2
+				break
+			}
+		}
 	}
 	m.Projects = uniqueProjects(m.Projects)
 	for i := range m.Projects {

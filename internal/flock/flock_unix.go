@@ -22,6 +22,19 @@ func lockShared(f *os.File) error {
 	return unix.Flock(int(f.Fd()), unix.LOCK_SH)
 }
 
+// tryLockShared attempts a non-blocking shared BSD flock on f.
+// Returns (false, nil) when another process holds the lock exclusively.
+func tryLockShared(f *os.File) (bool, error) {
+	err := unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return false, nil
+	}
+	return false, err
+}
+
 // tryLockExclusive attempts a non-blocking exclusive BSD flock on f.
 // Returns (false, nil) when another process holds the lock.
 func tryLockExclusive(f *os.File) (bool, error) {

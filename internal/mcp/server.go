@@ -90,7 +90,8 @@ EDGE GUIDELINES:
 - Prefer specific relations: 'calls' over 'references' when one function invokes another; 'contains' for parent-child module relationships.
 
 When referencing nodes in other namespaces, use qualified IDs (e.g., 'other-namespace/node/path'). Cross-namespace edges require a bridge manifest with the relation type whitelisted.
-When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vault edges require a cross-vault bridge with the relation type whitelisted.`),
+When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vault edges require a cross-vault bridge with the relation type whitelisted.
+Writing with an @vault-id/node-id ID updates that existing node in an active *editable* warren mount (summary/context/tags only; the write lands in the mounted project's own checkout). Read-only or unmounted vaults reject @-writes.`),
 		mcp.WithString("id",
 			mcp.Required(),
 			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. When using a non-default namespace, prefix the ID with the namespace (e.g., 'my-ns/auth/login'). If you omit the namespace prefix, it will be added automatically. Examples: 'auth/login', 'db/users', 'my-namespace/render/api-client'. Must not contain '..' or start with '/'"),

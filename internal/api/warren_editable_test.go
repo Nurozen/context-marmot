@@ -23,7 +23,7 @@ func TestWarrenEditableWriteLandsInCheckoutDespiteStaleMaterializedFlag(t *testi
 
 	// Burrow the project so a materialized cache exists.
 	project := warrenpkg.Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	cachePath, err := warrenpkg.Materialize(engine.MarmotDir, "product-platform", project, warrenRoot)
+	cachePath, err := warrenpkg.Materialize(engine.MarmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}

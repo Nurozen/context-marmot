@@ -144,6 +144,14 @@ other irregular files. Re-burrowing replaces the cache atomically, so files
 deleted from the Warren checkout disappear from the cache instead of being
 resurrected.
 
+Each burrow cache carries a `provenance.md` sibling recording the checkout
+commit it was copied from (`source_commit`, empty for non-git warrens), the
+manifest path it came from, and the materialization time. `marmot warren
+status` renders it (`cache at <commit> (N behind)` when git can compute a
+distance, else `cache from <timestamp>`), and `marmot warren refresh --pull`
+uses it to re-materialize only stale caches. A cache without provenance is
+simply treated as stale and re-copied on the next `refresh --pull`.
+
 `_heat/` is excluded by default; pass `--include-heat` to keep it. Harmless
 `.obsidian/` configuration is copied by default; pass `--no-obsidian` to omit
 the whole directory. Import rewrites the copied project `.marmot/_warren.md` to
@@ -204,7 +212,20 @@ marmot warren format
 `doctor` checks the top-level manifest, project paths, project identity files,
 ID consistency, duplicate vault IDs, bridge endpoints, bridge relations,
 accidental materialized cache folders, and missing embedding databases. Missing
-embeddings are warnings because a graph can be valid before it is indexed.
+embeddings are warnings because a graph can be valid before it is indexed. It
+also warns on cross-project **embedding model skew** (`model_skew`: projects
+indexed with different models cannot see each other in semantic search), on
+project databases indexed by an older marmot (`schema_stale`: missing the
+status column; re-import the project), on absolute manifest paths
+(`absolute_project_path`: they only resolve on the author's machine), and — in
+git-backed warrens — notes a missing `_warren.md.lock` gitignore entry
+(`lockfile_not_ignored`). All DB inspection is strictly read-only.
+
+`marmot warren doctor --workspace` runs in a consuming workspace instead of a
+warren repo: it reports vault-ID collisions across the local vault and all
+registered warrens' active projects (`vault_id_collision_workspace`, an
+error). Mount refuses new collisions; this catches legacy state written by
+older binaries.
 
 These commands edit Warren files atomically but never commit, push, pull, or
 open PRs. Use normal git workflow to review and publish Warren changes.
@@ -230,6 +251,30 @@ Activate selected projects:
 marmot warren mount --warren product-platform project-a project-b
 ```
 
+A bare `mount` (no project IDs) refuses rather than silently activating
+every registered project — nothing becomes queryable by accident. To
+activate the whole Warren, say so explicitly:
+
+```bash
+marmot warren mount --warren product-platform --all
+```
+
+Mounting refuses a project whose `vault_id` is already claimed by a project
+mounted from another Warren (vault IDs are one flat routing namespace per
+workspace; a duplicate would silently answer queries from the wrong
+project). Mounting the Warren copy of the *local* project — same vault ID as
+the workspace vault, the documented way to activate Warren bridges — is
+allowed with a warning about the routing shadowing it causes.
+
+Deactivate projects again (`unmount` is non-destructive: burrow caches are
+kept, and it works even when the Warren checkout has been moved or deleted —
+it is the escape hatch for unreachable Warrens):
+
+```bash
+marmot warren unmount --warren product-platform project-a
+marmot warren unmount --warren product-platform --all
+```
+
 Show project state:
 
 ```bash
@@ -237,7 +282,14 @@ marmot warren status --warren product-platform
 marmot warren status --warren product-platform --json
 ```
 
-Enable writes for one project:
+When the registered checkout no longer exists, `status` prints an
+`UNREACHABLE` banner naming the re-register/unregister escape hatches and
+still renders rows from workspace state (AVAILABLE=false), and
+`warren list` shows a REACHABLE column (`"reachable"` in `--json`). A live
+daemon owner logs the same condition through its reload warnings.
+
+Enable writes for one project (edit implies mount — an unmounted project is
+auto-mounted, and the command says so):
 
 ```bash
 marmot warren edit --warren product-platform project-a
@@ -252,11 +304,53 @@ marmot warren edit --off --warren product-platform project-a
 Materialize selected project graphs into the local `.marmot-data/` cache:
 
 ```bash
-marmot warren burrow --materialize --warren product-platform project-b
+marmot warren burrow --warren product-platform project-b
+marmot warren burrow --warren product-platform --all
 ```
 
-`burrow --materialize` is useful when you want offline graph access or want a
-stable local snapshot while the Warren git checkout changes elsewhere.
+`burrow` always materializes — without a cache the verb would be exactly
+`mount`. (`--materialize` is still accepted for compatibility but is
+implied; a bare `burrow` requires project IDs or `--all`, like `mount`.)
+Burrowing is useful when you want offline graph access or a stable local
+snapshot while the Warren git checkout changes elsewhere. If materializing
+fails partway, projects that were mounted but never cached are unmounted
+again, so a failed burrow cannot leave mounted-but-uncached state.
+
+Delete burrow caches (per project or all of them; the warren-level
+materialized flag clears when the last cache is gone):
+
+```bash
+marmot warren burrow --drop --warren product-platform project-b
+marmot warren burrow --drop --warren product-platform --all
+```
+
+Remove a Warren from the workspace entirely. Without `--force` it refuses
+while projects are still mounted or burrow caches still exist and names the
+exact commands to run first; with `--force` it also deletes the Warren's
+cache tree:
+
+```bash
+marmot warren unregister --warren product-platform
+marmot warren unregister --warren product-platform --force
+```
+
+Read-only verbs (`list`, `status`, `refresh`, `propose`) and the inverse
+verbs (`unmount`, `unregister`, `burrow --drop`) never create a workspace:
+in a directory without `.marmot/` they fail instead of planting a
+mock-provider vault. Only `register`, `mount`/`burrow`, and `edit` create
+the workspace on demand.
+
+`marmot warren propose [--warren <id>] [<project-id>]` packages editable-mount
+edits into a reviewable git artifact. It resolves the project (the sole
+editable project by default; an explicit ID when there are several), refuses
+non-git checkouts and detached HEADs, and — when the project has changes —
+creates a timestamped `marmot/propose/<project>-<stamp>` branch holding one
+pathspec-limited commit of just that project's files, then returns to the
+original branch. Unrelated dirty or staged files are never swept in. Propose
+is local-only by design: marmot never pulls, merges, rebases, or pushes —
+publishing the branch (`git push -u origin <branch>`) and opening the PR stay
+in your hands, and upstream divergence is resolved through normal git flow at
+that point. A clean project prints `nothing to propose` and exits 0.
 
 ## Bridge policy
 
@@ -303,16 +397,51 @@ in the detail panel and the save button is disabled.
 
 Editable and materialized are mutually exclusive per project: a materialized
 (burrowed) cache never syncs edits back to the checkout, so `marmot warren
-edit` refuses projects that have a burrow cache (delete the cache under
-`.marmot/.marmot-data/warrens/<warren-id>/projects/<project-id>/` or re-mount
-without `--materialize` first), and `marmot warren mount --materialize`
-refuses projects that are currently editable (run `marmot warren edit
-<project> --off` first). If an older state file carries both flags, the
-checkout path wins for editable projects and a warning is printed.
+edit` refuses projects that have a burrow cache (run `marmot warren burrow
+--drop --warren <warren-id> <project-id>` or re-mount without materializing
+first), and `marmot warren burrow` / `mount --materialize` refuses projects
+that are currently editable (run `marmot warren edit <project> --off`
+first). If an older state file carries both flags, the checkout path wins
+for editable projects and a warning is printed.
 
-MCP `context_write` does not accept `@vault-id/...` node IDs directly. Use the
-Warren-aware API/UI path for editable mounted nodes, or write local nodes as
-usual.
+MCP `context_write` accepts `@vault-id/node-id` IDs for active **editable**
+mounts, exactly like the API/UI path: the write updates that existing node's
+summary/context/tags in the mounted project's own checkout (never a cache),
+updates its embedding database, and refreshes the engine's cached view. Both
+paths go through one shared write-back helper, so they cannot diverge.
+Creating brand-new nodes through an `@`-write is not supported — create
+nodes in the project's own workspace. Writes to read-only or unmounted
+vaults are rejected with the command that would enable them.
+
+### Write policy (author side)
+
+Consumers opt in to editability per workspace; the warren *author* can veto
+it per project in the manifest:
+
+```bash
+marmot warren project set-readonly project-a          # in the warren repo
+marmot warren project set-readonly project-a --off
+```
+
+```yaml
+projects:
+  - project_id: project-a
+    path: projects/project-a/.marmot
+    readonly: true
+```
+
+A `readonly` project cannot be made editable (`marmot warren edit` refuses),
+reports `Editable=false` in status/mount provenance regardless of workspace
+state (so the UI save button disables itself and MCP/API writes are
+rejected), and — as a backstop against stale mount state — every write-back
+re-reads the manifest at write time and refuses read-only projects even if an
+old editable flag is still cached. Edits to such projects go through the
+warren repository itself.
+
+Using `readonly` lifts the manifest to schema **version 2**. Marmot binaries
+read manifests newer than they understand best-effort (with a warning) but
+refuse to *edit* them, so an older binary can never silently strip fields it
+does not know.
 
 ## Query behavior
 
@@ -342,9 +471,17 @@ one time bound:
   reachable, rewrites the workspace `.marmot/_warren.md` atomically (a no-op
   touch under its lock), and reports active mounts. Every live daemon owner
   watches that file and reloads its warren wiring (routes, mounts, runtime
-  bridges, vault registry) within about a second. Refresh does **not** run
-  `git pull` — run `git -C <warren-checkout> pull` first when the Warren repo
-  itself moved (a `--pull` flag is reserved for a future release).
+  bridges, vault registry) within about a second. Without `--pull` it never
+  touches git — run `git -C <warren-checkout> pull` yourself if you prefer.
+- `marmot warren refresh --pull` additionally fast-forwards the checkout
+  first: it requires a git work tree, **refuses a dirty checkout** (editable
+  mounts legitimately write there, so marmot never stashes or forces —
+  commit or stash yourself, or refresh without `--pull`), runs
+  `git pull --ff-only` (non-fast-forward or network failures surface git's
+  own error; resolve in the checkout manually), and then re-materializes
+  every active burrow cache whose `provenance.md` commit no longer matches
+  the fresh `HEAD` (or whose provenance is missing). The atomic cache swap
+  makes this safe under a live engine.
 - `POST /api/warren/{id}/refresh` reloads the serving engine's warren state
   directly. The web UI's refresh button calls this automatically when a
   Warren view is selected.

@@ -44,7 +44,7 @@ func TestMaterializeSkipsSecretsAndSidecars(t *testing.T) {
 	marmotDir := t.TempDir()
 	warrenRoot, project, _ := writeBurrowSource(t)
 
-	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestMaterializeSkipsSymlinks(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestMaterializeClearsStaleFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestMaterializeClearsStaleFiles(t *testing.T) {
 	if err := os.Remove(staleNode); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("re-Materialize: %v", err)
 	}
 	mustNotExist(t, filepath.Join(target, "service", "old.md"))
@@ -121,7 +121,7 @@ func TestMaterializeClearsStaleFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o644) })
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err == nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err == nil {
 		t.Fatal("expected Materialize to fail on unreadable source file")
 	}
 	mustExist(t, filepath.Join(target, "service", "api.md"))
@@ -149,7 +149,7 @@ func TestMaterializePermPreserved(t *testing.T) {
 		t.Skipf("cannot set setuid bit: %v", err)
 	}
 
-	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}

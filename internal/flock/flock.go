@@ -59,6 +59,31 @@ func Shared(lockPath string) (release func(), err error) {
 	return func() { once.Do(func() { _ = f.Close() }) }, nil
 }
 
+// TryShared attempts a NON-BLOCKING shared flock (LOCK_SH|LOCK_NB) on
+// lockPath. ok is false when another process holds the lock exclusively
+// (an `index --force` mid-rebuild); release is non-nil only when ok. Used
+// where the caller must never block — VaultRegistry.ResolveEmbeddingStore
+// runs under the registry's own mutex, and a blocking Shared there would
+// wedge every registry operation for the duration of a foreign reindex. On
+// Windows this degrades to a no-op lock that always succeeds.
+func TryShared(lockPath string) (release func(), ok bool, err error) {
+	f, err := openLockFile(lockPath)
+	if err != nil {
+		return nil, false, err
+	}
+	ok, err = tryLockShared(f)
+	if err != nil {
+		_ = f.Close()
+		return nil, false, fmt.Errorf("flock (shared, non-blocking) %s: %w", lockPath, err)
+	}
+	if !ok {
+		_ = f.Close()
+		return nil, false, nil
+	}
+	var once sync.Once
+	return func() { once.Do(func() { _ = f.Close() }) }, true, nil
+}
+
 // TryExclusive attempts a NON-BLOCKING exclusive flock (LOCK_EX|LOCK_NB) on
 // lockPath. ok is false when any other process holds the lock (shared or
 // exclusive); release is non-nil only when ok. On Windows this degrades to

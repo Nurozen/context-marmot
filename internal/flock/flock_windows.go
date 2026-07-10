@@ -16,6 +16,12 @@ func lockShared(_ *os.File) error {
 	return nil
 }
 
+// tryLockShared always succeeds on platforms without BSD flock (same
+// documented gap as tryLockExclusive).
+func tryLockShared(_ *os.File) (bool, error) {
+	return true, nil
+}
+
 // tryLockExclusive always succeeds on platforms without BSD flock, keeping
 // today's unguarded `index --force` semantics there (documented gap).
 func tryLockExclusive(_ *os.File) (bool, error) {

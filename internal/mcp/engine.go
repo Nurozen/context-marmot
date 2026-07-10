@@ -51,6 +51,14 @@ type Engine struct {
 	// repeated reloads never duplicate. Both guarded by nsMgrMu.
 	fileCrossVaultBridges []*namespace.Bridge
 	warrenBridges         []*namespace.Bridge
+	// reloadMu serializes ReloadWarrenState: it is invoked concurrently from
+	// HTTP handler goroutines (the refresh endpoint) and the daemon owner's
+	// _warren.md watcher, and each reload is a read-state-then-apply cycle.
+	// Unserialized, a reload that read PRE-change state could apply its stale
+	// routing table AFTER the reload that read post-change state, leaving
+	// e.g. an unmounted vault routable until the next reload, with NSManager
+	// bridges and the registry routing table from two different snapshots.
+	reloadMu sync.Mutex
 	// warnedVaults dedupes best-effort cross-vault degradation warnings so a
 	// broken remote vault warns once per vault per process, not per query.
 	warnedVaults  sync.Map       // map[string]bool

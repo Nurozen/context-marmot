@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/verify"
+	"github.com/nurozen/context-marmot/internal/warren"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -220,6 +223,12 @@ type WriteResult struct {
 	NodeID string `json:"node_id"`
 	Hash   string `json:"hash"`
 	Status string `json:"status"`
+	// Provenance notes where a warren @-write landed (editable mount writes
+	// go to the project's own checkout, never a materialized cache).
+	Provenance string `json:"provenance,omitempty"`
+	// Warning surfaces a non-fatal degradation (e.g. the node write landed
+	// but its embedding upsert failed) instead of swallowing it.
+	Warning string `json:"warning,omitempty"`
 }
 
 // knownWriteArgs is the set of top-level arguments accepted by context_write,
@@ -293,7 +302,10 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError("id parameter is required"), nil
 	}
 	if strings.HasPrefix(id, "@") {
-		return mcp.NewToolResultError("direct context_write to mounted Warren nodes is not supported; enable the project with marmot warren edit and use the Warren-aware API/UI write path"), nil
+		// Qualified @vault-id/... writes are accepted for active editable
+		// warren mounts, exactly like the HTTP API/UI path (both go through
+		// warren.WriteEditableNode so they cannot diverge).
+		return e.handleWarrenContextWrite(req, id)
 	}
 	if err := node.ValidateNodeID(id); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil
@@ -560,6 +572,121 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		NodeID: id,
 		Hash:   nodeHash,
 		Status: writeStatus,
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+// handleWarrenContextWrite services context_write for qualified
+// "@vault-id/node-id" IDs: updates to existing nodes of active *editable*
+// warren mounts. It mirrors the HTTP API's warren node-update semantics
+// (summary/context/tags updates of an existing node) and shares
+// warren.WriteEditableNode, so the two paths produce byte-identical files.
+// Creating brand-new nodes in a mounted project is not supported — do that
+// in the project's own workspace.
+func (e *Engine) handleWarrenContextWrite(req mcp.CallToolRequest, qualifiedID string) (*mcp.CallToolResult, error) {
+	vaultID, localID, ok := warren.SplitQualifiedVaultID(qualifiedID)
+	if !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid qualified node ID %q: expected @vault-id/node-id", qualifiedID)), nil
+	}
+	mounts, err := warren.ActiveMounts(e.MarmotDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("warren mounts unavailable: %v", err)), nil
+	}
+	var mount warren.ProjectStatus
+	found := false
+	for _, m := range mounts {
+		if m.VaultID == vaultID {
+			mount = m
+			found = true
+			break
+		}
+	}
+	if !found || !mount.Editable {
+		return mcp.NewToolResultError(fmt.Sprintf("vault %q is not an editable warren mount in this workspace; run 'marmot warren edit --warren <id> <project>'", vaultID)), nil
+	}
+	if err := node.ValidateNodeID(localID); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil
+	}
+
+	summary := req.GetString("summary", "")
+	nodeCtx := req.GetString("context", "")
+	if strings.TrimSpace(summary) == "" && strings.TrimSpace(nodeCtx) == "" {
+		return mcp.NewToolResultError(`summary or context is required: put a searchable 1-2 sentence description in "summary" and the full node body in "context" — refusing to blank a mounted node`), nil
+	}
+	args := req.GetArguments()
+	var tags []string
+	tagsProvided := false
+	if rawTags, ok := args["tags"]; ok {
+		tagsProvided = true
+		tagBytes, err := json.Marshal(rawTags)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+		if err := json.Unmarshal(tagBytes, &tags); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+	}
+
+	// Serialize concurrent MCP writes to the same mount.
+	mu := e.NamespaceLock("@" + vaultID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	store := node.NewStore(mount.Path)
+	diskNode, err := store.LoadNode(store.NodePath(localID))
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("node %q not found in warren mount %s/%s — @-writes update existing mounted nodes; create new nodes in the project's own workspace", qualifiedID, mount.WarrenID, mount.ProjectID)), nil
+	}
+	embeddingChanged := false
+	if summary != "" {
+		diskNode.Summary = summary
+		embeddingChanged = true
+	}
+	if nodeCtx != "" {
+		diskNode.Context = nodeCtx
+		embeddingChanged = true
+	}
+	if tagsProvided {
+		diskNode.Tags = tags
+	}
+
+	var vec []float32
+	var summaryHash, model string
+	var warning string
+	if embeddingChanged && e.Embedder != nil {
+		if embedText := warren.EmbedText(diskNode); embedText != "" {
+			v, embErr := e.Embedder.Embed(embedText)
+			if embErr != nil {
+				warning = "embedding not updated: " + embErr.Error()
+			} else {
+				vec = v
+				summaryHash = sha256Hex(embedText)
+				model = e.Embedder.Model()
+			}
+		}
+	}
+	writeWarning, err := warren.WriteEditableNode(mount, diskNode, vec, summaryHash, model)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("save warren node: %v", err)), nil
+	}
+	if warning == "" {
+		warning = writeWarning
+	}
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "warning: warren editable write %s: %s\n", qualifiedID, warning)
+	}
+	// Make the write visible to already-cached cross-vault searches.
+	if e.VaultRegistry != nil {
+		if refreshErr := e.VaultRegistry.Refresh(vaultID); refreshErr != nil && !errors.Is(refreshErr, namespace.ErrNotLoaded) {
+			fmt.Fprintf(os.Stderr, "warning: refresh after editable write failed for vault %q: %v\n", vaultID, refreshErr)
+		}
+	}
+	result := WriteResult{
+		NodeID:     qualifiedID,
+		Hash:       verify.ComputeNodeHash(diskNode),
+		Status:     "updated",
+		Provenance: fmt.Sprintf("warren_mount %s/%s (editable): wrote to the project checkout at %s", mount.WarrenID, mount.ProjectID, mount.Path),
+		Warning:    warning,
 	}
 	return mcp.NewToolResultJSON(result)
 }

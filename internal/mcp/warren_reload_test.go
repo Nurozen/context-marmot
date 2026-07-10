@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/namespace"
@@ -230,6 +231,40 @@ func TestReloadWarrenStateNilRegistry(t *testing.T) {
 	eng := &Engine{}
 	if err := eng.ReloadWarrenState(); err != nil {
 		t.Fatalf("ReloadWarrenState on zero-value engine: %v", err)
+	}
+}
+
+// TestReloadWarrenStateSerialized: reloads must be mutually exclusive.
+// ReloadWarrenState is invoked concurrently from HTTP handler goroutines
+// (the refresh endpoint) and the daemon owner's _warren.md watcher; without
+// serialization, a reload that read pre-unmount state can apply its stale
+// routing table after the reload that read post-unmount state, leaving an
+// unmounted vault routable indefinitely. Pinned directly: a reload started
+// while another holds the reload mutex must wait for it.
+func TestReloadWarrenStateSerialized(t *testing.T) {
+	eng := warrenEngine(t)
+	warrenFixture(t, eng, "wp", "proj-a", "proj-a-vault")
+
+	eng.reloadMu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- eng.ReloadWarrenState() }()
+	select {
+	case err := <-done:
+		t.Fatalf("ReloadWarrenState completed while another reload held the reload mutex (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
+		// Still blocked — serialized as required.
+	}
+	eng.reloadMu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ReloadWarrenState after unlock: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ReloadWarrenState never completed after the reload mutex was released")
+	}
+	if !knownVaults(eng)["proj-a-vault"] {
+		t.Fatalf("expected proj-a-vault after serialized reload, got %v", eng.VaultRegistry.KnownVaultIDs())
 	}
 }
 

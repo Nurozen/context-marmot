@@ -23,6 +23,11 @@ func (e *Engine) ReloadWarrenState() error {
 	if e.VaultRegistry == nil || e.closing.Load() {
 		return nil
 	}
+	// One reload at a time: each reload reads state (routes.yml, _warren.md)
+	// and then applies it; interleaved reloads could apply a stale snapshot
+	// last (see the reloadMu field doc).
+	e.reloadMu.Lock()
+	defer e.reloadMu.Unlock()
 	rt, _ := routes.Load() // best-effort; a broken routes.yml must not brick reloads
 	if rt == nil {
 		rt = routes.EmptyTable()

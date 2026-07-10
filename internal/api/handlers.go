@@ -397,7 +397,7 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req NodeUpdateRequest) {
-	vaultID, localID, ok := splitQualifiedVaultID(id)
+	vaultID, localID, ok := warren.SplitQualifiedVaultID(id)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid Warren node id: "+id)
 		return
@@ -411,6 +411,15 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		writeError(w, http.StatusForbidden, "Warren project is read-only in this workspace: "+mount.ProjectID)
 		return
 	}
+
+	// Serialize the load-modify-save cycle on the same per-mount lock as the
+	// MCP @-write path (handleWarrenContextWrite): C8 makes the payloads
+	// equivalent, but without shared locking a concurrent API+MCP (or
+	// API+API) update to one mounted node would interleave and silently drop
+	// one writer's summary/context/tags.
+	mu := s.engine.NamespaceLock("@" + vaultID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	store := node.NewStore(mount.Path)
 	path := store.NodePath(localID)
@@ -433,47 +442,35 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		diskNode.Tags = *req.Tags
 	}
 
-	if err := store.SaveNode(diskNode); err != nil {
-		writeError(w, http.StatusInternalServerError, "save Warren node: "+err.Error())
-		return
-	}
-
-	// The node write above is durable; an embedding failure must not roll it
-	// back or 500 the request. Instead the response carries a warning field
-	// (and stderr gets a line) so a stale embedding is never silent.
+	// warren.WriteEditableNode is the single MCP/API write-back path: the node
+	// save error is fatal, while an embedding failure must not roll the
+	// durable node write back or 500 the request — the response carries a
+	// warning field (and stderr gets a line) so a stale embedding is never
+	// silent.
 	var warning string
+	var vec []float32
+	var summaryHash, model string
 	if embeddingChanged && s.engine.Embedder != nil {
-		embedText := diskNode.Summary
-		if diskNode.Context != "" {
-			ctxSnip := diskNode.Context
-			if len(ctxSnip) > 6000 {
-				ctxSnip = ctxSnip[:6000]
-			}
-			embedText = diskNode.Summary + "\n\n" + ctxSnip
-		}
+		embedText := warren.EmbedText(diskNode)
 		if embedText != "" {
-			vec, err := s.engine.Embedder.Embed(embedText)
+			v, err := s.engine.Embedder.Embed(embedText)
 			if err != nil {
 				warning = "embedding not updated: " + err.Error()
 			} else {
-				// Intentionally a read-write NewStore (NOT NewStoreReadOnly):
-				// this is the editable-mount write path — the node write just
-				// landed in the checkout, so updating its embedding DB is a
-				// legitimate remote write.
-				embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
-				if storeErr != nil {
-					warning = "embedding not updated: " + storeErr.Error()
-				} else {
-					h := sha256.Sum256([]byte(embedText))
-					if upsertErr := embStore.Upsert(diskNode.ID, vec, hex.EncodeToString(h[:]), s.engine.Embedder.Model()); upsertErr != nil {
-						warning = "embedding not updated: " + upsertErr.Error()
-					}
-					if closeErr := embStore.Close(); closeErr != nil && warning == "" {
-						warning = "embedding not updated: " + closeErr.Error()
-					}
-				}
+				vec = v
+				h := sha256.Sum256([]byte(embedText))
+				summaryHash = hex.EncodeToString(h[:])
+				model = s.engine.Embedder.Model()
 			}
 		}
+	}
+	writeWarning, err := warren.WriteEditableNode(mount, diskNode, vec, summaryHash, model)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "save Warren node: "+err.Error())
+		return
+	}
+	if warning == "" {
+		warning = writeWarning
 	}
 	if warning != "" {
 		fmt.Fprintf(os.Stderr, "warning: warren editable write %s: %s\n", id, warning)
@@ -619,7 +616,7 @@ func (s *Server) resolveSearchNode(id string) (*node.Node, *warren.Provenance, b
 		n, ok := s.engine.GetGraph().GetNode(id)
 		return n, nil, ok
 	}
-	vaultID, nodeID, ok := splitQualifiedVaultID(id)
+	vaultID, nodeID, ok := warren.SplitQualifiedVaultID(id)
 	if !ok || s.engine.VaultRegistry == nil {
 		return nil, nil, false
 	}
@@ -978,18 +975,6 @@ func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 		"warren_id": id,
 		"status":    "reloaded",
 	})
-}
-
-func splitQualifiedVaultID(id string) (vaultID, nodeID string, ok bool) {
-	if !strings.HasPrefix(id, "@") {
-		return "", "", false
-	}
-	rest := strings.TrimPrefix(id, "@")
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
 }
 
 func (s *Server) findWarrenMountByVault(vaultID string) (warren.ProjectStatus, bool) {

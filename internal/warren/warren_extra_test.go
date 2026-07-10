@@ -503,7 +503,7 @@ func TestStatusFallsBackToMaterializedWhenSourceGone(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, true); err != nil {
@@ -526,7 +526,7 @@ func TestStatusFallsBackToMaterializedWhenSourceGone(t *testing.T) {
 func TestMaterializeCopyDirErrors(t *testing.T) {
 	marmotDir := t.TempDir()
 	// Source path does not exist.
-	if _, err := Materialize(marmotDir, "w", Project{ProjectID: "p", Path: "projects/p/.marmot"}, t.TempDir()); err == nil {
+	if _, err := Materialize(marmotDir, "w", Project{ProjectID: "p", Path: "projects/p/.marmot"}, t.TempDir(), ""); err == nil {
 		t.Fatal("expected copyFilteredTree stat error for missing source")
 	}
 
@@ -712,7 +712,7 @@ func TestActiveMountsMaterializedFallback(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, true); err != nil {

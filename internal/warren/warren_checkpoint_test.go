@@ -87,7 +87,7 @@ func TestMaterializeCheckpointsWAL(t *testing.T) {
 	const rows = 4
 	_ = newLiveSourceVault(t, source, rows)
 
-	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+	target, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 	if err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}

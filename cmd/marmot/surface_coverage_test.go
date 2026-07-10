@@ -515,13 +515,23 @@ func TestWarrenListRefreshPropose(t *testing.T) {
 	marmotDir := filepath.Join(workspace, ".marmot")
 	warrenRoot := testWarrenRoot(t, "product-platform", "project-a")
 
-	// Empty list first.
-	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "No Warrens registered") {
-		t.Fatalf("warren list empty = %q code=%d", out, code)
+	// Read-only verbs are lazy (C5): before any mutating verb creates the
+	// workspace, list errors and must NOT fabricate a .marmot dir.
+	if _, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren list without a workspace exit code = %d, want 1", code)
+	}
+	if _, err := os.Stat(marmotDir); !os.IsNotExist(err) {
+		t.Fatalf("warren list must not create the workspace, stat err = %v", err)
 	}
 
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
 		t.Fatalf("register exit code = %d", code)
+	}
+
+	// Empty list renders once the workspace exists (registered warrens are
+	// listed below; unregister round-trip is covered elsewhere).
+	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "product-platform") {
+		t.Fatalf("warren list after register = %q code=%d", out, code)
 	}
 
 	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "product-platform") {
@@ -533,15 +543,17 @@ func TestWarrenListRefreshPropose(t *testing.T) {
 	if code := run([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
 		t.Fatalf("warren refresh exit code = %d", code)
 	}
-	if code := run([]string{"warren", "propose", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
-		t.Fatalf("warren propose exit code = %d", code)
+	// D3: propose is real git mechanics now, so the non-git warren fixture is
+	// refused (both with an explicit --warren and via auto-resolve).
+	if code := run([]string{"warren", "propose", "--dir", marmotDir, "--warren", "product-platform"}); code != 1 {
+		t.Fatalf("warren propose on non-git warren exit code = %d, want 1", code)
 	}
 	// refresh/propose resolve a single registered Warren without --warren.
 	if code := run([]string{"warren", "refresh", "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren refresh (auto-resolve) exit code = %d", code)
 	}
-	if code := run([]string{"warren", "propose", "--dir", marmotDir}); code != 0 {
-		t.Fatalf("warren propose (auto-resolve) exit code = %d", code)
+	if code := run([]string{"warren", "propose", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren propose (auto-resolve, non-git warren) exit code = %d, want 1", code)
 	}
 }
 
@@ -1049,9 +1061,13 @@ func TestWarrenMountAllProjects(t *testing.T) {
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
 		t.Fatalf("register exit code = %d", code)
 	}
-	// No positional projects -> mount all from the manifest.
-	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp"}); code != 0 {
-		t.Fatalf("warren mount-all exit code = %d, want 0", code)
+	// Bare zero-arg mount refuses (C3): nothing becomes queryable by accident.
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp"}); code != 1 {
+		t.Fatalf("warren bare mount exit code = %d, want 1", code)
+	}
+	// Explicit --all expands to every manifest project.
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "--all"}); code != 0 {
+		t.Fatalf("warren mount --all exit code = %d, want 0", code)
 	}
 }
 

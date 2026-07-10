@@ -614,6 +614,59 @@ func (s *Store) Count() int {
 	return stmt.ColumnInt(0)
 }
 
+// Models returns the distinct embedding model names stored in the database,
+// sorted. It is read-only-safe (a plain SELECT), so warren doctor can call it
+// on remote vault DBs opened via NewStoreReadOnly to detect cross-project
+// model skew: SearchActive filters WHERE model = ?, so projects indexed with
+// different models silently return no cross-project results.
+func (s *Store) Models() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrStoreClosed
+	}
+	stmt, _, err := s.db.Prepare(`SELECT DISTINCT model FROM embeddings ORDER BY model`)
+	if err != nil {
+		return nil, fmt.Errorf("prepare models: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	var models []string
+	for stmt.Step() {
+		models = append(models, stmt.ColumnText(0))
+	}
+	if err := stmt.Err(); err != nil {
+		return nil, fmt.Errorf("scan models: %w", err)
+	}
+	return models, nil
+}
+
+// HasStatusColumn reports whether the embeddings table carries the status
+// column added by the soft-delete migration. Read-only-safe (PRAGMA
+// table_info never writes): a pre-migration DB opened read-only cannot be
+// migrated in place and fails SearchActive, so warren doctor uses this to
+// tell the owner to re-import instead of leaving the failure silent.
+func (s *Store) HasStatusColumn() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, ErrStoreClosed
+	}
+	stmt, _, err := s.db.Prepare(`PRAGMA table_info(embeddings)`)
+	if err != nil {
+		return false, fmt.Errorf("prepare table_info: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for stmt.Step() {
+		if stmt.ColumnText(1) == "status" {
+			return true, nil
+		}
+	}
+	if err := stmt.Err(); err != nil {
+		return false, fmt.Errorf("scan table_info: %w", err)
+	}
+	return false, nil
+}
+
 // Checkpoint flushes the WAL into the main database file
 // (PRAGMA wal_checkpoint(TRUNCATE)) so a byte-level copy of embeddings.db
 // alone — with the -wal/-shm sidecars excluded — is complete and consistent.

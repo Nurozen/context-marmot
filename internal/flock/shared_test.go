@@ -63,6 +63,54 @@ func TestTryExclusiveBlockedByShared(t *testing.T) {
 	}
 }
 
+// TestTrySharedNonBlocking: TryShared coexists with shared holders, refuses
+// (ok=false, promptly, no block) under an exclusive holder, and succeeds
+// again once the exclusive holder releases — the matrix behind
+// VaultRegistry.ResolveEmbeddingStore, which must never block under its own
+// registry mutex while a foreign `index --force` holds the lock.
+func TestTrySharedNonBlocking(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "vault.read.lock")
+
+	// Coexists with an existing shared reader.
+	sharedRel, err := Shared(lockPath)
+	if err != nil {
+		t.Fatalf("Shared: %v", err)
+	}
+	tryRel, ok, err := TryShared(lockPath)
+	if err != nil || !ok {
+		t.Fatalf("TryShared under shared = ok=%v err=%v, want ok", ok, err)
+	}
+	tryRel()
+	sharedRel()
+
+	// Refuses under an exclusive holder instead of blocking.
+	exRelease, ok, err := TryExclusive(lockPath)
+	if err != nil || !ok {
+		t.Fatalf("TryExclusive: ok=%v err=%v", ok, err)
+	}
+	if rel, ok, err := TryShared(lockPath); err != nil {
+		t.Fatalf("TryShared under exclusive: %v", err)
+	} else if ok {
+		rel()
+		t.Fatal("TryShared must fail while an exclusive holder exists")
+	}
+
+	// Succeeds after release; the shared hold then blocks TryExclusive.
+	exRelease()
+	rel, ok, err := TryShared(lockPath)
+	if err != nil || !ok {
+		t.Fatalf("TryShared after exclusive release: ok=%v err=%v", ok, err)
+	}
+	if _, exOK, err := TryExclusive(lockPath); err != nil {
+		t.Fatalf("TryExclusive under TryShared: %v", err)
+	} else if exOK {
+		t.Fatal("TryExclusive must fail while a TryShared reader holds the lock")
+	}
+	// Release is idempotent.
+	rel()
+	rel()
+}
+
 // TestSharedBlockedByExclusive: a reader attempting to attach while the
 // exclusive (index --force) holder works waits instead of failing; it
 // acquires as soon as the writer releases.

@@ -21,6 +21,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/routes"
 	"github.com/nurozen/context-marmot/internal/summary"
+	"github.com/nurozen/context-marmot/internal/warren"
 )
 
 // ---------------------------------------------------------------------------
@@ -71,7 +72,7 @@ func TestSplitQualifiedVaultID(t *testing.T) {
 		{"@vault/", "", "", false},
 	}
 	for _, c := range cases {
-		v, n, ok := splitQualifiedVaultID(c.in)
+		v, n, ok := warren.SplitQualifiedVaultID(c.in)
 		if ok != c.ok || v != c.vault || n != c.nodeID {
 			t.Errorf("splitQualifiedVaultID(%q) = (%q,%q,%v), want (%q,%q,%v)",
 				c.in, v, n, ok, c.vault, c.nodeID, c.ok)

@@ -361,6 +361,9 @@ func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embed remote node: %v", err)
 	}
+	// Fixture SEEDING must stay a read-write NewStore (NOT NewStoreReadOnly):
+	// this creates and populates the remote vault's DB that the read-only
+	// cross-vault path (A1) is then tested against.
 	embStore, err := embedding.NewStore(filepath.Join(remoteMarmot, ".marmot-data", "embeddings.db"))
 	if err != nil {
 		t.Fatalf("open remote embedding store: %v", err)

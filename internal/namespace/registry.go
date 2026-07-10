@@ -318,15 +318,23 @@ func (r *VaultRegistry) ResolveEmbeddingStore(vaultID string) (*embedding.Store,
 	// `index --force` refuses to delete the DB under this connection. Only
 	// taken when the DB exists — a missing DB errors below anyway, and the
 	// lock's MkdirAll must never fabricate .marmot-data inside a remote
-	// checkout that has none. Best-effort: an unlockable filesystem degrades
-	// to today's unguarded behavior, not a failed search.
+	// checkout that has none. NON-BLOCKING (TryShared, not Shared): this
+	// runs under r.mu, and a foreign `index --force` holds the exclusive
+	// lock across its entire reindex (network embedding calls included) — a
+	// blocking acquire here would wedge every registry operation, including
+	// the daemon watcher's reloads, for minutes. Best-effort: a busy or
+	// unlockable lock degrades to today's unguarded behavior (a warned open
+	// without the read guard), not a failed search.
 	dbPath := filepath.Join(vaultDir, ".marmot-data", "embeddings.db")
 	var release func()
 	if _, statErr := os.Stat(dbPath); statErr == nil {
-		rel, lockErr := flock.Shared(filepath.Join(vaultDir, ".marmot-data", "vault.read.lock"))
-		if lockErr != nil {
+		rel, ok, lockErr := flock.TryShared(filepath.Join(vaultDir, ".marmot-data", "vault.read.lock"))
+		switch {
+		case lockErr != nil:
 			fmt.Fprintf(os.Stderr, "warning: vault %q shared read lock unavailable: %v\n", vaultID, lockErr)
-		} else {
+		case !ok:
+			fmt.Fprintf(os.Stderr, "warning: vault %q is being reindexed (exclusive vault.read.lock held); opening without the read guard\n", vaultID)
+		default:
 			release = rel
 		}
 	}

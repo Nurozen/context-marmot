@@ -25,7 +25,7 @@ func TestMaterializeSkipsFIFO(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := Materialize(marmotDir, "product-platform", project, warrenRoot)
+		_, err := Materialize(marmotDir, "product-platform", project, warrenRoot, "")
 		done <- err
 	}()
 	select {
