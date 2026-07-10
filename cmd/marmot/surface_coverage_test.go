@@ -676,11 +676,7 @@ func TestBuildEngineClassifierNoKey(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			result, err := buildEngine(dir)
-			if err != nil {
-				t.Fatalf("buildEngine: %v", err)
-			}
-			result.Cleanup()
+			hermeticEngine(t, dir)
 		})
 	}
 }
@@ -930,11 +926,14 @@ func TestWarrenInitPositionalID(t *testing.T) {
 func TestWarrenInterspersedFlagsAfterPositionals(t *testing.T) {
 	workspace := t.TempDir()
 	marmotDir := filepath.Join(workspace, ".marmot")
-	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	// Two projects: project-b gets burrowed (trailing --materialize flag
+	// coverage), project-a stays a plain mount so it can become editable —
+	// editable + materialized is refused since the A4 correctness fix.
+	warrenRoot := testWarrenRoot(t, "wp", "project-a", "project-b")
 	if code := run([]string{"warren", "register", "wp", warrenRoot, "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren register positional-first exit code = %d, want 0", code)
 	}
-	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "project-a", "--materialize"}); code != 0 {
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "project-b", "--materialize"}); code != 0 {
 		t.Fatalf("warren mount trailing --materialize exit code = %d, want 0", code)
 	}
 	if code := run([]string{"warren", "edit", "project-a", "--warren", "wp", "--dir", marmotDir}); code != 0 {
@@ -942,6 +941,10 @@ func TestWarrenInterspersedFlagsAfterPositionals(t *testing.T) {
 	}
 	if code := run([]string{"warren", "edit", "project-a", "--off", "--warren", "wp", "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren edit --off positional-first exit code = %d, want 0", code)
+	}
+	// Editable on the burrowed project must now refuse.
+	if code := run([]string{"warren", "edit", "project-b", "--warren", "wp", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren edit on burrowed project exit code = %d, want 1 (editable+materialized refusal)", code)
 	}
 }
 

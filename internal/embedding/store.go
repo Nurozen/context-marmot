@@ -32,8 +32,9 @@ type ScoredResult struct {
 // go-sqlite3 ABI, this can be upgraded to use the vec0 virtual table
 // for hardware-accelerated search.
 type Store struct {
-	db *sqlite3.Conn
-	mu sync.Mutex // sqlite3.Conn is not safe for concurrent use
+	db       *sqlite3.Conn
+	mu       sync.Mutex // sqlite3.Conn is not safe for concurrent use
+	readOnly bool       // opened via NewStoreReadOnly; all writes rejected
 }
 
 // NewStore opens (or creates) an embedding store at the given path.
@@ -67,6 +68,37 @@ func NewStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return s, nil
+}
+
+// NewStoreReadOnly opens an existing embeddings DB without mutating it in
+// any way: no WAL pragma (which would flip the journal mode of someone
+// else's checkout), no schema init, no migration, and a missing file is an
+// error rather than an empty database created in a remote vault. Only
+// busy_timeout is set so reads retry politely against a concurrent writer.
+//
+// Caveat: SQLite requires the -shm index to read a WAL-mode database, so a
+// read-only open of an already-WAL DB still creates empty, inert -wal/-shm
+// sidecars next to it (and needs create permission for them). Remote vaults
+// are local git checkouts today, so this holds; the sidecars carry no data
+// and the main database file is never modified. If vaults ever live on
+// read-only network mounts, an immutable=1 URI open is the escape hatch
+// (unsafe against concurrent writers, hence not the default).
+func NewStoreReadOnly(dbPath string) (*Store, error) {
+	db, err := sqlite3.OpenFlags(dbPath, sqlite3.OPEN_READONLY)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	if err := db.BusyTimeout(5 * time.Second); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	return &Store{db: db, readOnly: true}, nil
+}
+
+// errReadOnly is the uniform rejection for write methods on read-only stores,
+// surfaced instead of a raw SQLITE_READONLY at Exec time.
+func errReadOnly(op string) error {
+	return fmt.Errorf("%s: embedding store opened read-only", op)
 }
 
 func (s *Store) initSchema() error {
@@ -143,6 +175,10 @@ func (s *Store) storedDimensionLocked() (int, error) {
 func (s *Store) Upsert(nodeID string, embedding []float32, summaryHash string, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return errReadOnly("upsert")
+	}
 
 	if len(embedding) == 0 {
 		return fmt.Errorf("embedding must not be empty")
@@ -302,6 +338,10 @@ func (s *Store) checkModel(model string) (bool, error) {
 func (s *Store) UpdateStatus(nodeID, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return errReadOnly("update status")
+	}
 
 	stmt, _, err := s.db.Prepare(`UPDATE embeddings SET status = ? WHERE node_id = ?`)
 	if err != nil {
@@ -487,6 +527,10 @@ func (s *Store) Delete(nodeID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.readOnly {
+		return errReadOnly("delete")
+	}
+
 	stmt, _, err := s.db.Prepare(`DELETE FROM embeddings WHERE node_id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %w", err)
@@ -541,6 +585,22 @@ func (s *Store) Count() int {
 		return 0
 	}
 	return stmt.ColumnInt(0)
+}
+
+// Checkpoint flushes the WAL into the main database file
+// (PRAGMA wal_checkpoint(TRUNCATE)) so a byte-level copy of embeddings.db
+// alone — with the -wal/-shm sidecars excluded — is complete and consistent.
+// A checkpoint is a write-side operation, so it errors on read-only stores
+// (callers never checkpoint an RO store). Under a persistent concurrent
+// reader the checkpoint retries for the 5s busy timeout, then returns
+// SQLITE_BUSY.
+func (s *Store) Checkpoint() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readOnly {
+		return errReadOnly("checkpoint")
+	}
+	return s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }
 
 // Close closes the underlying SQLite connection.

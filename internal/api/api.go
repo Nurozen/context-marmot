@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +37,20 @@ type Server struct {
 
 	// Code-mode executor (lazy: built on first chat call).
 	codeExecutor *codemode.Executor
+
+	// warnedVaults dedupes best-effort cross-vault degradation warnings so a
+	// broken remote vault warns once per vault per process, not per query.
+	warnedVaults sync.Map // map[string]bool
+}
+
+// warnVaultOnce logs a cross-vault degradation warning to stderr at most
+// once per key for this server's lifetime (best-effort search paths would
+// otherwise repeat it on every query).
+func (s *Server) warnVaultOnce(key, format string, args ...any) {
+	if _, loaded := s.warnedVaults.LoadOrStore(key, true); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
 }
 
 // NewServer creates a Server wired to the given engine. If assets is non-nil,

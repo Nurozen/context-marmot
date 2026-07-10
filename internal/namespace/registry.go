@@ -218,9 +218,14 @@ func (r *VaultRegistry) ResolveEmbeddingStore(vaultID string) (*embedding.Store,
 		return nil, fmt.Errorf("unknown vault %q", vaultID)
 	}
 
-	// Open embedding store.
+	// Open embedding store READ-ONLY: this is someone else's vault (often a
+	// git checkout). A read-write open would flip its journal mode to WAL,
+	// create -wal/-shm sidecars, and run schema migrations inside the remote
+	// checkout — a cross-vault *read* must never mutate the remote DB. A
+	// missing DB is an error (the vault was never indexed), not an empty
+	// file silently created in the checkout.
 	dbPath := filepath.Join(vaultDir, ".marmot-data", "embeddings.db")
-	store, err := embedding.NewStore(dbPath)
+	store, err := embedding.NewStoreReadOnly(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open embedding store for vault %q: %w", vaultID, err)
 	}

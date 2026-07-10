@@ -51,6 +51,9 @@ type GraphResponse struct {
 	EdgeCount  int           `json:"edge_count"`
 	HeatPairs  []APIHeatPair `json:"heat_pairs,omitempty"`
 	Namespaces []string      `json:"namespaces,omitempty"` // populated only for _all view
+	// Skipped lists Warren project IDs whose mounts were unavailable or
+	// whose graphs failed to load (Warren graph view only; additive field).
+	Skipped []string `json:"skipped,omitempty"`
 }
 
 // APIHeatPair represents a co-access frequency pair.
@@ -134,6 +137,9 @@ type NodeUpdateResponse struct {
 	NodeID string `json:"node_id"`
 	Hash   string `json:"hash"`
 	Status string `json:"status"`
+	// Warning is set when the node write succeeded but a secondary effect
+	// (e.g. the embedding refresh on an editable Warren mount) failed.
+	Warning string `json:"warning,omitempty"`
 }
 
 // ChatUndoRequest is the JSON body for POST /api/chat/undo. When UndoID is

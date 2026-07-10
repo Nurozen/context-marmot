@@ -100,8 +100,34 @@ func warrenInit(args []string) int {
 			return 1
 		}
 	}
+	// The manifest flock file lives next to _warren.md inside the (usually
+	// git-backed) warren repo; keep it out of version control.
+	if err := ensureGitignoreEntry(*root, "_warren.md.lock"); err != nil {
+		fmt.Fprintf(os.Stderr, "warren init: warning: could not update .gitignore: %v\n", err)
+	}
 	fmt.Printf("Initialized Warren %q at %s\n", *warrenID, *root)
 	return 0
+}
+
+// ensureGitignoreEntry appends entry to <root>/.gitignore (creating the file
+// if absent) unless an identical line is already present.
+func ensureGitignoreEntry(root, entry string) error {
+	path := filepath.Join(root, ".gitignore")
+	data, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return nil
+		}
+	}
+	out := string(data)
+	if out != "" && !strings.HasSuffix(out, "\n") {
+		out += "\n"
+	}
+	out += entry + "\n"
+	return os.WriteFile(path, []byte(out), 0o644)
 }
 
 func warrenProject(args []string) int {

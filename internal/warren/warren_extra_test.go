@@ -527,19 +527,19 @@ func TestMaterializeCopyDirErrors(t *testing.T) {
 	marmotDir := t.TempDir()
 	// Source path does not exist.
 	if _, err := Materialize(marmotDir, "w", Project{ProjectID: "p", Path: "projects/p/.marmot"}, t.TempDir()); err == nil {
-		t.Fatal("expected copyDir stat error for missing source")
+		t.Fatal("expected copyFilteredTree stat error for missing source")
 	}
 
-	// copyDir with a file source (not a directory).
+	// copyFilteredTree with a file source (not a directory).
 	filePath := filepath.Join(t.TempDir(), "afile")
 	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	if err := copyDir(filePath, filepath.Join(t.TempDir(), "dest")); err == nil {
+	if err := copyFilteredTree(filePath, filepath.Join(t.TempDir(), "dest"), nil, nil, nil); err == nil {
 		t.Fatal("expected error copying non-directory source")
 	}
 
-	// Successful copyDir round-trip preserving nested files.
+	// Successful copyFilteredTree round-trip preserving nested files.
 	src := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(src, "sub"), 0o755); err != nil {
 		t.Fatalf("mkdir sub: %v", err)
@@ -548,8 +548,8 @@ func TestMaterializeCopyDirErrors(t *testing.T) {
 		t.Fatalf("write nested: %v", err)
 	}
 	dst := filepath.Join(t.TempDir(), "copy")
-	if err := copyDir(src, dst); err != nil {
-		t.Fatalf("copyDir: %v", err)
+	if err := copyFilteredTree(src, dst, nil, nil, nil); err != nil {
+		t.Fatalf("copyFilteredTree: %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(dst, "sub", "f.txt")); err != nil || string(b) != "hi" {
 		t.Fatalf("nested file not copied: %v %q", err, b)

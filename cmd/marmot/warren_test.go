@@ -377,11 +377,7 @@ func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 
-	result, err := buildEngine(marmotDir)
-	if err != nil {
-		t.Fatalf("buildEngine: %v", err)
-	}
-	defer result.Cleanup()
+	result := hermeticEngine(t, marmotDir)
 	query, err := result.Engine.HandleContextQuery(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "context_query",

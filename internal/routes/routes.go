@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/nurozen/context-marmot/internal/flock"
 	"gopkg.in/yaml.v3"
 )
 
@@ -123,6 +124,13 @@ func SaveTo(rt *RoutingTable, path string) error {
 		return fmt.Errorf("empty routing table path (routing disabled via MARMOT_ROUTES?)")
 	}
 
+	return writeTableAtomic(rt, path)
+}
+
+// writeTableAtomic marshals rt and writes it to path via a uniquely named
+// temp file + rename, so concurrent writers never collide on a shared tmp
+// name. Caller must hold mu.
+func writeTableAtomic(rt *RoutingTable, path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create routing table dir: %w", err)
@@ -133,20 +141,42 @@ func SaveTo(rt *RoutingTable, path string) error {
 		return fmt.Errorf("marshal routing table: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".routes-*.yml.tmp")
+	if err != nil {
+		return fmt.Errorf("create routing table tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write routing table tmp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close routing table tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return fmt.Errorf("chmod routing table tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("commit routing table: %w", err)
 	}
+	success = true
 	return nil
 }
 
 // Update performs an atomic read-modify-write cycle on the routing table.
 // The provided function receives the current table and may modify it.
 // If fn returns nil, the modified table is saved atomically.
+//
+// The RMW cycle runs under an exclusive cross-process flock (sibling
+// routes.yml.lock file) inside the package mu, so concurrent marmot
+// processes cannot drop each other's route registrations. Lock ordering is
+// fixed (process mu, then file flock) — no inversion is possible.
 func Update(fn func(rt *RoutingTable) error) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -156,43 +186,28 @@ func Update(fn func(rt *RoutingTable) error) error {
 		return fmt.Errorf("empty routing table path (routing disabled via MARMOT_ROUTES?)")
 	}
 
-	// Read under lock (bypass LoadFrom which also takes lock)
-	rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read routing table: %w", err)
-	}
-	if err == nil {
-		if err := yaml.Unmarshal(data, rt); err != nil {
-			return fmt.Errorf("parse routing table: %w", err)
+	return flock.WithLock(path+".lock", func() error {
+		// Read under lock (bypass LoadFrom which also takes mu)
+		rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read routing table: %w", err)
 		}
-		if rt.Vaults == nil {
-			rt.Vaults = make(map[string]VaultEntry)
+		if err == nil {
+			if err := yaml.Unmarshal(data, rt); err != nil {
+				return fmt.Errorf("parse routing table: %w", err)
+			}
+			if rt.Vaults == nil {
+				rt.Vaults = make(map[string]VaultEntry)
+			}
 		}
-	}
 
-	if err := fn(rt); err != nil {
-		return err
-	}
+		if err := fn(rt); err != nil {
+			return err
+		}
 
-	// Write under lock (bypass SaveTo which also takes lock)
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create routing table dir: %w", err)
-	}
-	out, err := yaml.Marshal(rt)
-	if err != nil {
-		return fmt.Errorf("marshal routing table: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return fmt.Errorf("write routing table tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit routing table: %w", err)
-	}
-	return nil
+		return writeTableAtomic(rt, path)
+	})
 }
 
 // Get returns the filesystem path for a vault ID, or ("", false) if not found.

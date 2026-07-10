@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -435,6 +436,10 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		return
 	}
 
+	// The node write above is durable; an embedding failure must not roll it
+	// back or 500 the request. Instead the response carries a warning field
+	// (and stderr gets a line) so a stale embedding is never silent.
+	var warning string
 	if embeddingChanged && s.engine.Embedder != nil {
 		embedText := diskNode.Summary
 		if diskNode.Context != "" {
@@ -446,24 +451,44 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		}
 		if embedText != "" {
 			vec, err := s.engine.Embedder.Embed(embedText)
-			if err == nil {
+			if err != nil {
+				warning = "embedding not updated: " + err.Error()
+			} else {
+				// Intentionally a read-write NewStore (NOT NewStoreReadOnly):
+				// this is the editable-mount write path — the node write just
+				// landed in the checkout, so updating its embedding DB is a
+				// legitimate remote write.
 				embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
-				if storeErr == nil {
+				if storeErr != nil {
+					warning = "embedding not updated: " + storeErr.Error()
+				} else {
 					h := sha256.Sum256([]byte(embedText))
-					_ = embStore.Upsert(diskNode.ID, vec, hex.EncodeToString(h[:]), s.engine.Embedder.Model())
-					_ = embStore.Close()
+					if upsertErr := embStore.Upsert(diskNode.ID, vec, hex.EncodeToString(h[:]), s.engine.Embedder.Model()); upsertErr != nil {
+						warning = "embedding not updated: " + upsertErr.Error()
+					}
+					if closeErr := embStore.Close(); closeErr != nil && warning == "" {
+						warning = "embedding not updated: " + closeErr.Error()
+					}
 				}
 			}
 		}
 	}
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "warning: warren editable write %s: %s\n", id, warning)
+	}
 	if s.engine.VaultRegistry != nil {
-		_ = s.engine.VaultRegistry.Refresh(vaultID)
+		if err := s.engine.VaultRegistry.Refresh(vaultID); err != nil {
+			// The registry rewires in Workstream B; for now just make the
+			// stale-cache window visible instead of silent.
+			fmt.Fprintf(os.Stderr, "warning: refresh after editable write failed for vault %q: %v\n", vaultID, err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, NodeUpdateResponse{
-		NodeID: id,
-		Hash:   verify.ComputeNodeHash(diskNode),
-		Status: "updated",
+		NodeID:  id,
+		Hash:    verify.ComputeNodeHash(diskNode),
+		Status:  "updated",
+		Warning: warning,
 	})
 }
 
@@ -542,7 +567,10 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 	if warrenFilter == ns {
 		return nil
 	}
-	mounts, _ := warren.ActiveMounts(s.engine.MarmotDir)
+	mounts, err := warren.ActiveMounts(s.engine.MarmotDir)
+	if err != nil {
+		s.warnVaultOnce("_active_mounts", "warren mounts unavailable for search: %v", err)
+	}
 	mountByVault := make(map[string]warren.ProjectStatus, len(mounts))
 	for _, mount := range mounts {
 		if !mount.Available || mount.VaultID == "" {
@@ -564,10 +592,14 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 		}
 		remoteStore, err := s.engine.VaultRegistry.ResolveEmbeddingStore(vaultID)
 		if err != nil {
+			// Best-effort: local results still return, but the degradation is
+			// visible (once per vault) instead of silently vanishing.
+			s.warnVaultOnce(vaultID, "warren vault %q embedding store unavailable, excluded from search: %v", vaultID, err)
 			continue
 		}
 		remoteResults, err := remoteStore.SearchActive(vec, limit, s.engine.Embedder.Model())
 		if err != nil {
+			s.warnVaultOnce(vaultID, "warren vault %q search failed, excluded from results: %v", vaultID, err)
 			continue
 		}
 		for _, result := range remoteResults {
@@ -852,12 +884,19 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 	nsSet := make(map[string]bool)
 
 	for _, mount := range mounts {
-		if mount.WarrenID != id || !mount.Available {
+		if mount.WarrenID != id {
+			continue
+		}
+		if !mount.Available {
+			fmt.Fprintf(os.Stderr, "warning: warren %q project %q unavailable at %s, skipped from graph\n", id, mount.ProjectID, mount.Path)
+			resp.Skipped = append(resp.Skipped, mount.ProjectID)
 			continue
 		}
 		store := node.NewStore(mount.Path)
 		g, err := graph.LoadGraph(store)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: warren %q project %q graph unreadable: %v (skipped from graph)\n", id, mount.ProjectID, err)
+			resp.Skipped = append(resp.Skipped, mount.ProjectID)
 			continue
 		}
 		nodes := g.AllActiveNodes()
@@ -946,6 +985,9 @@ func splitQualifiedVaultID(id string) (vaultID, nodeID string, ok bool) {
 func (s *Server) findWarrenMountByVault(vaultID string) (warren.ProjectStatus, bool) {
 	mounts, err := warren.ActiveMounts(s.engine.MarmotDir)
 	if err != nil {
+		// Behavior unchanged (callers report "mount not found") but the real
+		// cause is no longer silent.
+		fmt.Fprintf(os.Stderr, "warning: warren mounts unavailable while resolving vault %q: %v\n", vaultID, err)
 		return warren.ProjectStatus{}, false
 	}
 	for _, mount := range mounts {

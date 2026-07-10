@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nurozen/context-marmot/internal/frontmatter"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,6 +45,9 @@ func ParseNode(data []byte, filePath string) (*Node, error) {
 
 // splitFrontmatter separates YAML frontmatter (between --- delimiters) from
 // the remaining markdown body. Returns (frontmatter bytes, body string, error).
+// Delimiters are line-anchored: the closing "---" must be alone on its own
+// line, so "----", "--- foo", or a "---" inside a block scalar never close
+// the frontmatter early.
 func splitFrontmatter(data []byte) ([]byte, string, error) {
 	s := string(data)
 
@@ -53,19 +57,12 @@ func splitFrontmatter(data []byte) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("missing YAML frontmatter (no opening ---)")
 	}
 
-	// Find the closing "---" delimiter.
-	afterOpen := strings.Index(trimmed, "---") + 3
-	rest := trimmed[afterOpen:]
-
-	closingIdx := strings.Index(rest, "\n---")
-	if closingIdx < 0 {
+	fm, body, err := frontmatter.Split([]byte(trimmed))
+	if err != nil {
 		return nil, "", fmt.Errorf("missing YAML frontmatter closing ---")
 	}
 
-	fm := rest[:closingIdx]
-	body := strings.TrimLeft(rest[closingIdx+4:], "\r\n")
-
-	return []byte(fm), body, nil
+	return fm, strings.TrimLeft(body, "\r\n"), nil
 }
 
 // extractSummary returns the text between the end of frontmatter and the first

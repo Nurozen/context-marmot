@@ -41,11 +41,7 @@ func TestBuildEngineEnforcesWarrenBridgesForActiveMounts(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 
-	result, err := buildEngine(marmotDir)
-	if err != nil {
-		t.Fatalf("buildEngine: %v", err)
-	}
-	defer result.Cleanup()
+	result := hermeticEngine(t, marmotDir)
 
 	if result.Engine.NSManager == nil {
 		t.Fatal("expected Warren bridge declarations to attach namespace manager")

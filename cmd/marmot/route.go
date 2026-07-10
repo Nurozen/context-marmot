@@ -86,15 +86,12 @@ func routeAdd(args []string) int {
 		return 1
 	}
 
-	rt, err := routes.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "route add: %v\n", err)
-		return 1
-	}
-
-	rt.Set(vaultID, abs)
-
-	if err := routes.Save(rt); err != nil {
+	// Update takes the routes flock, so a concurrent `route add` in another
+	// process cannot be dropped by this read-modify-write cycle.
+	if err := routes.Update(func(rt *routes.RoutingTable) error {
+		rt.Set(vaultID, abs)
+		return nil
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "route add: %v\n", err)
 		return 1
 	}
@@ -111,18 +108,14 @@ func routeRm(args []string) int {
 
 	vaultID := args[0]
 
-	rt, err := routes.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "route rm: %v\n", err)
-		return 1
-	}
-
-	if !rt.Remove(vaultID) {
-		fmt.Fprintf(os.Stderr, "route rm: vault %q not found\n", vaultID)
-		return 1
-	}
-
-	if err := routes.Save(rt); err != nil {
+	// Update takes the routes flock, so a concurrent route mutation in
+	// another process cannot be dropped by this read-modify-write cycle.
+	if err := routes.Update(func(rt *routes.RoutingTable) error {
+		if !rt.Remove(vaultID) {
+			return fmt.Errorf("vault %q not found", vaultID)
+		}
+		return nil
+	}); err != nil {
 		fmt.Fprintf(os.Stderr, "route rm: %v\n", err)
 		return 1
 	}

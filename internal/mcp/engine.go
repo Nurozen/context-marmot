@@ -44,6 +44,9 @@ type Engine struct {
 	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
 	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
 	nsMgrMu      sync.RWMutex
+	// warnedVaults dedupes best-effort cross-vault degradation warnings so a
+	// broken remote vault warns once per vault per process, not per query.
+	warnedVaults sync.Map // map[string]bool
 	reindexWG     sync.WaitGroup // tracks background neighbor reindexes
 	closing       atomic.Bool    // set by Close; stops new background reindexes
 	reindexOnce   sync.Once      // lazily initializes the reindex context
@@ -69,6 +72,16 @@ func (e *Engine) SetGraph(g *graph.Graph) {
 // GetGraph returns the current in-memory graph.
 func (e *Engine) GetGraph() *graph.Graph {
 	return e.graph.Load()
+}
+
+// warnVaultOnce logs a cross-vault degradation warning to stderr at most
+// once per vault for this engine's lifetime (per-query warnings on the
+// best-effort search path would be too chatty for a long-lived daemon).
+func (e *Engine) warnVaultOnce(vaultID, format string, args ...any) {
+	if _, loaded := e.warnedVaults.LoadOrStore(vaultID, true); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
 }
 
 // NamespaceLock returns the write mutex for the given namespace, creating it if needed.
@@ -157,6 +170,8 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		return nil, fmt.Errorf("engine: create data dir: %w", err)
 	}
 	dbPath := filepath.Join(dataDir, "embeddings.db")
+	// Read-write open is correct here: this is the LOCAL vault's own store
+	// (remote vault stores are opened read-only via the VaultRegistry).
 	es, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engine: open embedding store: %w", err)

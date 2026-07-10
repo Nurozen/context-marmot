@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/frontmatter"
 	"github.com/nurozen/context-marmot/internal/routes"
 	"gopkg.in/yaml.v3"
 )
@@ -164,17 +165,12 @@ func LoadNamespace(nsDir string) (*Namespace, error) {
 
 // parseNamespace extracts YAML frontmatter from _namespace.md content.
 func parseNamespace(data []byte) (*Namespace, error) {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
-		return nil, fmt.Errorf("missing YAML frontmatter")
+	yamlBlock, _, err := frontmatter.Split(data)
+	if err != nil {
+		return nil, err
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return nil, fmt.Errorf("unterminated YAML frontmatter")
-	}
-	yamlBlock := content[3 : end+3]
 	var ns Namespace
-	if err := yaml.Unmarshal([]byte(yamlBlock), &ns); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, &ns); err != nil {
 		return nil, fmt.Errorf("unmarshal namespace: %w", err)
 	}
 	if ns.Name == "" {
@@ -361,17 +357,12 @@ func LoadBridge(path string) (*Bridge, error) {
 
 // parseBridge extracts YAML frontmatter from a bridge manifest.
 func parseBridge(data []byte) (*Bridge, error) {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
-		return nil, fmt.Errorf("missing YAML frontmatter")
+	yamlBlock, _, err := frontmatter.Split(data)
+	if err != nil {
+		return nil, err
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return nil, fmt.Errorf("unterminated YAML frontmatter")
-	}
-	yamlBlock := content[3 : end+3]
 	var b Bridge
-	if err := yaml.Unmarshal([]byte(yamlBlock), &b); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, &b); err != nil {
 		return nil, fmt.Errorf("unmarshal bridge: %w", err)
 	}
 	if b.Source == "" || b.Target == "" {
@@ -538,15 +529,10 @@ type edgeRef struct {
 
 // extractEdgesFromFrontmatter does a lightweight YAML parse to extract edge targets.
 func extractEdgesFromFrontmatter(data []byte) []edgeRef {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
+	yamlBlock, _, err := frontmatter.Split(data)
+	if err != nil {
 		return nil
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return nil
-	}
-	yamlBlock := content[3 : end+3]
 
 	var fm struct {
 		Edges []struct {
@@ -554,7 +540,7 @@ func extractEdgesFromFrontmatter(data []byte) []edgeRef {
 			Relation string `yaml:"relation"`
 		} `yaml:"edges"`
 	}
-	if err := yaml.Unmarshal([]byte(yamlBlock), &fm); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, &fm); err != nil {
 		return nil
 	}
 
@@ -662,12 +648,16 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 		return nil, fmt.Errorf("commit bridge to remote vault: %w", err)
 	}
 
-	// Auto-register both vaults in the global routing table (best-effort).
-	_ = routes.Update(func(rt *routes.RoutingTable) error {
+	// Auto-register both vaults in the global routing table (best-effort:
+	// the bridge manifests are already committed, but an unregistered route
+	// silently breaks cross-vault resolution later — so say so).
+	if err := routes.Update(func(rt *routes.RoutingTable) error {
 		rt.Set(localCfg.VaultID, absLocal)
 		rt.Set(remoteCfg.VaultID, absRemote)
 		return nil
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: bridge created but vaults not auto-registered in routes.yml: %v — run 'marmot route add' manually\n", err)
+	}
 
 	return bridge, nil
 }

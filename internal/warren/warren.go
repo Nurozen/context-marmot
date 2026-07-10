@@ -12,6 +12,9 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/nurozen/context-marmot/internal/embedding"
+	"github.com/nurozen/context-marmot/internal/flock"
+	"github.com/nurozen/context-marmot/internal/frontmatter"
 	"github.com/nurozen/context-marmot/internal/node"
 	"gopkg.in/yaml.v3"
 )
@@ -20,6 +23,10 @@ const (
 	ManifestFileName = "_warren.md"
 	MarmotDirName    = ".marmot"
 )
+
+// warnWriter receives degradation warnings (unreadable manifests/metadata).
+// Package-level so tests can capture it; production always uses stderr.
+var warnWriter io.Writer = os.Stderr
 
 // Manifest describes a Warren repository.
 type Manifest struct {
@@ -128,16 +135,28 @@ func Init(root, warrenID string) (*Manifest, error) {
 	if err := ValidateWarrenID(warrenID); err != nil {
 		return nil, err
 	}
-	manifest, body, err := LoadManifest(root)
+	path, err := manifestPath(root)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		manifest = &Manifest{WarrenID: warrenID}
-	} else if manifest.WarrenID != warrenID {
-		return nil, fmt.Errorf("warren already initialized as %q", manifest.WarrenID)
+		return nil, err
 	}
-	if err := SaveManifest(root, manifest, body); err != nil {
+	var manifest *Manifest
+	err = flock.WithLock(path+".lock", func() error {
+		m, body, err := LoadManifest(root)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			m, body = &Manifest{WarrenID: warrenID}, ""
+		} else if m.WarrenID != warrenID {
+			return fmt.Errorf("warren already initialized as %q", m.WarrenID)
+		}
+		if err := SaveManifest(root, m, body); err != nil {
+			return err
+		}
+		manifest = m
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return manifest, nil
@@ -145,10 +164,6 @@ func Init(root, warrenID string) (*Manifest, error) {
 
 // AddProject registers a project in the Warren manifest and writes project metadata.
 func AddProject(root string, project Project) (*Manifest, error) {
-	manifest, body, err := LoadManifest(root)
-	if err != nil {
-		return nil, err
-	}
 	project.ProjectID = strings.TrimSpace(project.ProjectID)
 	if project.ProjectID == "" {
 		project.ProjectID = generateProjectIDFromPath(project.Path)
@@ -161,16 +176,19 @@ func AddProject(root string, project Project) (*Manifest, error) {
 	if err := ValidateProjectID(project.ProjectID); err != nil {
 		return nil, err
 	}
-	for _, existing := range manifest.Projects {
-		if existing.ProjectID == project.ProjectID {
-			return nil, fmt.Errorf("project %q already exists", project.ProjectID)
+	manifest, err := updateManifest(root, func(m *Manifest) error {
+		for _, existing := range m.Projects {
+			if existing.ProjectID == project.ProjectID {
+				return fmt.Errorf("project %q already exists", project.ProjectID)
+			}
 		}
-	}
-	if err := preflightProjectMetadata(root, manifest.WarrenID, project); err != nil {
-		return nil, err
-	}
-	manifest.Projects = append(manifest.Projects, project)
-	if err := SaveManifest(root, manifest, body); err != nil {
+		if err := preflightProjectMetadata(root, m.WarrenID, project); err != nil {
+			return err
+		}
+		m.Projects = append(m.Projects, project)
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	if err := ensureProjectMetadata(root, manifest.WarrenID, project); err != nil {
@@ -180,7 +198,34 @@ func AddProject(root string, project Project) (*Manifest, error) {
 }
 
 // ImportProject copies a local .marmot vault into the Warren and registers it.
+//
+// The whole load -> validate -> copy -> rename -> save sequence runs under
+// the manifest flock: imports are rare, and correctness requires that the
+// manifest snapshot the import validated against is still current when it is
+// saved. This means the lock is held for the duration of the vault copy.
 func ImportProject(root, sourceMarmotDir string, project Project, opts ImportOptions) (*Manifest, error) {
+	path, err := manifestPath(root)
+	if err != nil {
+		return nil, err
+	}
+	var saved *Manifest
+	err = flock.WithLock(path+".lock", func() error {
+		m, err := importProjectLocked(root, sourceMarmotDir, project, opts)
+		if err != nil {
+			return err
+		}
+		saved = m
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return saved, nil
+}
+
+// importProjectLocked is ImportProject's body; the caller must hold the
+// manifest flock.
+func importProjectLocked(root, sourceMarmotDir string, project Project, opts ImportOptions) (*Manifest, error) {
 	manifest, body, err := LoadManifest(root)
 	if err != nil {
 		return nil, err
@@ -279,6 +324,9 @@ func ImportProject(root, sourceMarmotDir string, project Project, opts ImportOpt
 			_ = os.RemoveAll(tmp)
 		}
 	}()
+	// Flush the source DB's WAL so the sidecar-excluding copy below cannot
+	// lose un-checkpointed writes (e.g. from a marmot serve holding the DB).
+	checkpointEmbeddings(source)
 	if err := copyMarmotVault(source, tmp, opts); err != nil {
 		return nil, err
 	}
@@ -324,34 +372,29 @@ func RemoveProject(root, projectID string) (*Manifest, error) {
 	if err := ValidateProjectID(projectID); err != nil {
 		return nil, err
 	}
-	manifest, body, err := LoadManifest(root)
-	if err != nil {
-		return nil, err
-	}
-	projects := manifest.Projects[:0]
-	found := false
-	for _, project := range manifest.Projects {
-		if project.ProjectID == projectID {
-			found = true
-			continue
+	return updateManifest(root, func(manifest *Manifest) error {
+		projects := manifest.Projects[:0]
+		found := false
+		for _, project := range manifest.Projects {
+			if project.ProjectID == projectID {
+				found = true
+				continue
+			}
+			projects = append(projects, project)
 		}
-		projects = append(projects, project)
-	}
-	if !found {
-		return nil, fmt.Errorf("project %q does not exist", projectID)
-	}
-	manifest.Projects = projects
-	bridges := manifest.Bridges[:0]
-	for _, bridge := range manifest.Bridges {
-		if bridge.Source != projectID && bridge.Target != projectID {
-			bridges = append(bridges, bridge)
+		if !found {
+			return fmt.Errorf("project %q does not exist", projectID)
 		}
-	}
-	manifest.Bridges = bridges
-	if err := SaveManifest(root, manifest, body); err != nil {
-		return nil, err
-	}
-	return manifest, nil
+		manifest.Projects = projects
+		bridges := manifest.Bridges[:0]
+		for _, bridge := range manifest.Bridges {
+			if bridge.Source != projectID && bridge.Target != projectID {
+				bridges = append(bridges, bridge)
+			}
+		}
+		manifest.Bridges = bridges
+		return nil
+	})
 }
 
 // RenameProject renames a project ID in the manifest, project metadata, and bridges.
@@ -365,34 +408,33 @@ func RenameProject(root, oldID, newID string) (*Manifest, error) {
 	if oldID == newID {
 		return nil, fmt.Errorf("new project ID must differ from old project ID")
 	}
-	manifest, body, err := LoadManifest(root)
-	if err != nil {
-		return nil, err
-	}
-	found := false
 	var renamed Project
-	for i := range manifest.Projects {
-		if manifest.Projects[i].ProjectID == newID {
-			return nil, fmt.Errorf("project %q already exists", newID)
+	manifest, err := updateManifest(root, func(manifest *Manifest) error {
+		found := false
+		for i := range manifest.Projects {
+			if manifest.Projects[i].ProjectID == newID {
+				return fmt.Errorf("project %q already exists", newID)
+			}
+			if manifest.Projects[i].ProjectID == oldID {
+				found = true
+				manifest.Projects[i].ProjectID = newID
+				renamed = manifest.Projects[i]
+			}
 		}
-		if manifest.Projects[i].ProjectID == oldID {
-			found = true
-			manifest.Projects[i].ProjectID = newID
-			renamed = manifest.Projects[i]
+		if !found {
+			return fmt.Errorf("project %q does not exist", oldID)
 		}
-	}
-	if !found {
-		return nil, fmt.Errorf("project %q does not exist", oldID)
-	}
-	for i := range manifest.Bridges {
-		if manifest.Bridges[i].Source == oldID {
-			manifest.Bridges[i].Source = newID
+		for i := range manifest.Bridges {
+			if manifest.Bridges[i].Source == oldID {
+				manifest.Bridges[i].Source = newID
+			}
+			if manifest.Bridges[i].Target == oldID {
+				manifest.Bridges[i].Target = newID
+			}
 		}
-		if manifest.Bridges[i].Target == oldID {
-			manifest.Bridges[i].Target = newID
-		}
-	}
-	if err := SaveManifest(root, manifest, body); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	if err := ensureProjectMetadata(root, manifest.WarrenID, renamed); err != nil {
@@ -403,36 +445,31 @@ func RenameProject(root, oldID, newID string) (*Manifest, error) {
 
 // AddBridge adds or merges allowed relations for a cross-project bridge.
 func AddBridge(root string, bridge Bridge) (*Manifest, error) {
-	manifest, body, err := LoadManifest(root)
-	if err != nil {
-		return nil, err
-	}
 	normalizeBridge(&bridge)
 	if err := validateBridge(bridge); err != nil {
 		return nil, err
 	}
-	known := projectSet(manifest.Projects)
-	if !known[bridge.Source] {
-		return nil, fmt.Errorf("bridge source project %q does not exist", bridge.Source)
-	}
-	if !known[bridge.Target] {
-		return nil, fmt.Errorf("bridge target project %q does not exist", bridge.Target)
-	}
-	merged := false
-	for i := range manifest.Bridges {
-		if manifest.Bridges[i].Source == bridge.Source && manifest.Bridges[i].Target == bridge.Target {
-			manifest.Bridges[i].Relations = uniqueSorted(append(manifest.Bridges[i].Relations, bridge.Relations...))
-			merged = true
-			break
+	return updateManifest(root, func(manifest *Manifest) error {
+		known := projectSet(manifest.Projects)
+		if !known[bridge.Source] {
+			return fmt.Errorf("bridge source project %q does not exist", bridge.Source)
 		}
-	}
-	if !merged {
-		manifest.Bridges = append(manifest.Bridges, bridge)
-	}
-	if err := SaveManifest(root, manifest, body); err != nil {
-		return nil, err
-	}
-	return manifest, nil
+		if !known[bridge.Target] {
+			return fmt.Errorf("bridge target project %q does not exist", bridge.Target)
+		}
+		merged := false
+		for i := range manifest.Bridges {
+			if manifest.Bridges[i].Source == bridge.Source && manifest.Bridges[i].Target == bridge.Target {
+				manifest.Bridges[i].Relations = uniqueSorted(append(manifest.Bridges[i].Relations, bridge.Relations...))
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			manifest.Bridges = append(manifest.Bridges, bridge)
+		}
+		return nil
+	})
 }
 
 // ListBridges returns normalized Warren bridges.
@@ -461,34 +498,29 @@ func RemoveBridge(root, source, target string, relations ...string) (*Manifest, 
 			return nil, err
 		}
 	}
-	manifest, body, err := LoadManifest(root)
-	if err != nil {
-		return nil, err
-	}
-	found := false
-	bridges := manifest.Bridges[:0]
-	for _, bridge := range manifest.Bridges {
-		if bridge.Source != source || bridge.Target != target {
-			bridges = append(bridges, bridge)
-			continue
+	return updateManifest(root, func(manifest *Manifest) error {
+		found := false
+		bridges := manifest.Bridges[:0]
+		for _, bridge := range manifest.Bridges {
+			if bridge.Source != source || bridge.Target != target {
+				bridges = append(bridges, bridge)
+				continue
+			}
+			found = true
+			if len(relations) == 0 {
+				continue
+			}
+			bridge.Relations = removeNames(bridge.Relations, relations)
+			if len(bridge.Relations) > 0 {
+				bridges = append(bridges, bridge)
+			}
 		}
-		found = true
-		if len(relations) == 0 {
-			continue
+		if !found {
+			return fmt.Errorf("bridge %q -> %q does not exist", source, target)
 		}
-		bridge.Relations = removeNames(bridge.Relations, relations)
-		if len(bridge.Relations) > 0 {
-			bridges = append(bridges, bridge)
-		}
-	}
-	if !found {
-		return nil, fmt.Errorf("bridge %q -> %q does not exist", source, target)
-	}
-	manifest.Bridges = bridges
-	if err := SaveManifest(root, manifest, body); err != nil {
-		return nil, err
-	}
-	return manifest, nil
+		manifest.Bridges = bridges
+		return nil
+	})
 }
 
 // Doctor validates that the Warren manifest points to coherent project metadata.
@@ -604,14 +636,7 @@ func Doctor(root string) (DoctorReport, error) {
 
 // Format rewrites the manifest with canonical YAML while preserving markdown body text.
 func Format(root string) (*Manifest, error) {
-	manifest, body, err := LoadManifest(root)
-	if err != nil {
-		return nil, err
-	}
-	if err := SaveManifest(root, manifest, body); err != nil {
-		return nil, err
-	}
-	return manifest, nil
+	return updateManifest(root, func(*Manifest) error { return nil })
 }
 
 // GenerateProjectID converts display text into a safe Warren project ID.
@@ -833,6 +858,12 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 			if !known[project] {
 				return fmt.Errorf("project %q is not registered in Warren %q", project, warrenID)
 			}
+			// A materialized (burrowed) cache never syncs edits back to the
+			// checkout, so materializing an editable project would silently
+			// strand its future edits in the cache.
+			if materialized && containsName(entry.EditableProjects, project) {
+				return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or mount without --materialize", project, warrenID, project, warrenID)
+			}
 			entry.ActiveProjects = addName(entry.ActiveProjects, project)
 		}
 		if materialized {
@@ -859,6 +890,18 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 		}
 		if !known[projectID] {
 			return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
+		}
+		// Refuse editable on a burrowed project: edits would land in the
+		// materialized cache and never sync back to the checkout, while
+		// `warren propose` tells the user to commit a checkout that never
+		// received them. Materialized is warren-wide, so the per-project
+		// ground truth is the existence of the burrow cache dir. Disabling
+		// (--off) stays allowed regardless.
+		if editable && entry.Materialized {
+			cached := materializedProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, projectID)
+			if dirExists(cached) {
+				return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — delete the burrow cache at %s or re-mount without --materialize before enabling edit", projectID, warrenID, cached)
+			}
 		}
 		entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
 		if editable {
@@ -892,9 +935,9 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 	for _, project := range manifest.Projects {
 		sourceDir := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
 		marmotDir := preferredProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, entry, project)
-		meta, _, _ := LoadProjectMetadata(marmotDir)
+		meta := loadProjectMetadataWarn(marmotDir, warrenID, project.ProjectID)
 		if meta == nil && marmotDir != sourceDir {
-			meta, _, _ = LoadProjectMetadata(sourceDir)
+			meta = loadProjectMetadataWarn(sourceDir, warrenID, project.ProjectID)
 		}
 		vaultID := ""
 		if meta != nil {
@@ -928,7 +971,10 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 		manifest, _, err := LoadManifest(entry.Path)
 		if err != nil {
 			if entry.Materialized {
+				// The burrow cache keeps the mounts alive without the source.
 				mounts = append(mounts, materializedStatuses(marmotDir, warrenID, entry)...)
+			} else {
+				fmt.Fprintf(warnWriter, "warning: warren %q manifest unreadable at %s: %v (mounts skipped)\n", warrenID, entry.Path, err)
 			}
 			continue
 		}
@@ -942,7 +988,7 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 				continue
 			}
 			marmotPath := preferredProjectPath(marmotDir, warrenID, entry, project)
-			meta, _, _ := LoadProjectMetadata(marmotPath)
+			meta := loadProjectMetadataWarn(marmotPath, warrenID, projectID)
 			vaultID := projectID
 			if meta != nil && meta.VaultID != "" {
 				vaultID = meta.VaultID
@@ -969,21 +1015,51 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 	return mounts, nil
 }
 
-// Materialize copies a Warren project vault into the local workspace cache.
+// Materialize copies a Warren project vault into the local workspace cache
+// through the same hardened copier as import (secrets and DB sidecars
+// excluded, symlinks and irregular files skipped, permissions narrowed to
+// Perm bits). The copy goes to a temp sibling and is swapped in with a
+// rename, so a failed burrow never leaves a half-written cache and a
+// re-burrow never resurrects files deleted from the source.
 func Materialize(workspaceMarmotDir, warrenID string, project Project, warrenRoot string) (string, error) {
 	source := filepath.Join(warrenRoot, filepath.FromSlash(project.Path))
 	target := materializedProjectPath(workspaceMarmotDir, warrenID, project.ProjectID)
-	if err := copyDir(source, target); err != nil {
+	// Flush the source DB's WAL so the sidecar-excluding copy is complete.
+	checkpointEmbeddings(source)
+	tmp := target + ".tmp"
+	_ = os.RemoveAll(tmp)
+	if err := copyFilteredTree(source, tmp, nil, skipBurrowFile, nil); err != nil {
+		_ = os.RemoveAll(tmp)
 		return "", err
 	}
+	if err := os.RemoveAll(target); err != nil {
+		_ = os.RemoveAll(tmp)
+		return "", fmt.Errorf("clear stale burrow cache: %w", err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.RemoveAll(tmp)
+		return "", fmt.Errorf("commit burrow cache: %w", err)
+	}
 	return target, nil
+}
+
+// loadProjectMetadataWarn loads project metadata, warning on stderr when the
+// file exists but cannot be read or parsed (silent degradation would hide
+// vault-ID resolution failures). A missing file is a normal state (project
+// not imported through the warren flow) and stays silent.
+func loadProjectMetadataWarn(marmotDir, warrenID, projectID string) *ProjectMetadata {
+	meta, _, err := LoadProjectMetadata(marmotDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(warnWriter, "warning: warren %q project %q metadata unreadable at %s: %v\n", warrenID, projectID, marmotDir, err)
+	}
+	return meta
 }
 
 func materializedStatuses(workspaceMarmotDir, warrenID string, entry WorkspaceWarren) []ProjectStatus {
 	var statuses []ProjectStatus
 	for _, projectID := range entry.ActiveProjects {
 		cached := materializedProjectPath(workspaceMarmotDir, warrenID, projectID)
-		meta, _, _ := LoadProjectMetadata(cached)
+		meta := loadProjectMetadataWarn(cached, warrenID, projectID)
 		vaultID := projectID
 		if meta != nil && meta.VaultID != "" {
 			vaultID = meta.VaultID
@@ -1009,13 +1085,25 @@ func workspaceMarmotDir(workspaceRoot string) string {
 }
 
 func preferredProjectPath(workspaceMarmotDir, warrenID string, entry WorkspaceWarren, project Project) string {
+	checkout := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
+	// Editable always wins over a materialized cache: documented behavior is
+	// that editable writes go to the project's own vault (the checkout). A
+	// stale _warren.md carrying both flags (hand-edited, or written by an
+	// old binary before the mount/edit refusal existed) must not silently
+	// redirect writes into a cache that never syncs back.
+	if containsName(entry.EditableProjects, project.ProjectID) {
+		if entry.Materialized && dirExists(materializedProjectPath(workspaceMarmotDir, warrenID, project.ProjectID)) {
+			fmt.Fprintf(warnWriter, "warning: warren %q project %q is both editable and materialized; using the checkout path %s (the materialized cache is ignored for editable projects)\n", warrenID, project.ProjectID, checkout)
+		}
+		return checkout
+	}
 	if entry.Materialized {
 		cached := materializedProjectPath(workspaceMarmotDir, warrenID, project.ProjectID)
 		if dirExists(cached) {
 			return cached
 		}
 	}
-	return filepath.Join(entry.Path, filepath.FromSlash(project.Path))
+	return checkout
 }
 
 func materializedProjectPath(workspaceMarmotDir, warrenID, projectID string) string {
@@ -1062,18 +1150,65 @@ func ValidateWarrenID(id string) error {
 	return nil
 }
 
+// updateWorkspaceState runs a Load -> mutate -> Save cycle on the workspace
+// _warren.md under an exclusive cross-process flock so concurrent mutations
+// (mount/edit/register from separate marmot processes) cannot drop each
+// other's writes.
 func updateWorkspaceState(workspaceRoot string, fn func(*WorkspaceState) error) (*WorkspaceState, error) {
-	state, body, err := LoadWorkspaceState(workspaceRoot)
+	statePath, err := workspaceStatePath(workspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	if err := fn(state); err != nil {
-		return nil, err
-	}
-	if err := SaveWorkspaceState(workspaceRoot, state, body); err != nil {
+	var state *WorkspaceState
+	err = flock.WithLock(statePath+".lock", func() error {
+		s, body, err := LoadWorkspaceState(workspaceRoot)
+		if err != nil {
+			return err
+		}
+		if err := fn(s); err != nil {
+			return err
+		}
+		if err := SaveWorkspaceState(workspaceRoot, s, body); err != nil {
+			return err
+		}
+		state = s
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return state, nil
+}
+
+// updateManifest runs a LoadManifest -> mutate -> SaveManifest cycle on the
+// Warren manifest under an exclusive cross-process flock (sibling
+// _warren.md.lock file), preserving the markdown body. Every manifest
+// mutation must go through this helper (or take the same lock) so concurrent
+// warren CLI invocations cannot drop each other's updates.
+func updateManifest(root string, fn func(*Manifest) error) (*Manifest, error) {
+	path, err := manifestPath(root)
+	if err != nil {
+		return nil, err
+	}
+	var manifest *Manifest
+	err = flock.WithLock(path+".lock", func() error {
+		m, body, err := LoadManifest(root)
+		if err != nil {
+			return err
+		}
+		if err := fn(m); err != nil {
+			return err
+		}
+		if err := SaveManifest(root, m, body); err != nil {
+			return err
+		}
+		manifest = m
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return manifest, nil
 }
 
 func manifestPath(root string) (string, error) {
@@ -1108,17 +1243,11 @@ func validateNonEmptyPath(label, path string) error {
 }
 
 func parseMarkdownYAML(data []byte, out any) (string, error) {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
-		return "", fmt.Errorf("missing YAML frontmatter")
+	yamlBlock, body, err := frontmatter.Split(data)
+	if err != nil {
+		return "", err
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return "", fmt.Errorf("unterminated YAML frontmatter")
-	}
-	yamlBlock := content[3 : end+3]
-	body := strings.TrimPrefix(content[end+6:], "\n")
-	if err := yaml.Unmarshal([]byte(yamlBlock), out); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, out); err != nil {
 		return "", fmt.Errorf("unmarshal YAML: %w", err)
 	}
 	return body, nil
@@ -1286,7 +1415,25 @@ func validateProjectPath(base, projectPath string) (string, error) {
 	return clean, nil
 }
 
-func copyDir(source, target string) error {
+// copyFilteredTree walks source and copies regular files to target. It is
+// the single hardened copier shared by import and burrow:
+//
+//   - symlinks are never followed (skipped with a stderr note — a
+//     symlink-to-dir would otherwise be walked as a plain file or escape the
+//     tree);
+//   - irregular files (FIFOs, sockets, devices) are skipped, so a FIFO can
+//     never hang the copy in io.Copy;
+//   - directories are created 0o755 and file permissions are copied via
+//     Mode().Perm() only (no setuid/setgid/sticky propagation);
+//   - skipDir/skipFile receive slash-separated paths relative to source;
+//   - transformFile (optional, may be nil) lets a caller rewrite specific
+//     files (import's _config.md sanitization); returning handled=true
+//     suppresses the plain copy.
+func copyFilteredTree(source, target string,
+	skipDir func(relSlash string) bool,
+	skipFile func(relSlash string) bool,
+	transformFile func(relSlash, srcPath string, perm os.FileMode) (handled bool, err error),
+) error {
 	info, err := os.Stat(source)
 	if err != nil {
 		return fmt.Errorf("stat source: %w", err)
@@ -1294,36 +1441,10 @@ func copyDir(source, target string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("source %q is not a directory", source)
 	}
-	return filepath.WalkDir(source, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(source, path)
-		if err != nil {
-			return err
-		}
-		dest := filepath.Join(target, rel)
-		if d.IsDir() {
-			return os.MkdirAll(dest, 0o755)
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		return copyRegularFile(path, dest, info.Mode())
-	})
-}
-
-var importAlwaysExcluded = map[string]bool{
-	".marmot-data/.env":               true,
-	".marmot-data/embeddings.db-wal":  true,
-	".marmot-data/embeddings.db-shm":  true,
-	".obsidian/workspace.json":        true,
-	".obsidian/workspace-mobile.json": true,
-}
-
-func copyMarmotVault(source, target string, opts ImportOptions) error {
 	root := filepath.Clean(source)
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return fmt.Errorf("create copy target: %w", err)
+	}
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -1336,13 +1457,17 @@ func copyMarmotVault(source, target string, opts ImportOptions) error {
 			return err
 		}
 		relSlash := filepath.ToSlash(rel)
+		if d.Type()&os.ModeSymlink != 0 {
+			fmt.Fprintf(warnWriter, "warning: skipping symlink %s\n", relSlash)
+			return nil
+		}
 		if d.IsDir() {
-			if shouldSkipImportDir(relSlash, opts) {
+			if skipDir != nil && skipDir(relSlash) {
 				return filepath.SkipDir
 			}
 			return os.MkdirAll(filepath.Join(target, rel), 0o755)
 		}
-		if shouldSkipImportFile(relSlash, opts) {
+		if skipFile != nil && skipFile(relSlash) {
 			return nil
 		}
 		info, err := d.Info()
@@ -1356,15 +1481,75 @@ func copyMarmotVault(source, target string, opts ImportOptions) error {
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return err
 		}
-		if relSlash == "_config.md" {
-			data, err := sanitizedConfigBytes(path)
+		if transformFile != nil {
+			handled, err := transformFile(relSlash, path, info.Mode().Perm())
 			if err != nil {
-				return fmt.Errorf("sanitize _config.md: %w", err)
+				return err
 			}
-			return os.WriteFile(dest, data, info.Mode().Perm())
+			if handled {
+				return nil
+			}
 		}
 		return copyRegularFile(path, dest, info.Mode().Perm())
 	})
+}
+
+// checkpointEmbeddings best-effort flushes the WAL of the source vault's
+// embeddings DB so the sidecar-excluding copy that follows is complete: the
+// copies skip -wal/-shm, and without a checkpoint any un-checkpointed writes
+// would be silently lost from the copy. Only runs when a non-empty -wal
+// sidecar exists (no WAL means nothing to flush and no reason to touch the
+// file). Failure degrades to the documented point-in-time semantics (the
+// last checkpoint), with a stderr warning.
+func checkpointEmbeddings(sourceMarmotDir string) {
+	dbPath := filepath.Join(sourceMarmotDir, ".marmot-data", "embeddings.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return // no DB, nothing to flush
+	}
+	walInfo, err := os.Stat(dbPath + "-wal")
+	if err != nil || walInfo.Size() == 0 {
+		return // no hot WAL, the main file is already complete
+	}
+	st, err := embedding.NewStore(dbPath)
+	if err != nil {
+		fmt.Fprintf(warnWriter, "warning: cannot open %s to checkpoint before copy: %v; copying last-checkpointed state\n", dbPath, err)
+		return
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.Checkpoint(); err != nil {
+		fmt.Fprintf(warnWriter, "warning: wal_checkpoint failed for %s: %v; copying last-checkpointed state\n", dbPath, err)
+	}
+}
+
+var importAlwaysExcluded = map[string]bool{
+	".marmot-data/.env":               true,
+	".marmot-data/embeddings.db-wal":  true,
+	".marmot-data/embeddings.db-shm":  true,
+	".obsidian/workspace.json":        true,
+	".obsidian/workspace-mobile.json": true,
+}
+
+func copyMarmotVault(source, target string, opts ImportOptions) error {
+	return copyFilteredTree(source, target,
+		func(relSlash string) bool { return shouldSkipImportDir(relSlash, opts) },
+		func(relSlash string) bool { return shouldSkipImportFile(relSlash, opts) },
+		func(relSlash, srcPath string, perm os.FileMode) (bool, error) {
+			if relSlash != "_config.md" {
+				return false, nil
+			}
+			data, err := sanitizedConfigBytes(srcPath)
+			if err != nil {
+				return false, fmt.Errorf("sanitize _config.md: %w", err)
+			}
+			return true, os.WriteFile(filepath.Join(target, "_config.md"), data, perm)
+		})
+}
+
+// skipBurrowFile excludes secrets and DB sidecars from burrow copies. The
+// checkout was already sanitized at import time, so no _config.md transform
+// is applied — burrow stays byte-faithful for everything it copies.
+func skipBurrowFile(relSlash string) bool {
+	return importAlwaysExcluded[relSlash]
 }
 
 func shouldSkipImportDir(relSlash string, opts ImportOptions) bool {

@@ -72,6 +72,8 @@ func runIndexPipeline(dir string, force bool) error {
 		_ = os.Remove(dbPath + "-shm")
 	}
 
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
@@ -390,6 +392,9 @@ func emptyNamespaceManager(dir string) *namespace.Manager {
 func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*namespace.Bridge, bool) {
 	state, _, err := warren.LoadWorkspaceStateFromMarmot(marmotDir)
 	if err != nil {
+		// Fail-open is today's semantic (a broken warren must not brick local
+		// queries), but the missing enforcement must not be silent.
+		fmt.Fprintf(os.Stderr, "warning: warren workspace state unreadable (%s): %v — cross-vault bridge policy NOT enforced\n", marmotDir, err)
 		return nil, false
 	}
 
@@ -412,6 +417,7 @@ func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*n
 	for warrenID, entry := range state.Warrens {
 		manifest, _, err := warren.LoadManifest(entry.Path)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: warren %q bridge manifest unreadable (%s): %v — cross-vault bridge policy NOT enforced for this warren\n", warrenID, entry.Path, err)
 			continue
 		}
 		if len(manifest.Bridges) > 0 {
@@ -983,6 +989,8 @@ func runStatusPipeline(dir string) error {
 	// Check embedding store.
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
 	var embeddingCount int
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	if embStore, err := embedding.NewStore(dbPath); err == nil {
 		embeddingCount = embStore.Count()
 		_ = embStore.Close()
@@ -1080,6 +1088,8 @@ func watchLoop(ctx context.Context, dir string) error {
 	}
 
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
@@ -1284,6 +1294,8 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 
 	// 4. Open embedding store.
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)

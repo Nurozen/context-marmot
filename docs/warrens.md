@@ -90,6 +90,17 @@ The workspace `_warren.md` records registered Warren paths, active projects,
 editable projects, and whether materialized caches are enabled. This is local
 workspace configuration; keep the Warren repo itself in git.
 
+Mutations of both `_warren.md` roles are serialized across processes with a
+sibling `_warren.md.lock` flock file, so concurrent `marmot warren` commands
+never drop each other's changes. The lock file is inert local state:
+`marmot warren init` adds `_warren.md.lock` to the Warren repo's `.gitignore`,
+and the workspace-side lock lives under `.marmot/` next to the state it
+guards. The same mechanism protects `~/.marmot/routes.yml`
+(`routes.yml.lock`). Locks are released by the kernel when a process exits —
+even on SIGKILL — so there is never a stale lock to clean up. (On network
+filesystems BSD flock semantics vary by server; on Windows the lock degrades
+to today's last-writer-wins behavior.)
+
 ## Build and maintain a Warren
 
 Run authoring commands inside a Warren repository, or pass `--warren-dir` to
@@ -120,6 +131,18 @@ always excludes transient or sensitive files:
 - `.marmot-data/embeddings.db-shm`
 - `.obsidian/workspace.json`
 - `.obsidian/workspace-mobile.json`
+
+Before copying, import checkpoints the source `embeddings.db` (flushing its
+write-ahead log into the main database file), so excluding the `-wal`/`-shm`
+sidecars never loses recent writes — the copy is a complete point-in-time
+snapshot even while a `marmot serve` holds the database open.
+
+Materialized (burrowed) copies use the same hardened copier and the same
+exclusion list: burrowing a project never copies `.marmot-data/.env` or DB
+sidecars into the local cache, never follows symlinks, and skips FIFOs and
+other irregular files. Re-burrowing replaces the cache atomically, so files
+deleted from the Warren checkout disappear from the cache instead of being
+resurrected.
 
 `_heat/` is excluded by default; pass `--include-heat` to keep it. Harmless
 `.obsidian/` configuration is copied by default; pass `--no-obsidian` to omit
@@ -277,6 +300,15 @@ knowledge for repositories the user is actively editing.
 When a Warren node is editable, API/UI updates write back to that project's own
 `.marmot/` vault and embedding database. Read-only Warren nodes show provenance
 in the detail panel and the save button is disabled.
+
+Editable and materialized are mutually exclusive per project: a materialized
+(burrowed) cache never syncs edits back to the checkout, so `marmot warren
+edit` refuses projects that have a burrow cache (delete the cache under
+`.marmot/.marmot-data/warrens/<warren-id>/projects/<project-id>/` or re-mount
+without `--materialize` first), and `marmot warren mount --materialize`
+refuses projects that are currently editable (run `marmot warren edit
+<project> --off` first). If an older state file carries both flags, the
+checkout path wins for editable projects and a warning is printed.
 
 MCP `context_write` does not accept `@vault-id/...` node IDs directly. Use the
 Warren-aware API/UI path for editable mounted nodes, or write local nodes as

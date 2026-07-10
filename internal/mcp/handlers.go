@@ -79,13 +79,20 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 			}
 			remoteStore, err := e.VaultRegistry.ResolveEmbeddingStore(vid)
 			if err != nil {
-				continue // best-effort
+				// Best-effort: local results still return, but the degraded
+				// vault is visible (once per vault) instead of vanishing.
+				e.warnVaultOnce(vid, "warren vault %q embedding store unavailable, excluded from context_query: %v", vid, err)
+				continue
 			}
 			var remoteResults []embedding.ScoredResult
+			var searchErr error
 			if includeSuperseded {
-				remoteResults, _ = remoteStore.Search(queryVec, 3, e.Embedder.Model())
+				remoteResults, searchErr = remoteStore.Search(queryVec, 3, e.Embedder.Model())
 			} else {
-				remoteResults, _ = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+				remoteResults, searchErr = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+			}
+			if searchErr != nil {
+				e.warnVaultOnce(vid, "warren vault %q search failed, excluded from context_query: %v", vid, searchErr)
 			}
 			// Prefix remote results with @vault-id/ so BridgedGraphResolver can resolve them.
 			for _, r := range remoteResults {
