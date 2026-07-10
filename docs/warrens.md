@@ -332,6 +332,39 @@ Plain local graph views stay local:
 
 The web UI exposes active Warrens in the graph selector as `Warren <id>`.
 
+## Freshness and refresh
+
+Warrens track git, not real time. A live engine (a long-running daemon owner
+in particular) keeps mounted state fresh through three explicit triggers plus
+one time bound:
+
+- `marmot warren refresh [--warren <id>]` verifies the Warren checkout is
+  reachable, rewrites the workspace `.marmot/_warren.md` atomically (a no-op
+  touch under its lock), and reports active mounts. Every live daemon owner
+  watches that file and reloads its warren wiring (routes, mounts, runtime
+  bridges, vault registry) within about a second. Refresh does **not** run
+  `git pull` — run `git -C <warren-checkout> pull` first when the Warren repo
+  itself moved (a `--pull` flag is reserved for a future release).
+- `POST /api/warren/{id}/refresh` reloads the serving engine's warren state
+  directly. The web UI's refresh button calls this automatically when a
+  Warren view is selected.
+- Every `marmot warren register/mount/edit` already rewrites
+  `.marmot/_warren.md`, so live owners pick those changes up without an
+  explicit refresh.
+- Cached remote **graphs** additionally expire after 60 seconds (lazily: the
+  next query reloads), bounding staleness from out-of-band changes such as a
+  `git pull` inside the checkout or another workspace's re-index. Tune or
+  disable with `MARMOT_WARREN_TTL` (a Go duration; `0`/`off` disables).
+  Remote **embedding stores** need no TTL: every search is a live read of the
+  mounted project's SQLite database.
+
+While a mounted project's `embeddings.db` is open for cross-vault search, the
+reader holds a shared advisory lock (`.marmot-data/vault.read.lock` next to
+the DB). `marmot index --force` on that vault refuses to delete the database
+while any such reader exists — close the reading process or retry later. On
+Windows the advisory lock degrades to a no-op and `index --force` behaves as
+before (documented platform gap).
+
 ## Embeddings and materialization
 
 Each mounted project uses its own embedding database from that project's

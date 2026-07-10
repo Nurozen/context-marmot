@@ -1170,15 +1170,5 @@ func TestTruncateHashForDisplay(t *testing.T) {
 	}
 }
 
-func TestRuntimeBridgeKeyOrdering(t *testing.T) {
-	if runtimeBridgeKey("a", "b") != runtimeBridgeKey("b", "a") {
-		t.Fatal("runtimeBridgeKey should be order-independent")
-	}
-}
-
-func TestEmptyNamespaceManager(t *testing.T) {
-	mgr := emptyNamespaceManager("/tmp/vault")
-	if mgr.VaultDir != "/tmp/vault" || mgr.Namespaces == nil || mgr.Bridges == nil {
-		t.Fatalf("unexpected empty namespace manager: %+v", mgr)
-	}
-}
+// TestRuntimeBridgeKeyOrdering and TestEmptyNamespaceManager moved to
+// internal/mcp/warren_reload_test.go with their subjects (B2 extraction).

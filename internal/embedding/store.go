@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/heap"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -35,7 +36,14 @@ type Store struct {
 	db       *sqlite3.Conn
 	mu       sync.Mutex // sqlite3.Conn is not safe for concurrent use
 	readOnly bool       // opened via NewStoreReadOnly; all writes rejected
+	closed   bool       // Close ran; all use returns ErrStoreClosed instead of panicking
 }
+
+// ErrStoreClosed is returned by every Store method after Close. It exists so
+// a search racing a registry Refresh/Rebuild (which swap the cached store
+// and close the old handle after their lock is released) fails loudly with a
+// gateable error instead of panicking inside the SQLite bindings.
+var ErrStoreClosed = errors.New("embedding store is closed")
 
 // NewStore opens (or creates) an embedding store at the given path.
 // Use ":memory:" for an in-memory database.
@@ -154,7 +162,12 @@ func (s *Store) StoredDimension() (int, error) {
 }
 
 // storedDimensionLocked returns the dimension of existing embeddings (caller must hold mu).
+// As the first db touch on every read/write path it also carries the
+// closed-store guard for its callers (Upsert/Search/SearchActive/FindSimilar).
 func (s *Store) storedDimensionLocked() (int, error) {
+	if s.closed {
+		return 0, ErrStoreClosed
+	}
 	stmt, _, err := s.db.Prepare(`SELECT embedding FROM embeddings LIMIT 1`)
 	if err != nil {
 		return 0, fmt.Errorf("prepare stored dimension: %w", err)
@@ -341,6 +354,9 @@ func (s *Store) UpdateStatus(nodeID, status string) error {
 
 	if s.readOnly {
 		return errReadOnly("update status")
+	}
+	if s.closed {
+		return ErrStoreClosed
 	}
 
 	stmt, _, err := s.db.Prepare(`UPDATE embeddings SET status = ? WHERE node_id = ?`)
@@ -530,6 +546,9 @@ func (s *Store) Delete(nodeID string) error {
 	if s.readOnly {
 		return errReadOnly("delete")
 	}
+	if s.closed {
+		return ErrStoreClosed
+	}
 
 	stmt, _, err := s.db.Prepare(`DELETE FROM embeddings WHERE node_id = ?`)
 	if err != nil {
@@ -553,6 +572,10 @@ func (s *Store) StaleCheck(nodeID string, currentHash string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		return false, ErrStoreClosed
+	}
+
 	stmt, _, err := s.db.Prepare(`SELECT summary_hash FROM embeddings WHERE node_id = ?`)
 	if err != nil {
 		return false, fmt.Errorf("prepare stale check: %w", err)
@@ -574,6 +597,10 @@ func (s *Store) StaleCheck(nodeID string, currentHash string) (bool, error) {
 func (s *Store) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.closed {
+		return 0
+	}
 
 	stmt, _, err := s.db.Prepare(`SELECT COUNT(*) FROM embeddings`)
 	if err != nil {
@@ -600,13 +627,22 @@ func (s *Store) Checkpoint() error {
 	if s.readOnly {
 		return errReadOnly("checkpoint")
 	}
+	if s.closed {
+		return ErrStoreClosed
+	}
 	return s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }
 
-// Close closes the underlying SQLite connection.
+// Close closes the underlying SQLite connection. It is idempotent, and any
+// method called after Close returns ErrStoreClosed (an in-flight call that
+// already holds the mutex finishes against the open connection first).
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	return s.db.Close()
 }
 

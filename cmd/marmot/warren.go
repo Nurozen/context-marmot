@@ -793,7 +793,7 @@ func warrenStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren status: %v\n", err)
 		return 1
 	}
-	id, err := resolveWarrenID(workspaceRoot, *warrenID)
+	id, _, err := resolveWarrenEntry(workspaceRoot, *warrenID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren status: %v\n", err)
 		return 1
@@ -849,6 +849,12 @@ func warrenEdit(args []string) int {
 	return 0
 }
 
+// warrenRefresh reloads warren state from disk for live observers: it
+// touches the workspace _warren.md (atomic no-op rewrite under the state
+// flock) so a live daemon owner's watcher fires and calls ReloadWarrenState,
+// then reports the active mounts. Pulling the warren's git checkout is
+// deliberately NOT done here (a --pull flag is reserved for that); run
+// `git -C <checkout> pull` first when the warren repo itself moved.
 func warrenRefresh(args []string) int {
 	fs := flag.NewFlagSet("warren refresh", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
@@ -856,17 +862,42 @@ func warrenRefresh(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	_, workspaceRoot, err := ensureWorkspace(*dir)
+	marmotDir, workspaceRoot, err := ensureWorkspace(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
 		return 1
 	}
-	id, err := resolveWarrenID(workspaceRoot, *warrenID)
+	id, entry, err := resolveWarrenEntry(workspaceRoot, *warrenID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
 		return 1
 	}
-	fmt.Printf("Warren %q is refreshed from git-managed files; run git pull in its checkout when needed.\n", id)
+	if fi, statErr := os.Stat(entry.Path); statErr != nil || !fi.IsDir() {
+		fmt.Fprintf(os.Stderr, "warren refresh: warren %q is UNREACHABLE at %s — re-run 'marmot warren register %s <path>' with the current checkout location\n", id, entry.Path, id)
+		return 1
+	}
+	// Signal live observers (daemon owners, API watchers) via the file they
+	// already watch.
+	if err := warren.TouchWorkspaceState(workspaceRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
+		return 1
+	}
+	mounts, err := warren.ActiveMounts(marmotDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
+		return 1
+	}
+	count := 0
+	for _, mount := range mounts {
+		if mount.WarrenID == id {
+			count++
+		}
+	}
+	fmt.Printf("Warren %q refreshed: %d active project mount(s)\n", id, count)
+	if info, alive := ownerAlive(marmotDir); alive {
+		fmt.Printf("Live daemon owner (pid %d) will pick up the change within ~1s\n", info.PID)
+	}
+	fmt.Println("Note: refresh reloads local warren state; run 'git -C " + entry.Path + " pull' first to fetch upstream warren changes.")
 	return 0
 }
 
@@ -882,7 +913,7 @@ func warrenPropose(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
 	}
-	id, err := resolveWarrenID(workspaceRoot, *warrenID)
+	id, _, err := resolveWarrenEntry(workspaceRoot, *warrenID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
@@ -910,26 +941,30 @@ func ensureWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error
 	return marmotDir, workspaceRoot, nil
 }
 
-func resolveWarrenID(workspaceRoot, requested string) (string, error) {
+// resolveWarrenEntry resolves the requested (or sole registered) Warren ID
+// and returns its workspace state entry alongside, so callers get the
+// checkout path without a second state load.
+func resolveWarrenEntry(workspaceRoot, requested string) (string, warren.WorkspaceWarren, error) {
 	state, _, err := warren.LoadWorkspaceState(workspaceRoot)
 	if err != nil {
-		return "", err
+		return "", warren.WorkspaceWarren{}, err
 	}
 	if requested != "" {
-		if _, ok := state.Warrens[requested]; !ok {
-			return "", fmt.Errorf("warren %q is not registered", requested)
+		entry, ok := state.Warrens[requested]
+		if !ok {
+			return "", warren.WorkspaceWarren{}, fmt.Errorf("warren %q is not registered", requested)
 		}
-		return requested, nil
+		return requested, entry, nil
 	}
 	if len(state.Warrens) == 1 {
-		for id := range state.Warrens {
-			return id, nil
+		for id, entry := range state.Warrens {
+			return id, entry, nil
 		}
 	}
 	if len(state.Warrens) == 0 {
-		return "", fmt.Errorf("no Warrens registered")
+		return "", warren.WorkspaceWarren{}, fmt.Errorf("no Warrens registered")
 	}
-	return "", fmt.Errorf("--warren is required when multiple Warrens are registered")
+	return "", warren.WorkspaceWarren{}, fmt.Errorf("--warren is required when multiple Warrens are registered")
 }
 
 func printJSON(v any) int {

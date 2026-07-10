@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/nurozen/context-marmot/internal/embedding"
@@ -400,6 +401,72 @@ func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
 	}
 	if !strings.Contains(text.Text, "@project-a/service/api") {
 		t.Fatalf("expected Warren-mounted result, got:\n%s", text.Text)
+	}
+}
+
+// TestWarrenRefreshTouchesStateAndChecksReachability (B3.2): a real refresh
+// rewrites the workspace _warren.md (the daemon-owner change signal), reports
+// mounts, and fails loudly when the warren checkout is gone.
+func TestWarrenRefreshTouchesStateAndChecksReachability(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspace, "wp", warrenRoot); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, err := warrenpkg.Mount(workspace, "wp", []string{"project-a"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	statePath := filepath.Join(marmotDir, "_warren.md")
+	before, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("stat state: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond) // ensure a distinguishable mtime
+
+	out, code := captureRun([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "wp"})
+	if code != 0 {
+		t.Fatalf("warren refresh exit = %d, output: %s", code, out)
+	}
+	if !strings.Contains(out, "refreshed") || !strings.Contains(out, "1 active project mount(s)") {
+		t.Fatalf("unexpected refresh output: %q", out)
+	}
+	after, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("stat state after: %v", err)
+	}
+	if !after.ModTime().After(before.ModTime()) {
+		t.Fatal("refresh did not touch the workspace _warren.md (live observers would never fire)")
+	}
+
+	// Unreachable checkout: loud failure, exit 1.
+	if err := os.RemoveAll(warrenRoot); err != nil {
+		t.Fatalf("remove warren root: %v", err)
+	}
+	if _, code := captureRun([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "wp"}); code != 1 {
+		t.Fatalf("warren refresh on unreachable warren exit = %d, want 1", code)
+	}
+}
+
+// TestBuildEngineAlwaysCreatesVaultRegistry (B2): even with zero mounts and
+// no routes, buildEngine wires a registry so a long-lived engine can pick up
+// warren mounts made after startup via ReloadWarrenState.
+func TestBuildEngineAlwaysCreatesVaultRegistry(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir .marmot-data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte("---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	result := hermeticEngine(t, marmotDir)
+	if result.Engine.VaultRegistry == nil {
+		t.Fatal("buildEngine must always create a vault registry (mounts made after startup need ReloadWarrenState)")
+	}
+	if got := result.Engine.VaultRegistry.KnownVaultIDs(); len(got) != 0 {
+		t.Fatalf("expected empty registry with no mounts/routes, got %v", got)
 	}
 }
 

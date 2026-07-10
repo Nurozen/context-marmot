@@ -188,17 +188,16 @@ func seedRemoteEmbedding(t *testing.T, marmotDir, vaultID, nodeID, text string) 
 	}
 }
 
+// wireWarrenVaultRegistry mirrors buildEngine's warren wiring: an always-on
+// empty registry plus ReloadWarrenState (the production path — B2 removed
+// the hand-built second wiring path this helper used to be).
 func wireWarrenVaultRegistry(t *testing.T, engine *mcpserver.Engine) {
 	t.Helper()
-	mounts, err := warrenpkg.ActiveMounts(engine.MarmotDir)
-	if err != nil {
-		t.Fatalf("ActiveMounts: %v", err)
+	t.Setenv("MARMOT_ROUTES", "off")
+	engine.WithVaultRegistry(namespace.NewVaultRegistry("", engine.MarmotDir, nil, routes.EmptyTable()))
+	if err := engine.ReloadWarrenState(); err != nil {
+		t.Fatalf("ReloadWarrenState: %v", err)
 	}
-	rt := &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
-	for _, mount := range mounts {
-		rt.Set(mount.VaultID, mount.Path)
-	}
-	engine.WithVaultRegistry(namespace.NewVaultRegistry("", engine.MarmotDir, nil, rt))
 }
 
 // doRequest is a helper that performs an HTTP request against the server handler

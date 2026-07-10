@@ -77,6 +77,11 @@ func DefaultPath() string {
 	return defaultPathLocked()
 }
 
+// EmptyTable returns a fresh routing table with no vaults registered.
+func EmptyTable() *RoutingTable {
+	return &RoutingTable{Vaults: make(map[string]VaultEntry)}
+}
+
 // Load reads the routing table from ~/.marmot/routes.yml.
 // Returns an empty table if the file does not exist.
 func Load() (*RoutingTable, error) {

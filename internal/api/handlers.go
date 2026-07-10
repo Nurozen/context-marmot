@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	nspkg "github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/sdkgen"
 	"github.com/nurozen/context-marmot/internal/summary"
@@ -477,9 +479,9 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		fmt.Fprintf(os.Stderr, "warning: warren editable write %s: %s\n", id, warning)
 	}
 	if s.engine.VaultRegistry != nil {
-		if err := s.engine.VaultRegistry.Refresh(vaultID); err != nil {
-			// The registry rewires in Workstream B; for now just make the
-			// stale-cache window visible instead of silent.
+		if err := s.engine.VaultRegistry.Refresh(vaultID); err != nil && !errors.Is(err, nspkg.ErrNotLoaded) {
+			// ErrNotLoaded means nothing was cached — nothing to refresh.
+			// Anything else makes the stale-cache window visible, not silent.
 			fmt.Fprintf(os.Stderr, "warning: refresh after editable write failed for vault %q: %v\n", vaultID, err)
 		}
 	}
@@ -948,7 +950,11 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleWarrenRefresh is a no-op refresh hook for git-backed Warren state.
+// handleWarrenRefresh reloads the engine's warren state (routes, mounts,
+// runtime bridges, vault registry) from disk. The reload is engine-global,
+// not per-warren — mounts/bridges/routes are one composite state and a
+// partial reload would reintroduce split views; the {id} is validated and
+// echoed so callers can gate on a specific warren being registered.
 func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -964,9 +970,13 @@ func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
 		return
 	}
+	if err := s.engine.ReloadWarrenState(); err != nil {
+		writeError(w, http.StatusInternalServerError, "warren refresh: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"warren_id": id,
-		"status":    "git-backed Warren state is read from disk",
+		"status":    "reloaded",
 	})
 }
 

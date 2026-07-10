@@ -142,22 +142,48 @@ func TestWarrenGraphReportsSkippedMounts(t *testing.T) {
 	}
 }
 
-// TestWarrenNodeUpdateRefreshFailureWarns (A6 #4): a failed registry refresh
-// after an editable write is announced on stderr; the response is unaffected.
+// TestWarrenNodeUpdateRefreshFailureWarns (A6 #4, refined by B1): a genuine
+// registry refresh failure after an editable write is announced on stderr
+// (response unaffected), while a never-loaded vault (ErrNotLoaded — nothing
+// cached, nothing to refresh) stays silent.
 func TestWarrenNodeUpdateRefreshFailureWarns(t *testing.T) {
 	server, engine := newTestServer(t)
 	handler := server.Handler()
 	workspaceRoot := filepath.Dir(engine.MarmotDir)
-	setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
+	warrenRoot := setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
 	if _, err := warrenpkg.SetEditable(workspaceRoot, "product-platform", "project-a", true); err != nil {
 		t.Fatalf("SetEditable: %v", err)
 	}
-	// Registry wired but the vault was never loaded: Refresh errors.
 	wireWarrenVaultRegistry(t, engine)
 
+	// Never-loaded vault: Refresh returns ErrNotLoaded, which is tolerated —
+	// no warning fires.
 	updatePath := "/api/node/" + url.PathEscape("@project-a-vault/service/api")
 	var rec *httptest.ResponseRecorder
 	out := captureStderr(t, func() {
+		rec = doRequest(t, handler, "PUT", updatePath, `{"summary":"refresh tolerance check"}`)
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(out, "refresh after editable write failed") {
+		t.Fatalf("ErrNotLoaded must be tolerated silently, got stderr %q", out)
+	}
+
+	// Load the vault into the registry, then make its config unreadable so
+	// the reload inside Refresh genuinely fails: the warning must fire.
+	// (config.Load is lenient on malformed content but propagates
+	// permission errors.)
+	if _, err := engine.VaultRegistry.ResolveEmbeddingStore("project-a-vault"); err != nil {
+		t.Fatalf("ResolveEmbeddingStore: %v", err)
+	}
+	projDir := filepath.Join(warrenRoot, "projects", "project-a", ".marmot")
+	remoteConfig := filepath.Join(projDir, "_config.md")
+	if err := os.Chmod(remoteConfig, 0o000); err != nil {
+		t.Fatalf("chmod remote config: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(remoteConfig, 0o644) })
+	out = captureStderr(t, func() {
 		rec = doRequest(t, handler, "PUT", updatePath, `{"summary":"refresh warning check"}`)
 	})
 	if rec.Code != http.StatusOK {

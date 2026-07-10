@@ -914,6 +914,17 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 	})
 }
 
+// TouchWorkspaceState rewrites the workspace _warren.md unchanged (a no-op
+// read-modify-write under the state flock), bumping its mtime and firing a
+// rename event so every live observer of the file — the daemon owner's
+// watcher in particular — reloads its warren state. This is the CLI→daemon
+// change signal: no socket verb, just the file every observer already
+// watches.
+func TouchWorkspaceState(workspaceRoot string) error {
+	_, err := updateWorkspaceState(workspaceRoot, func(*WorkspaceState) error { return nil })
+	return err
+}
+
 // Status returns project statuses for one registered Warren.
 func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 	state, _, err := LoadWorkspaceState(workspaceRoot)

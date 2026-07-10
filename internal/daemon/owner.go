@@ -254,11 +254,18 @@ func StartGraphWatcherNotify(dir string, eng *mcp.Engine, onReload func()) (stop
 		_ = fw.Add(filepath.Join(dir, e.Name())) // best-effort
 	}
 
+	// The workspace warren mount state lives directly inside the watched
+	// root; every warren CLI mutation rewrites it atomically (and `marmot
+	// warren refresh` touches it), so this one file is the cross-process
+	// signal that warren wiring — not just the graph — must reload.
+	warrenStatePath := filepath.Join(dir, "_warren.md")
+
 	stopCh := make(chan struct{})
 	go func() {
 		const debounce = 1 * time.Second
 		var timer *time.Timer
 		pending := false
+		warrenPending := false
 		schedule := func() {
 			if !pending {
 				pending = true
@@ -297,6 +304,13 @@ func StartGraphWatcherNotify(dir string, eng *mcp.Engine, onReload func()) (stop
 				if !strings.HasSuffix(event.Name, ".md") {
 					continue
 				}
+				// Warren mount state changed — reload warren wiring, not
+				// just the graph (see warrenStatePath above).
+				if event.Name == warrenStatePath {
+					warrenPending = true
+					schedule()
+					continue
+				}
 				// Ignore underscore-prefixed files (_config.md, _summary.md, etc.)
 				if strings.HasPrefix(filepath.Base(event.Name), "_") {
 					continue
@@ -313,6 +327,14 @@ func StartGraphWatcherNotify(dir string, eng *mcp.Engine, onReload func()) (stop
 				return nil
 			}():
 				pending = false
+				if warrenPending {
+					warrenPending = false
+					if err := eng.ReloadWarrenState(); err != nil {
+						fmt.Fprintf(os.Stderr, "daemon: warren state reload failed: %v\n", err)
+					} else {
+						fmt.Fprintln(os.Stderr, "daemon: warren state reloaded")
+					}
+				}
 				if reloadGraph(dir, eng) && onReload != nil {
 					onReload()
 				}

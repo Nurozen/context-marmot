@@ -195,7 +195,19 @@ async function init(): Promise<void> {
   });
 
   document.getElementById('refresh-btn')?.addEventListener('click', () => {
-    void loadGraph();
+    void (async () => {
+      // For a warren view, ask the server to reload its warren state
+      // (mounts, routes, runtime bridges) from disk before re-fetching.
+      if (currentNamespace.startsWith('_warren/')) {
+        const warrenId = currentNamespace.slice('_warren/'.length);
+        try {
+          await fetch(`/api/warren/${encodeURIComponent(warrenId)}/refresh`, { method: 'POST' });
+        } catch {
+          // Best-effort: the graph reload below still runs.
+        }
+      }
+      await loadGraph();
+    })();
   });
 
   /* ── Filter sidebar toggle (overlay drawer on narrow viewports) ── */

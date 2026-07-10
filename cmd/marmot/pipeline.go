@@ -21,6 +21,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/daemon"
 	"github.com/nurozen/context-marmot/internal/embedding"
+	"github.com/nurozen/context-marmot/internal/flock"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/indexer"
@@ -32,7 +33,6 @@ import (
 	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/update"
 	"github.com/nurozen/context-marmot/internal/verify"
-	"github.com/nurozen/context-marmot/internal/warren"
 	"github.com/nurozen/context-marmot/web"
 )
 
@@ -66,6 +66,19 @@ func runIndexPipeline(dir string, force bool) error {
 		if info, alive := ownerAlive(dir); alive {
 			return fmt.Errorf("vault is served by marmot daemon (pid %d); index --force would delete the embeddings DB under its open connection — stop the daemon first", info.PID)
 		}
+		// A warren-mounting process in ANOTHER workspace can hold this DB
+		// open read-only (VaultRegistry advertises that with a shared flock
+		// on vault.read.lock); deleting it under that reader leaves the
+		// reader on an unlinked file. Held for the whole reindex so a
+		// reader cannot attach mid-rebuild.
+		release, ok, lockErr := flock.TryExclusive(filepath.Join(dir, ".marmot-data", "vault.read.lock"))
+		if lockErr != nil {
+			return fmt.Errorf("index --force: acquire vault read lock: %w", lockErr)
+		}
+		if !ok {
+			return fmt.Errorf("vault is open read-only by another marmot process (warren mount); close it or retry")
+		}
+		defer release()
 		// Remove existing embeddings DB (and WAL sidecars) to start fresh (model may have changed).
 		_ = os.Remove(dbPath)
 		_ = os.Remove(dbPath + "-wal")
@@ -234,47 +247,27 @@ func buildEngine(dir string) (*engineResult, error) {
 		nsName = "default"
 	}
 
-	// Wire vault registry for cross-vault and Warren-mounted traversal.
-	rt, _ := routes.Load() // best-effort; nil is fine
-	if rt == nil {
-		rt = &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
-	}
-	vaultID := vaultCfg.VaultID
-	warrenBridgeDeclarations := false
-	if mounts, mountErr := warren.ActiveMounts(dir); mountErr == nil {
-		for _, mount := range mounts {
-			if mount.VaultID != "" && mount.Available {
-				rt.Set(mount.VaultID, mount.Path)
-			}
-		}
-		if bridges, declared := warrenRuntimeBridges(dir, mounts); declared {
-			warrenBridgeDeclarations = true
-			if nsMgr == nil {
-				nsMgr = emptyNamespaceManager(dir)
-			}
-			nsMgr.CrossVaultBridges = append(nsMgr.CrossVaultBridges, bridges...)
-		}
-		if len(mounts) > 0 {
-			fmt.Fprintf(os.Stderr, "warren: %d active project mounts loaded\n", len(mounts))
-		}
-	}
-	if nsMgr != nil &&
-		(len(nsMgr.Namespaces) > 0 || len(nsMgr.Bridges) > 0 || len(nsMgr.CrossVaultBridges) > 0 || warrenBridgeDeclarations) {
+	// Attach the file-declared namespace manager when it has content; warren
+	// runtime bridges are merged in by ReloadWarrenState below (creating an
+	// empty manager on demand when only warren bridges exist).
+	if nsMgr != nil && (len(nsMgr.Namespaces) > 0 || len(nsMgr.Bridges) > 0 || len(nsMgr.CrossVaultBridges) > 0) {
 		engine.WithNamespaceManager(nsMgr)
+	}
+
+	// Always create the vault registry — a long-lived daemon owner must be
+	// able to pick up warren mounts and route changes made after startup via
+	// Engine.ReloadWarrenState (which does the actual routes/mount/bridge
+	// wiring, here and on every later reload trigger).
+	vr := namespace.NewVaultRegistry(vaultCfg.VaultID, dir, nil, routes.EmptyTable())
+	engine.WithVaultRegistry(vr)
+	if reloadErr := engine.ReloadWarrenState(); reloadErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: warren state load failed: %v\n", reloadErr)
+	}
+	if bridgeList, crossVault := engine.BridgeSnapshot(); bridgeList != nil {
 		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
-			len(nsMgr.Namespaces), len(nsMgr.Bridges), len(nsMgr.CrossVaultBridges))
+			len(engine.NamespaceNames()), len(bridgeList), len(crossVault))
 	}
-	hasCrossVaultBridges := nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0
-	hasRoutes := rt != nil && len(rt.List()) > 0
-	if hasCrossVaultBridges || hasRoutes {
-		var bridges []*namespace.Bridge
-		if nsMgr != nil {
-			bridges = nsMgr.CrossVaultBridges
-		}
-		vr := namespace.NewVaultRegistry(vaultID, dir, bridges, rt)
-		engine.WithVaultRegistry(vr)
-		fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered (global routing table; MARMOT_ROUTES=off disables)\n", len(vr.KnownVaultIDs()))
-	}
+	fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered (global routing table; MARMOT_ROUTES=off disables)\n", len(vr.KnownVaultIDs()))
 
 	// Detach the heat map when a live serve owner exists: it records heat for
 	// this vault itself, and a second attached map would clobber its saves
@@ -379,96 +372,6 @@ func buildEngine(dir string) (*engineResult, error) {
 		LLM:       llmProvider,
 		Cleanup:   cleanup,
 	}, nil
-}
-
-func emptyNamespaceManager(dir string) *namespace.Manager {
-	return &namespace.Manager{
-		VaultDir:   dir,
-		Namespaces: make(map[string]*namespace.Namespace),
-		Bridges:    make(map[string]*namespace.Bridge),
-	}
-}
-
-func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*namespace.Bridge, bool) {
-	state, _, err := warren.LoadWorkspaceStateFromMarmot(marmotDir)
-	if err != nil {
-		// Fail-open is today's semantic (a broken warren must not brick local
-		// queries), but the missing enforcement must not be silent.
-		fmt.Fprintf(os.Stderr, "warning: warren workspace state unreadable (%s): %v — cross-vault bridge policy NOT enforced\n", marmotDir, err)
-		return nil, false
-	}
-
-	active := make(map[string]map[string]warren.ProjectStatus)
-	for _, mount := range mounts {
-		if !mount.Active || !mount.Available || mount.VaultID == "" {
-			continue
-		}
-		projects := active[mount.WarrenID]
-		if projects == nil {
-			projects = make(map[string]warren.ProjectStatus)
-			active[mount.WarrenID] = projects
-		}
-		projects[mount.ProjectID] = mount
-	}
-
-	declared := false
-	merged := make(map[string]*namespace.Bridge)
-	relationSets := make(map[string]map[string]bool)
-	for warrenID, entry := range state.Warrens {
-		manifest, _, err := warren.LoadManifest(entry.Path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: warren %q bridge manifest unreadable (%s): %v — cross-vault bridge policy NOT enforced for this warren\n", warrenID, entry.Path, err)
-			continue
-		}
-		if len(manifest.Bridges) > 0 {
-			declared = true
-		}
-		activeProjects := active[warrenID]
-		if len(activeProjects) == 0 {
-			continue
-		}
-		for _, bridge := range manifest.Bridges {
-			source, sourceOK := activeProjects[bridge.Source]
-			target, targetOK := activeProjects[bridge.Target]
-			if !sourceOK || !targetOK || source.VaultID == "" || target.VaultID == "" {
-				continue
-			}
-			key := runtimeBridgeKey(source.VaultID, target.VaultID)
-			runtimeBridge, ok := merged[key]
-			if !ok {
-				runtimeBridge = &namespace.Bridge{
-					Source:          bridge.Source,
-					Target:          bridge.Target,
-					SourceVaultID:   source.VaultID,
-					TargetVaultID:   target.VaultID,
-					SourceVaultPath: source.Path,
-					TargetVaultPath: target.Path,
-				}
-				merged[key] = runtimeBridge
-				relationSets[key] = make(map[string]bool)
-			}
-			for _, relation := range bridge.Relations {
-				if relation == "" || relationSets[key][relation] {
-					continue
-				}
-				relationSets[key][relation] = true
-				runtimeBridge.AllowedRelations = append(runtimeBridge.AllowedRelations, relation)
-			}
-		}
-	}
-
-	bridges := make([]*namespace.Bridge, 0, len(merged))
-	for _, bridge := range merged {
-		bridges = append(bridges, bridge)
-	}
-	return bridges, declared
-}
-
-func runtimeBridgeKey(a, b string) string {
-	if a > b {
-		a, b = b, a
-	}
-	return a + "\x00" + b
 }
 
 // ownerWedgeWait bounds how long a serve process retries while the flock is

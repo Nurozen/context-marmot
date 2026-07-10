@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/llm"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/routes"
 	"github.com/nurozen/context-marmot/internal/summary"
 )
 
@@ -430,6 +432,65 @@ func TestWarrenListStatusRefreshSuccess(t *testing.T) {
 	}
 	if refreshResp["warren_id"] != "product-platform" {
 		t.Errorf("expected refresh warren_id product-platform, got %q", refreshResp["warren_id"])
+	}
+	if refreshResp["status"] != "reloaded" {
+		t.Errorf("expected refresh status %q, got %q", "reloaded", refreshResp["status"])
+	}
+}
+
+// TestWarrenRefreshPicksUpNewMount (B3.1): a warren mounted AFTER the server
+// started becomes searchable once POST /api/warren/{id}/refresh reloads the
+// engine's warren state — the endpoint is a real trigger, not a printf stub.
+func TestWarrenRefreshPicksUpNewMount(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+	workspaceRoot := filepath.Dir(engine.MarmotDir)
+
+	// Simulate startup with no mounts: an always-created empty registry.
+	t.Setenv("MARMOT_ROUTES", "off")
+	engine.WithVaultRegistry(namespace.NewVaultRegistry("", engine.MarmotDir, nil, routes.EmptyTable()))
+	if err := engine.ReloadWarrenState(); err != nil {
+		t.Fatalf("initial ReloadWarrenState: %v", err)
+	}
+
+	// Mount a warren while the server is live.
+	setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
+
+	// The registry does not know the vault yet (no reload since the mount).
+	searchPath := "/api/search?q=" + url.QueryEscape("Service API") + "&ns=" + url.QueryEscape("_warren/product-platform")
+	recBefore := doRequest(t, handler, "GET", searchPath, "")
+	if recBefore.Code != http.StatusOK {
+		t.Fatalf("search before refresh: expected 200, got %d: %s", recBefore.Code, recBefore.Body.String())
+	}
+	var respBefore SearchResponse
+	if err := json.NewDecoder(recBefore.Body).Decode(&respBefore); err != nil {
+		t.Fatalf("decode search before refresh: %v", err)
+	}
+	if len(respBefore.Results) != 0 {
+		t.Fatalf("expected no warren results before refresh, got %+v", respBefore.Results)
+	}
+
+	// POST the refresh endpoint, then the mount is queryable.
+	recRefresh := doRequest(t, handler, "POST", "/api/warren/product-platform/refresh", "")
+	if recRefresh.Code != http.StatusOK {
+		t.Fatalf("refresh: expected 200, got %d: %s", recRefresh.Code, recRefresh.Body.String())
+	}
+	recAfter := doRequest(t, handler, "GET", searchPath, "")
+	if recAfter.Code != http.StatusOK {
+		t.Fatalf("search after refresh: expected 200, got %d: %s", recAfter.Code, recAfter.Body.String())
+	}
+	var respAfter SearchResponse
+	if err := json.NewDecoder(recAfter.Body).Decode(&respAfter); err != nil {
+		t.Fatalf("decode search after refresh: %v", err)
+	}
+	found := false
+	for _, r := range respAfter.Results {
+		if r.NodeID == "@project-a-vault/service/api" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected @project-a-vault/service/api after refresh, got %+v", respAfter.Results)
 	}
 }
 

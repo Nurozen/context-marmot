@@ -44,9 +44,16 @@ type Engine struct {
 	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
 	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
 	nsMgrMu      sync.RWMutex
+	// fileCrossVaultBridges snapshots the manager's file-declared cross-vault
+	// bridges at WithNamespaceManager time; warrenBridges holds the current
+	// warren runtime bridges. ReloadWarrenState recomposes
+	// NSManager.CrossVaultBridges = fileCrossVaultBridges ++ warrenBridges so
+	// repeated reloads never duplicate. Both guarded by nsMgrMu.
+	fileCrossVaultBridges []*namespace.Bridge
+	warrenBridges         []*namespace.Bridge
 	// warnedVaults dedupes best-effort cross-vault degradation warnings so a
 	// broken remote vault warns once per vault per process, not per query.
-	warnedVaults sync.Map // map[string]bool
+	warnedVaults  sync.Map       // map[string]bool
 	reindexWG     sync.WaitGroup // tracks background neighbor reindexes
 	closing       atomic.Bool    // set by Close; stops new background reindexes
 	reindexOnce   sync.Once      // lazily initializes the reindex context
@@ -194,10 +201,17 @@ func (e *Engine) WithHeatMap(h *heatmap.HeatMap) {
 
 // WithNamespaceManager attaches a namespace manager to the engine.
 // When set, cross-namespace edges are validated against bridge manifests.
+// The manager's file-declared cross-vault bridges are snapshotted so
+// ReloadWarrenState can recompose them with warren runtime bridges without
+// duplicating either.
 func (e *Engine) WithNamespaceManager(mgr *namespace.Manager) {
 	e.nsMgrMu.Lock()
 	defer e.nsMgrMu.Unlock()
 	e.NSManager = mgr
+	e.fileCrossVaultBridges = nil
+	if mgr != nil {
+		e.fileCrossVaultBridges = append([]*namespace.Bridge(nil), mgr.CrossVaultBridges...)
+	}
 }
 
 // HasNamespace reports whether the namespace manager knows a namespace.
