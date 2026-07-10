@@ -402,6 +402,13 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		writeError(w, http.StatusBadRequest, "invalid Warren node id: "+id)
 		return
 	}
+	// Self-alias guard: an @-write to the workspace's own vault ID would land
+	// in the warren checkout copy and split-brain the live vault (including
+	// legacy state that still records the self project as editable).
+	if vaultID != "" && vaultID == s.engine.LocalVaultID {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("vault %q is this workspace's own vault; update the node via PUT /api/node/%s (no @ prefix)", vaultID, localID))
+		return
+	}
 	mount, ok := s.findWarrenMountByVault(vaultID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "Warren mount not found for vault: "+vaultID)
@@ -585,8 +592,28 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 	}
 
 	var results []embedding.ScoredResult
-	for vaultID := range mountByVault {
-		if vaultID == "" || vaultID == s.engine.LocalVaultID {
+	for vaultID, mount := range mountByVault {
+		if vaultID == "" {
+			continue
+		}
+		if vaultID == s.engine.LocalVaultID {
+			// A self-alias project is served from the live vault: search the
+			// local store directly (the registry must never resolve our own
+			// vault) so the project stays visible in its warren's scope.
+			if !mount.SelfAlias {
+				continue // stale engine cache or hand-edited state: stay skipped
+			}
+			localResults, err := s.engine.EmbeddingStore.SearchActive(vec, limit, s.engine.Embedder.Model())
+			if err != nil {
+				s.warnVaultOnce(vaultID, "local vault search failed for warren scope: %v", err)
+				continue
+			}
+			for _, result := range localResults {
+				results = append(results, embedding.ScoredResult{
+					NodeID: "@" + vaultID + "/" + result.NodeID,
+					Score:  result.Score,
+				})
+			}
 			continue
 		}
 		remoteStore, err := s.engine.VaultRegistry.ResolveEmbeddingStore(vaultID)
@@ -619,6 +646,22 @@ func (s *Server) resolveSearchNode(id string) (*node.Node, *warren.Provenance, b
 	vaultID, nodeID, ok := warren.SplitQualifiedVaultID(id)
 	if !ok || s.engine.VaultRegistry == nil {
 		return nil, nil, false
+	}
+	// The workspace's own vault ID resolves against the live graph (zero
+	// staleness, no registry copy) with alias provenance; edits go through
+	// the unqualified local node, so the @-qualified view stays read-only.
+	if vaultID != "" && vaultID == s.engine.LocalVaultID {
+		n, ok := s.engine.GetGraph().GetNode(nodeID)
+		if !ok {
+			return nil, nil, false
+		}
+		return n, &warren.Provenance{
+			Source:      "local_alias",
+			VaultID:     vaultID,
+			MarmotDir:   s.engine.MarmotDir,
+			QualifiedID: id,
+			Editable:    false, // edit via the unqualified local node, not @-writes
+		}, true
 	}
 	n, ok := s.engine.VaultRegistry.Resolve(vaultID, nodeID)
 	if !ok {
@@ -891,7 +934,14 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 			resp.Skipped = append(resp.Skipped, mount.ProjectID)
 			continue
 		}
-		store := node.NewStore(mount.Path)
+		// A self-alias serves from the live workspace vault, never the warren
+		// snapshot; its @-qualified view stays read-only (edits go through
+		// the unqualified local node).
+		storeDir, provenanceSource, provenanceDir, provenanceEditable := mount.Path, "warren_mount", mount.Path, mount.Editable
+		if mount.SelfAlias {
+			storeDir, provenanceSource, provenanceDir, provenanceEditable = s.engine.MarmotDir, "local_alias", s.engine.MarmotDir, false
+		}
+		store := node.NewStore(storeDir)
 		g, err := graph.LoadGraph(store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: warren %q project %q graph unreadable: %v (skipped from graph)\n", id, mount.ProjectID, err)
@@ -905,13 +955,13 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 			apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
 			apiNode.ID = "@" + mount.VaultID + "/" + n.ID
 			apiNode.Provenance = &warren.Provenance{
-				Source:      "warren_mount",
+				Source:      provenanceSource,
 				WarrenID:    mount.WarrenID,
 				ProjectID:   mount.ProjectID,
 				VaultID:     mount.VaultID,
-				MarmotDir:   mount.Path,
+				MarmotDir:   provenanceDir,
 				QualifiedID: apiNode.ID,
-				Editable:    mount.Editable,
+				Editable:    provenanceEditable,
 			}
 			for i, edge := range apiNode.Edges {
 				edge.Source = apiNode.ID

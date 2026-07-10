@@ -98,16 +98,20 @@ func graphTTLFromEnv() time.Duration {
 }
 
 // seedBridgePathsLocked pre-registers vault paths from bridge manifests.
-// Caller must hold the write lock (or be the constructor).
+// Caller must hold the write lock (or be the constructor). The local vault's
+// own ID is never seeded: warren self-alias bridges carry the workspace's
+// live .marmot as an endpoint path, and seeding it would let the registry
+// resolve the local vault as a "remote" (a second read-only copy with TTL
+// staleness) through the bridge fallback in dirForLocked.
 func (r *VaultRegistry) seedBridgePathsLocked(bridges []*Bridge) {
 	for _, b := range bridges {
 		if !b.IsCrossVault() {
 			continue
 		}
-		if b.SourceVaultID != "" && b.SourceVaultPath != "" {
+		if b.SourceVaultID != "" && b.SourceVaultID != r.localVaultID && b.SourceVaultPath != "" {
 			r.pathToID[b.SourceVaultPath] = b.SourceVaultID
 		}
-		if b.TargetVaultID != "" && b.TargetVaultPath != "" {
+		if b.TargetVaultID != "" && b.TargetVaultID != r.localVaultID && b.TargetVaultPath != "" {
 			r.pathToID[b.TargetVaultPath] = b.TargetVaultID
 		}
 	}

@@ -202,8 +202,9 @@ func TestRoutesKnownVaultIDsNilRoutingTable(t *testing.T) {
 	ids := reg.KnownVaultIDs()
 	sort.Strings(ids)
 
-	if len(ids) != 2 || ids[0] != "v1" || ids[1] != "v2" {
-		t.Fatalf("expected [v1, v2], got %v", ids)
+	// The registry's own vault ID (v1) is never seeded from bridges.
+	if len(ids) != 1 || ids[0] != "v2" {
+		t.Fatalf("expected [v2] (local v1 never seeded), got %v", ids)
 	}
 }
 

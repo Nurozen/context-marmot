@@ -290,7 +290,10 @@ func (e *Engine) validateCrossVaultEdges(edges []node.Edge, currentNamespace str
 	}
 	for _, edge := range edges {
 		qid := e.NSManager.ParseQualifiedID(edge.Target, currentNamespace)
-		if qid.VaultID != "" {
+		// A "@<LocalVaultID>/x" target is a local edge wearing a costume:
+		// it resolves against the live vault, so it needs no
+		// LocalVaultID<->LocalVaultID bridge.
+		if qid.VaultID != "" && qid.VaultID != e.LocalVaultID {
 			if err := e.NSManager.ValidateCrossVaultEdge(e.LocalVaultID, qid.VaultID, string(edge.Relation)); err != nil {
 				return err
 			}
@@ -328,10 +331,14 @@ func (e *Engine) WithSummaryScheduler(ss *summary.Scheduler) {
 // WithVaultRegistry attaches a vault registry for cross-vault traversal.
 func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
 	e.VaultRegistry = vr
-	// Cache local vault ID to avoid repeated disk reads in handlers.
+	// Cache local vault ID to avoid repeated disk reads in handlers. An
+	// unreadable config leaves LocalVaultID empty, silently disabling every
+	// alias guard and cross-vault edge validation — degrade loudly.
 	if e.MarmotDir != "" {
 		if cfg, err := config.Load(e.MarmotDir); err == nil {
 			e.LocalVaultID = cfg.VaultID
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: local vault config unreadable (%v); vault_id unknown — self-mount aliasing and cross-vault edge validation disabled\n", err)
 		}
 	}
 }
@@ -340,8 +347,9 @@ func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
 func (e *Engine) graphResolver() traversal.GraphResolver {
 	if e.VaultRegistry != nil {
 		return &traversal.BridgedGraphResolver{
-			Local:  e.GetGraph(),
-			Vaults: e.VaultRegistry,
+			Local:        e.GetGraph(),
+			Vaults:       e.VaultRegistry,
+			LocalVaultID: e.LocalVaultID,
 		}
 	}
 	return e.GetGraph()

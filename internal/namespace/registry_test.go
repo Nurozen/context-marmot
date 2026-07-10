@@ -8,17 +8,38 @@ import (
 )
 
 func TestNewVaultRegistry(t *testing.T) {
+	// The local vault's own ID is never seeded from bridges (the registry
+	// must not resolve the local vault as a "remote"); only the foreign
+	// endpoint registers.
 	bridges := []*Bridge{
 		{SourceVaultID: "vault-a", TargetVaultID: "vault-b", SourceVaultPath: "/tmp/a", TargetVaultPath: "/tmp/b"},
 	}
 	r := NewVaultRegistry("vault-a", "/tmp/a", bridges, nil)
 	ids := r.KnownVaultIDs()
 	sort.Strings(ids)
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 known vault IDs, got %d: %v", len(ids), ids)
+	if len(ids) != 1 || ids[0] != "vault-b" {
+		t.Fatalf("expected [vault-b] (local vault-a never seeded), got %v", ids)
 	}
-	if ids[0] != "vault-a" || ids[1] != "vault-b" {
-		t.Fatalf("expected [vault-a vault-b], got %v", ids)
+}
+
+// TestSeedBridgePathsSkipsLocalVaultID (R1.4b): a bridge whose endpoint ID
+// equals the registry's local vault ID seeds only the other endpoint into
+// pathToID — otherwise the bridge fallback in dirForLocked would re-open the
+// registry-resolves-self door that warren self-alias bridges (which carry the
+// live workspace .marmot as an endpoint path) would trip.
+func TestSeedBridgePathsSkipsLocalVaultID(t *testing.T) {
+	bridges := []*Bridge{
+		{SourceVaultID: "local", TargetVaultID: "remote", SourceVaultPath: "/tmp/local-ws", TargetVaultPath: "/tmp/remote"},
+		{SourceVaultID: "other", TargetVaultID: "local", SourceVaultPath: "/tmp/other", TargetVaultPath: "/tmp/local-ws"},
+	}
+	r := NewVaultRegistry("local", "/tmp/local-ws", bridges, nil)
+	ids := r.KnownVaultIDs()
+	sort.Strings(ids)
+	if len(ids) != 2 || ids[0] != "other" || ids[1] != "remote" {
+		t.Fatalf("expected [other remote] (local skipped on both sides), got %v", ids)
+	}
+	if got := r.pathToID["/tmp/local-ws"]; got != "" {
+		t.Fatalf("local workspace path seeded into pathToID as %q, want unseeded", got)
 	}
 }
 

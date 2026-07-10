@@ -340,6 +340,49 @@ func TestWarrenDoctorWorkspaceCLI(t *testing.T) {
 	}
 }
 
+// TestWarrenDoctorWorkspaceSelfAliasHealthyCLI (R1.6 companion): a self-alias
+// mount (project vault_id == workspace vault_id) is healthy — doctor exits 0
+// and reports it as the self_alias_mount info, agreeing with mount.
+func TestWarrenDoctorWorkspaceSelfAliasHealthyCLI(t *testing.T) {
+	t.Setenv("MARMOT_ROUTES", "off")
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "---\nversion: \"1\"\nvault_id: self-vault\nnamespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warrenRoot := testWarrenRoot(t, "wp", "self-proj")
+	dir := filepath.Join(warrenRoot, "projects", "self-proj", ".marmot")
+	meta, body, err := warrenpkg.LoadProjectMetadata(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.VaultID = "self-vault"
+	if err := warrenpkg.SaveProjectMetadata(dir, meta, body); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatal("register failed")
+	}
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "self-proj"}); code != 0 {
+		t.Fatal("self-alias mount failed")
+	}
+
+	stdout, _, code := captureRunBoth(t, []string{"warren", "doctor", "--workspace", "--dir", marmotDir, "--json"})
+	if code != 0 {
+		t.Fatalf("doctor --workspace on a self-alias mount = code %d, want 0 (stdout %q)", code, stdout)
+	}
+	if !strings.Contains(stdout, "self_alias_mount") {
+		t.Fatalf("doctor JSON missing self_alias_mount info: %q", stdout)
+	}
+	if strings.Contains(stdout, "vault_id_collision_workspace") {
+		t.Fatalf("self-alias reported as collision: %q", stdout)
+	}
+}
+
 // TestWarrenMountModelSkewWarning (D5.1 workspace side): mounting a project
 // indexed with a different embedding model warns on stderr but stays legal;
 // matching models stay quiet.

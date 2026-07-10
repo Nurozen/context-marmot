@@ -427,19 +427,14 @@ func TestMountRefusesVaultIDCollision(t *testing.T) {
 	}
 }
 
-// TestMountLocalVaultCollisionWarnsOnly: mounting the warren copy of *this*
-// project (same vault ID as the local vault) is the documented way to
-// activate warren bridges, so it warns instead of refusing.
-func TestMountLocalVaultCollisionWarnsOnly(t *testing.T) {
+// TestMountSelfAliasesLiveVault: mounting the warren copy of *this* project
+// (same vault ID as the local vault) succeeds as a self-alias: the mount
+// activates the warren's bridges against the LIVE vault, claims no route,
+// and can never be editable. (This replaces the pre-alias deliberate
+// deviation that warned and let the mount shadow the live vault.)
+func TestMountSelfAliasesLiveVault(t *testing.T) {
 	workspace, _ := registerAndMount(t, "project-a")
-	marmotDir := workspaceMarmotDir(workspace)
-	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	cfg := "---\nversion: \"1\"\nvault_id: project-a-vault\nnamespace: default\nembedding_provider: mock\n---\n"
-	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(cfg), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
 
 	var warned bytes.Buffer
 	oldWarn := warnWriter
@@ -447,10 +442,46 @@ func TestMountLocalVaultCollisionWarnsOnly(t *testing.T) {
 	defer func() { warnWriter = oldWarn }()
 
 	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
-		t.Fatalf("local-vault collision must warn, not refuse: %v", err)
+		t.Fatalf("self-alias mount must succeed: %v", err)
 	}
-	if !strings.Contains(warned.String(), "matches the local workspace vault") {
-		t.Fatalf("expected local-vault warning, got %q", warned.String())
+	if !strings.Contains(warned.String(), "mounting as an alias of the live local vault") {
+		t.Fatalf("expected self-alias note, got %q", warned.String())
+	}
+
+	mounts, err := ActiveMounts(workspaceMarmotDir(workspace))
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	if len(mounts) != 1 || !mounts[0].SelfAlias {
+		t.Fatalf("mounts = %+v, want one SelfAlias mount", mounts)
+	}
+
+	// A subsequent status carries no editable flag.
+	statuses, err := Status(workspace, "product-platform")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	for _, status := range statuses {
+		if status.Editable {
+			t.Fatalf("self-alias status carries editable flag: %+v", status)
+		}
+		if !status.SelfAlias {
+			t.Fatalf("status missing SelfAlias: %+v", status)
+		}
+	}
+}
+
+// writeSelfVaultConfig gives the workspace's live vault a vault_id so warren
+// projects carrying the same ID become self-aliases.
+func writeSelfVaultConfig(t *testing.T, workspace, vaultID string) {
+	t.Helper()
+	marmotDir := workspaceMarmotDir(workspace)
+	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "---\nversion: \"1\"\nvault_id: " + vaultID + "\nnamespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

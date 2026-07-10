@@ -115,7 +115,10 @@ edges:
 
 Only active mounted Warren projects participate. A bridge to a dormant Warren
 project is retained as policy in the manifest, but it is not queryable or
-accepted for writes until that project is mounted.
+accepted for writes until that project is mounted. A self-alias mount (a
+Warren project whose `vault_id` equals this workspace's own) satisfies the
+endpoint requirement, and its side of the bridge resolves to the live
+workspace vault rather than the Warren copy.
 
 ## Namespace setup
 

@@ -3,6 +3,7 @@ package mcp
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/routes"
@@ -41,6 +42,17 @@ func (e *Engine) ReloadWarrenState() error {
 	} else {
 		for _, mount := range mounts {
 			if mount.VaultID == "" || !mount.Available {
+				continue
+			}
+			if mount.SelfAlias {
+				// Self-alias: the live local vault answers for this vault ID.
+				// A route to the warren copy would shadow it with a stale
+				// snapshot (the pre-R1 bug); routes.yml may legitimately map
+				// this ID to our own live path (that is how OTHER workspaces
+				// resolve us) — leave whatever is there alone. Keyed on the
+				// fresh SelfAlias (derived from _config.md by ActiveMounts),
+				// not e.LocalVaultID, so a daemon whose cached ID went stale
+				// still skips correctly.
 				continue
 			}
 			if prev, ok := rt.Get(mount.VaultID); ok && prev != mount.Path {
@@ -110,6 +122,12 @@ func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*n
 		fmt.Fprintf(os.Stderr, "warning: warren workspace state unreadable (%s): %v — cross-vault bridge policy NOT enforced\n", marmotDir, err)
 		return nil, false
 	}
+	// Self-alias bridge endpoints resolve to the live workspace vault, never
+	// the warren copy (which would serve a stale snapshot).
+	absMarmotDir, err := filepath.Abs(marmotDir)
+	if err != nil {
+		absMarmotDir = marmotDir
+	}
 
 	active := make(map[string]map[string]warren.ProjectStatus)
 	for _, mount := range mounts {
@@ -146,6 +164,22 @@ func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*n
 			if !sourceOK || !targetOK || source.VaultID == "" || target.VaultID == "" {
 				continue
 			}
+			if source.VaultID == target.VaultID {
+				// Both endpoints resolve to one vault (e.g. both alias the
+				// local vault): a self-bridge is meaningless — skip, don't
+				// synthesize.
+				continue
+			}
+			// A self-alias endpoint serves from the live workspace vault; the
+			// vault IDs stay unchanged so cross-vault edge validation still
+			// matches the bridge by ID.
+			sourcePath, targetPath := source.Path, target.Path
+			if source.SelfAlias {
+				sourcePath = absMarmotDir
+			}
+			if target.SelfAlias {
+				targetPath = absMarmotDir
+			}
 			key := runtimeBridgeKey(source.VaultID, target.VaultID)
 			runtimeBridge, ok := merged[key]
 			if !ok {
@@ -154,8 +188,8 @@ func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*n
 					Target:          bridge.Target,
 					SourceVaultID:   source.VaultID,
 					TargetVaultID:   target.VaultID,
-					SourceVaultPath: source.Path,
-					TargetVaultPath: target.Path,
+					SourceVaultPath: sourcePath,
+					TargetVaultPath: targetPath,
 				}
 				merged[key] = runtimeBridge
 				relationSets[key] = make(map[string]bool)

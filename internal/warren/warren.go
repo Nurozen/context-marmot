@@ -16,6 +16,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/flock"
 	"github.com/nurozen/context-marmot/internal/frontmatter"
 	"github.com/nurozen/context-marmot/internal/node"
+	"github.com/nurozen/context-marmot/internal/routes"
 	"gopkg.in/yaml.v3"
 )
 
@@ -104,6 +105,13 @@ type ProjectStatus struct {
 	Editable     bool   `json:"editable"`
 	Materialized bool   `json:"materialized"`
 	Available    bool   `json:"available"`
+	// SelfAlias reports that this project's vault_id matches the live local
+	// vault's: the mount is served as an alias of the live vault — it claims
+	// no route and is never editable or materialized. Derived fresh from
+	// _config.md on every status build, so it can skew from an engine's
+	// cached LocalVaultID until restart when vault_id is edited under a live
+	// daemon (the same restart requirement every cached config field has).
+	SelfAlias bool `json:"self_alias,omitempty"`
 }
 
 // Provenance describes where an API/search node came from.
@@ -806,17 +814,21 @@ func gitignoreHasEntry(root, entry string) bool {
 	return false
 }
 
-// DoctorWorkspace checks workspace-level warren consistency — today, vault-ID
+// DoctorWorkspace checks workspace-level warren consistency: vault-ID
 // collisions across the local vault and every registered warren's active
-// projects. Mount refuses *new* collisions; this catches legacy state
-// written by older binaries (or hand edits), where queries resolve to one
-// claimant arbitrarily.
+// projects, plus self-alias health. Mount refuses new collisions
+// unconditionally, so doctor errors exactly where mount refuses (editable
+// self-mounts, true collisions) and is healthy exactly where mount permits
+// (plain self-aliases, reported as info). Legacy editable/materialized
+// self-mount state written by older binaries surfaces here with its
+// remediation verb.
 func DoctorWorkspace(workspaceMarmotDir, workspaceRoot string) (DoctorReport, error) {
 	state, _, err := LoadWorkspaceState(workspaceRoot)
 	if err != nil {
 		return DoctorReport{}, err
 	}
 	report := DoctorReport{}
+	local := sourceVaultID(workspaceMarmotDir)
 	claims := vaultIDClaims(workspaceMarmotDir, state)
 	vaultIDs := make([]string, 0, len(claims))
 	for vaultID := range claims {
@@ -826,6 +838,42 @@ func DoctorWorkspace(workspaceMarmotDir, workspaceRoot string) (DoctorReport, er
 	for _, vaultID := range vaultIDs {
 		owners := claims[vaultID]
 		if len(owners) < 2 {
+			continue
+		}
+		if local != "" && vaultID == local {
+			// The non-local claimants are self-aliases of the live vault, not
+			// duplicate claims: they never route, so nothing resolves
+			// arbitrarily. Plain aliases are info; legacy editable state is
+			// the split-brain error; a legacy burrow cache is a stale shadow
+			// warning.
+			for _, owner := range owners {
+				if owner.WarrenID == "" {
+					continue // the local vault's own claim
+				}
+				report.Issues = append(report.Issues, DoctorIssue{
+					Severity:  "info",
+					Code:      "self_alias_mount",
+					Message:   fmt.Sprintf("project %s/%s aliases the local workspace vault (vault ID %q); it serves from the live vault", owner.WarrenID, owner.ProjectID, vaultID),
+					ProjectID: owner.ProjectID,
+				})
+				if containsName(state.Warrens[owner.WarrenID].EditableProjects, owner.ProjectID) {
+					report.Issues = append(report.Issues, DoctorIssue{
+						Severity:  "error",
+						Code:      "self_alias_editable",
+						Message:   fmt.Sprintf("project %s/%s aliases the local vault but is marked editable — @-writes would split-brain; run 'marmot warren edit %s --warren %s --off'", owner.WarrenID, owner.ProjectID, owner.ProjectID, owner.WarrenID),
+						ProjectID: owner.ProjectID,
+					})
+				}
+				if cached := materializedProjectPath(workspaceMarmotDir, owner.WarrenID, owner.ProjectID); dirExists(cached) {
+					report.Issues = append(report.Issues, DoctorIssue{
+						Severity:  "warning",
+						Code:      "self_alias_materialized",
+						Message:   fmt.Sprintf("project %s/%s aliases the local vault but has a burrow cache (a stale shadow of the live vault); drop it with 'marmot warren burrow --drop --warren %s %s'", owner.WarrenID, owner.ProjectID, owner.WarrenID, owner.ProjectID),
+						ProjectID: owner.ProjectID,
+						Path:      cached,
+					})
+				}
+			}
 			continue
 		}
 		names := make([]string, 0, len(owners))
@@ -842,7 +890,53 @@ func DoctorWorkspace(workspaceMarmotDir, workspaceRoot string) (DoctorReport, er
 			Message:  fmt.Sprintf("vault ID %q is claimed by %s; queries resolve to one of them arbitrarily — unmount or re-import with distinct vault IDs", vaultID, strings.Join(names, " and ")),
 		})
 	}
+	report.Issues = append(report.Issues, localRouteMismatchIssue(workspaceMarmotDir, local)...)
 	return report, nil
+}
+
+// localRouteMismatchIssue warns when the global routing table maps the local
+// vault ID to a path other than this workspace's .marmot — the one remaining
+// manual way ('marmot route add') to shadow the live vault with another copy.
+// Warning, not error: two checkouts of one repo legitimately share a
+// vault_id. Best-effort in every direction: no local ID, an unreadable or
+// disabled routing table, and unresolvable paths all stay silent.
+func localRouteMismatchIssue(workspaceMarmotDir, local string) []DoctorIssue {
+	if local == "" {
+		return nil
+	}
+	rt, err := routes.Load()
+	if err != nil || rt == nil {
+		return nil
+	}
+	routed, ok := rt.Get(local)
+	if !ok {
+		return nil
+	}
+	absLocal, err := filepath.Abs(workspaceMarmotDir)
+	if err != nil {
+		return nil
+	}
+	if sameResolvedPath(routed, absLocal) {
+		return nil
+	}
+	return []DoctorIssue{{
+		Severity: "warning",
+		Code:     "local_route_mismatch",
+		Message:  fmt.Sprintf("global routing table maps this workspace's vault ID %q to %s, not this workspace's %s; @-references resolved through routes.yml will read that copy — fix with 'marmot route add %s %s' if this workspace should answer", local, routed, absLocal, local, absLocal),
+		Path:     routed,
+	}}
+}
+
+// sameResolvedPath compares two paths after best-effort symlink resolution
+// (macOS tempdirs live under the /var -> /private/var symlink); it falls
+// back to samePath's lexical comparison when either side cannot resolve.
+func sameResolvedPath(a, b string) bool {
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA == nil && errB == nil {
+		return filepath.Clean(ra) == filepath.Clean(rb)
+	}
+	return samePath(a, b)
 }
 
 // Format rewrites the manifest with canonical YAML while preserving markdown body text.
@@ -1059,6 +1153,7 @@ func RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot string) (*Works
 // Mount marks projects active in the local workspace.
 func Mount(workspaceRoot, warrenID string, projects []string, materialized bool) (*WorkspaceState, error) {
 	wsMarmotDir := workspaceMarmotDir(workspaceRoot)
+	local := sourceVaultID(wsMarmotDir)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
@@ -1091,6 +1186,21 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 			// duplicate would be resolved last-mount-wins at runtime, silently
 			// answering queries from the wrong project. Refuse at mount time.
 			vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
+			if local != "" && vaultID == local {
+				// Self-alias: this project IS the workspace vault. It activates the
+				// warren's bridges against the live vault; it claims no route and can
+				// never be editable or materialized (a cache/copy would be a stale or
+				// split-brained shadow).
+				if materialized {
+					return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; a self-alias serves from the live vault and cannot be materialized — mount without --materialize", projectID, warrenID, vaultID)
+				}
+				if containsName(entry.EditableProjects, projectID) {
+					return fmt.Errorf("project %q in warren %q is marked editable but has this workspace's own vault ID %q; edit it directly in this workspace — run 'marmot warren edit %s --warren %s --off' first", projectID, warrenID, vaultID, projectID, warrenID)
+				}
+				fmt.Fprintf(warnWriter, "note: project %s/%s shares this workspace's vault ID %q; mounting as an alias of the live local vault (bridges activate; queries and writes stay local)\n", warrenID, projectID, vaultID)
+				entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
+				continue // no vault-ID claim: aliases don't own a route
+			}
 			if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
 				return err
 			}
@@ -1137,6 +1247,16 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 		if editable && project.ReadOnly {
 			return fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", projectID)
 		}
+		// Self-alias (vault_id matches the live local vault): the mount is a
+		// read-through view of the live vault, so editable would split-brain
+		// writes into the warren checkout. Disabling (--off) stays allowed —
+		// it is the legacy-state escape hatch.
+		vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
+		local := sourceVaultID(wsMarmotDir)
+		selfAlias := local != "" && vaultID == local
+		if selfAlias && editable {
+			return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; it is served as an alias of the live vault — edit nodes directly in this workspace (no @ prefix) instead of enabling warren edit", projectID, warrenID, vaultID)
+		}
 		// Refuse editable on a burrowed project: edits would land in the
 		// materialized cache and never sync back to the checkout, while
 		// `warren propose` tells the user to commit a checkout that never
@@ -1151,9 +1271,10 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 		}
 		// Edit implies mount: when the project is not yet active this is an
 		// auto-mount, so it gets the same vault-ID collision refusal as Mount.
-		if !containsName(entry.ActiveProjects, projectID) {
+		// A self-alias skips it exactly as Mount does (an --off on an
+		// unmounted self project just becomes an alias mount).
+		if !containsName(entry.ActiveProjects, projectID) && !selfAlias {
 			claimed := claimedVaultIDs(wsMarmotDir, state)
-			vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
 			if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
 				return err
 			}
@@ -1410,21 +1531,21 @@ func mountVaultID(workspaceMarmotDir, warrenID string, entry WorkspaceWarren, pr
 }
 
 // refuseVaultIDCollision errors when vaultID is already claimed by another
-// mounted warren project. A collision with the local workspace vault only
-// warns: mounting the warren copy of *this* project (same vault ID) is the
-// documented way to activate warren bridges for local writes, so it must
-// stay allowed — but the routing-table shadowing it causes should be
-// visible.
+// mounted warren project or by the local workspace vault. It is
+// unconditional: every true conflict (two claimants that are not the local
+// vault plus its self-aliases) refuses. Mount and SetEditable short-circuit
+// self-aliases before calling this, so the local-claim case is unreachable
+// from them — it stays refusing (not warning) as defense for future callers.
 func refuseVaultIDCollision(claimed map[string]vaultClaim, vaultID, warrenID, projectID string) error {
 	claim, taken := claimed[vaultID]
 	if !taken || (claim.WarrenID == warrenID && claim.ProjectID == projectID) {
 		return nil
 	}
+	owner := claim.WarrenID + "/" + claim.ProjectID
 	if claim.WarrenID == "" {
-		fmt.Fprintf(warnWriter, "warning: vault ID %q of project %s/%s matches the local workspace vault; cross-vault queries for %q will resolve to the mounted copy\n", vaultID, warrenID, projectID, vaultID)
-		return nil
+		owner = claim.ProjectID // "the local workspace vault"
 	}
-	return fmt.Errorf("vault ID %q of project %s/%s collides with %s/%s already mounted in this workspace", vaultID, warrenID, projectID, claim.WarrenID, claim.ProjectID)
+	return fmt.Errorf("vault ID %q of project %s/%s collides with %s already mounted in this workspace", vaultID, warrenID, projectID, owner)
 }
 
 // SplitQualifiedVaultID splits a qualified "@vault-id/node-id" reference into
@@ -1543,6 +1664,7 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 		}
 		return statuses, nil
 	}
+	local := sourceVaultID(workspaceMarmotDir(workspaceRoot))
 	projects := make([]ProjectStatus, 0, len(manifest.Projects))
 	for _, project := range manifest.Projects {
 		sourceDir := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
@@ -1555,6 +1677,7 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 		if meta != nil {
 			vaultID = meta.VaultID
 		}
+		selfAlias := local != "" && vaultID == local
 		_, statErr := os.Stat(marmotDir)
 		projects = append(projects, ProjectStatus{
 			WarrenID:   warrenID,
@@ -1566,10 +1689,12 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 			Active:     containsName(entry.ActiveProjects, project.ProjectID),
 			// Author-side readonly policy trumps the workspace's editable
 			// flag, so the UI save button and MCP/API rejections follow the
-			// manifest without any client change.
-			Editable:     containsName(entry.EditableProjects, project.ProjectID) && !project.ReadOnly,
+			// manifest without any client change; a self-alias is never
+			// editable (writes go to the live vault).
+			Editable:     containsName(entry.EditableProjects, project.ProjectID) && !project.ReadOnly && !selfAlias,
 			Materialized: entry.Materialized && dirExists(materializedProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, project.ProjectID)),
 			Available:    statErr == nil,
+			SelfAlias:    selfAlias,
 		})
 	}
 	sort.Slice(projects, func(i, j int) bool { return projects[i].ProjectID < projects[j].ProjectID })
@@ -1582,6 +1707,7 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	local := sourceVaultID(marmotDir)
 	var mounts []ProjectStatus
 	for warrenID, entry := range state.Warrens {
 		manifest, _, err := LoadManifest(entry.Path)
@@ -1609,6 +1735,7 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 			if meta != nil && meta.VaultID != "" {
 				vaultID = meta.VaultID
 			}
+			selfAlias := local != "" && vaultID == local
 			mounts = append(mounts, ProjectStatus{
 				WarrenID:   warrenID,
 				WarrenPath: entry.Path,
@@ -1618,10 +1745,12 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 				Registered: true,
 				Active:     true,
 				// Author-side readonly policy trumps the workspace's
-				// editable flag (see Status).
-				Editable:     containsName(entry.EditableProjects, projectID) && !project.ReadOnly,
+				// editable flag (see Status); a self-alias is never editable
+				// (writes go to the live vault, never the warren copy).
+				Editable:     containsName(entry.EditableProjects, projectID) && !project.ReadOnly && !selfAlias,
 				Materialized: entry.Materialized && marmotPath == materializedProjectPath(marmotDir, warrenID, projectID),
 				Available:    dirExists(marmotPath),
+				SelfAlias:    selfAlias,
 			})
 		}
 	}
@@ -1649,6 +1778,19 @@ func ActiveMounts(marmotDir string) ([]ProjectStatus, error) {
 // defined as "stale", so the failure mode is one extra re-copy.
 func Materialize(workspaceMarmotDir, warrenID string, project Project, warrenRoot, sourceCommit string) (string, error) {
 	source := filepath.Join(warrenRoot, filepath.FromSlash(project.Path))
+	// Self-alias backstop: a burrow cache of the workspace's own vault would
+	// be a stale shadow that the reload loop must never route. Mount already
+	// refuses --materialize on self-aliases; this guards the CLI's direct
+	// Materialize calls (post-mount loop, refresh --pull).
+	if local := sourceVaultID(workspaceMarmotDir); local != "" {
+		vaultID := project.ProjectID
+		if meta, _, err := LoadProjectMetadata(source); err == nil && meta != nil && meta.VaultID != "" {
+			vaultID = meta.VaultID
+		}
+		if vaultID == local {
+			return "", fmt.Errorf("refusing to materialize project %q: vault ID %q is this workspace's own vault; a burrow cache would be a stale shadow of the live vault", project.ProjectID, vaultID)
+		}
+	}
 	target := materializedProjectPath(workspaceMarmotDir, warrenID, project.ProjectID)
 	// Flush the source DB's WAL so the sidecar-excluding copy is complete.
 	checkpointEmbeddings(source)
@@ -1685,6 +1827,7 @@ func loadProjectMetadataWarn(marmotDir, warrenID, projectID string) *ProjectMeta
 }
 
 func materializedStatuses(workspaceMarmotDir, warrenID string, entry WorkspaceWarren) []ProjectStatus {
+	local := sourceVaultID(workspaceMarmotDir)
 	var statuses []ProjectStatus
 	for _, projectID := range entry.ActiveProjects {
 		cached := materializedProjectPath(workspaceMarmotDir, warrenID, projectID)
@@ -1693,6 +1836,7 @@ func materializedStatuses(workspaceMarmotDir, warrenID string, entry WorkspaceWa
 		if meta != nil && meta.VaultID != "" {
 			vaultID = meta.VaultID
 		}
+		selfAlias := local != "" && vaultID == local
 		statuses = append(statuses, ProjectStatus{
 			WarrenID:     warrenID,
 			WarrenPath:   entry.Path,
@@ -1701,9 +1845,10 @@ func materializedStatuses(workspaceMarmotDir, warrenID string, entry WorkspaceWa
 			VaultID:      vaultID,
 			Registered:   meta != nil,
 			Active:       true,
-			Editable:     containsName(entry.EditableProjects, projectID),
+			Editable:     containsName(entry.EditableProjects, projectID) && !selfAlias,
 			Materialized: dirExists(cached),
 			Available:    dirExists(cached),
+			SelfAlias:    selfAlias,
 		})
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ProjectID < statuses[j].ProjectID })
@@ -2330,6 +2475,14 @@ func sanitizeConfigValue(value any) (any, bool) {
 	default:
 		return value, true
 	}
+}
+
+// LocalVaultID reads the live vault's vault_id from <marmotDir>/_config.md.
+// It returns "" on a missing file, unparseable frontmatter, or an absent key —
+// the single probe shared by the warren layer, cmd/marmot, and tests for the
+// self-alias predicate (local != "" && vaultID == local).
+func LocalVaultID(marmotDir string) string {
+	return sourceVaultID(marmotDir)
 }
 
 func sourceVaultID(marmotDir string) string {

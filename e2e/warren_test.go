@@ -614,3 +614,223 @@ func shortHash(commit string) string {
 	}
 	return commit
 }
+
+// --- Self-mount aliasing (R1; plan: artifacts/warren_identity_ux_plan.md) ---
+
+const (
+	selfWarrenID  = "wsa"
+	selfProj      = "self"
+	consumerVault = "consumer-vault"
+	selfNodeID    = "e2e/selfnode"
+	selfStaleText = "Falcon migration ledger stanza original snapshot rev."
+	selfLiveText  = "Falcon migration ledger stanza crimson addendum rev."
+
+	bridgeheadID    = "e2e/bridgehead"
+	bridgeheadText  = "Wombat bridgehead cartography referencing the consumer ledger."
+	bridgeheadQuery = "wombat bridgehead cartography consumer ledger"
+)
+
+// writeSummaryNode writes a node file with an explicit frontmatter summary
+// (query output renders summaries, so tests can assert on the text) and an
+// optional raw edges YAML block.
+func writeSummaryNode(t *testing.T, vaultDir, id, summary, edgesYAML string) {
+	t.Helper()
+	content := "---\nid: " + id + "\ntype: concept\nnamespace: default\nstatus: active\nsummary: " + summary + "\n" + edgesYAML + "---\n\n" + summary + "\n"
+	path := filepath.Join(vaultDir, filepath.FromSlash(id)+".md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedSelfAliasWarren builds the self-mount fixture: a consumer workspace
+// whose _config.md carries a vault_id, a warren holding (a) the consumer's
+// own project imported WITHOUT --vault-id — the vault_id-preserving import
+// path that creates the collision by construction — and (b) a second project
+// whose marker node's edge crosses the manifest bridge into the consumer's
+// vault via a self-qualified target. After the import, the live consumer
+// node diverges from the warren snapshot so tests can tell which copy a
+// query served.
+func seedSelfAliasWarren(t *testing.T) (warrenRoot, consumer string) {
+	t.Helper()
+	consumer = seedProject(t)
+	cfg := "---\nversion: \"1\"\nvault_id: " + consumerVault + "\nnamespace: default\nembedding_provider: mock\ntoken_budget: 8192\n---\n"
+	if err := os.WriteFile(filepath.Join(consumer, ".marmot", "_config.md"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeSummaryNode(t, filepath.Join(consumer, ".marmot"), selfNodeID, selfStaleText, "")
+	if out, err := runCLI(consumer, "index", "--dir", ".marmot"); err != nil {
+		t.Fatalf("index consumer: %v\n%s", err, out)
+	}
+
+	warrenRoot = t.TempDir()
+	if out, err := runCLI(warrenRoot, "warren", "init", "--id", selfWarrenID); err != nil {
+		t.Fatalf("warren init: %v\n%s", err, out)
+	}
+	// Import self WITHOUT --vault-id: the copy keeps consumer-vault.
+	if out, err := runCLI(warrenRoot, "warren", "project", "import", selfProj,
+		filepath.Join(consumer, ".marmot")); err != nil {
+		t.Fatalf("import %s: %v\n%s", selfProj, err, out)
+	}
+
+	// Second project: its marker node references the consumer's node with a
+	// self-qualified target, so a query entering here traverses the bridge.
+	srcB := seedProject(t)
+	edges := "edges:\n    - target: \"@" + consumerVault + "/" + selfNodeID + "\"\n      relation: references\n"
+	writeSummaryNode(t, filepath.Join(srcB, ".marmot"), bridgeheadID, bridgeheadText, edges)
+	if out, err := runCLI(srcB, "index", "--dir", ".marmot"); err != nil {
+		t.Fatalf("index source B: %v\n%s", err, out)
+	}
+	if out, err := runCLI(warrenRoot, "warren", "project", "import", projB,
+		filepath.Join(srcB, ".marmot"), "--vault-id", projBVault); err != nil {
+		t.Fatalf("import %s: %v\n%s", projB, err, out)
+	}
+	if out, err := runCLI(warrenRoot, "warren", "bridge", "add", selfProj, projB,
+		"--warren-dir", ".", "--relations", "references"); err != nil {
+		t.Fatalf("warren bridge add: %v\n%s", err, out)
+	}
+
+	// The live vault moves on after the import: the snapshot is now stale.
+	writeSummaryNode(t, filepath.Join(consumer, ".marmot"), selfNodeID, selfLiveText, "")
+	if out, err := runCLI(consumer, "index", "--dir", ".marmot"); err != nil {
+		t.Fatalf("re-index consumer: %v\n%s", err, out)
+	}
+	return warrenRoot, consumer
+}
+
+// TestWarrenSelfMountAlias is the R1 scenario: mounting the warren copy of
+// this workspace's own project (same vault_id — no e2e test exercised a
+// colliding vault_id before) succeeds as a self-alias that activates bridges
+// against the LIVE vault, refuses edit/materialize, and keeps doctor healthy.
+func TestWarrenSelfMountAlias(t *testing.T) {
+	warrenRoot, consumer := seedSelfAliasWarren(t)
+
+	if out, err := runCLI(consumer, "warren", "register", "--dir", ".marmot", selfWarrenID, warrenRoot); err != nil {
+		t.Fatalf("warren register: %v\n%s", err, out)
+	}
+	out, err := runCLI(consumer, "warren", "mount", "--dir", ".marmot", "--warren", selfWarrenID, "--all")
+	if err != nil {
+		t.Fatalf("warren mount --all: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "mounting as an alias of the live local vault") {
+		t.Fatalf("mount output missing the self-alias note:\n%s", out)
+	}
+
+	// A query entering the foreign project traverses the manifest bridge into
+	// @consumer-vault/... and must land on the LIVE node, never the snapshot.
+	queryOut, err := runCLI(consumer, "query", "--dir", ".marmot", "--query", bridgeheadQuery)
+	if err != nil {
+		t.Fatalf("query: %v\n%s", err, queryOut)
+	}
+	if !strings.Contains(queryOut, "@"+projBVault+"/"+bridgeheadID) {
+		t.Errorf("query missing the bridge entry @%s/%s:\n%s", projBVault, bridgeheadID, queryOut)
+	}
+	if !strings.Contains(queryOut, "@"+consumerVault+"/"+selfNodeID) {
+		t.Errorf("bridge traversal missing the self-qualified node @%s/%s:\n%s", consumerVault, selfNodeID, queryOut)
+	}
+	if !strings.Contains(queryOut, "crimson addendum") {
+		t.Errorf("@%s/%s did not resolve to the LIVE vault:\n%s", consumerVault, selfNodeID, queryOut)
+	}
+	if strings.Contains(queryOut, "original snapshot") {
+		t.Errorf("query served the STALE warren snapshot:\n%s", queryOut)
+	}
+
+	// Plain local query still answers with the live content too.
+	liveOut, err := runCLI(consumer, "query", "--dir", ".marmot", "--query", "falcon migration ledger crimson addendum")
+	if err != nil {
+		t.Fatalf("live query: %v\n%s", err, liveOut)
+	}
+	if !strings.Contains(liveOut, selfNodeID) || !strings.Contains(liveOut, "crimson addendum") {
+		t.Errorf("live local query missing the updated node:\n%s", liveOut)
+	}
+
+	// Self-aliases can never be editable or materialized.
+	editOut, editErr := runCLI(consumer, "warren", "edit", "--dir", ".marmot", "--warren", selfWarrenID, selfProj)
+	if editErr == nil {
+		t.Fatalf("warren edit on a self-alias succeeded:\n%s", editOut)
+	}
+	if !strings.Contains(editOut, "alias of the live vault") {
+		t.Errorf("edit refusal missing the alias message:\n%s", editOut)
+	}
+	burrowOut, burrowErr := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", selfWarrenID, "--materialize", selfProj)
+	if burrowErr == nil {
+		t.Fatalf("warren burrow --materialize on a self-alias succeeded:\n%s", burrowOut)
+	}
+	if !strings.Contains(burrowOut, "cannot be materialized") {
+		t.Errorf("burrow refusal missing the self-alias message:\n%s", burrowOut)
+	}
+
+	// Doctor agrees with mount: the alias is healthy (exit 0) and reported
+	// as info, not a collision.
+	doctorOut, doctorErr := runCLI(consumer, "warren", "doctor", "--workspace", "--dir", ".marmot", "--json")
+	if doctorErr != nil {
+		t.Fatalf("warren doctor --workspace on a self-alias mount failed: %v\n%s", doctorErr, doctorOut)
+	}
+	if !strings.Contains(doctorOut, "self_alias_mount") {
+		t.Errorf("doctor JSON missing self_alias_mount:\n%s", doctorOut)
+	}
+	if strings.Contains(doctorOut, "vault_id_collision_workspace") {
+		t.Errorf("doctor reported the self-alias as a collision:\n%s", doctorOut)
+	}
+}
+
+// TestWarrenSelfMountAliasLiveOwner is the liveness variant (template:
+// TestWarrenMountWhileOwnerLive): with a daemon owner serving the consumer
+// vault, a second process mounts the self project (plus the foreign one) —
+// the owner's reload must NOT shadow the live vault: once the foreign mount
+// is visible (proof the reload ran), bridge traversal through the daemon
+// still returns the live content.
+func TestWarrenSelfMountAliasLiveOwner(t *testing.T) {
+	warrenRoot, consumer := seedSelfAliasWarren(t)
+	owner := startMCPDaemon(t, consumer)
+
+	// Baseline: nothing mounted, no @pb-vault results yet.
+	baseline := owner.callTool(950, "context_query", map[string]any{
+		"query": bridgeheadQuery, "budget": 6000,
+	})
+	if strings.Contains(baseline, "@"+projBVault+"/") {
+		t.Fatalf("warren results visible before any mount:\n%s", baseline)
+	}
+
+	// Register + mount + refresh from separate CLI processes while the owner
+	// keeps serving.
+	if out, err := runCLI(consumer, "warren", "register", "--dir", ".marmot", selfWarrenID, warrenRoot); err != nil {
+		t.Fatalf("warren register: %v\n%s", err, out)
+	}
+	out, err := runCLI(consumer, "warren", "mount", "--dir", ".marmot", "--warren", selfWarrenID, "--all")
+	if err != nil {
+		t.Fatalf("warren mount --all: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "mounting as an alias of the live local vault") {
+		t.Fatalf("mount output missing the self-alias note:\n%s", out)
+	}
+	if out, err := runCLI(consumer, "warren", "refresh", "--dir", ".marmot", "--warren", selfWarrenID); err != nil {
+		t.Fatalf("warren refresh: %v\n%s", err, out)
+	}
+
+	// Poll until the owner's reload shows the foreign mount, then hold it to
+	// the alias contract: the self node resolves LIVE, never the snapshot.
+	deadline := time.Now().Add(20 * time.Second)
+	id := 951
+	for {
+		res, qerr := owner.callToolErr(id, "context_query", map[string]any{
+			"query": bridgeheadQuery, "budget": 6000,
+		}, 10*time.Second)
+		id++
+		if qerr == nil && strings.Contains(res, "@"+projBVault+"/"+bridgeheadID) {
+			if !strings.Contains(res, "crimson addendum") {
+				t.Fatalf("owner reload shadowed the live vault (no live content):\n%s", res)
+			}
+			if strings.Contains(res, "original snapshot") {
+				t.Fatalf("owner served the STALE warren snapshot after reload:\n%s", res)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("live owner never picked up the warren mount (last err %v):\n%s", qerr, res)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+}

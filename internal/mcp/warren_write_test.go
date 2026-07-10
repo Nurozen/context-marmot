@@ -125,4 +125,29 @@ func TestContextWriteWarrenMatrix(t *testing.T) {
 	if !res.IsError || !strings.Contains(resultText(t, res), "not found") {
 		t.Fatalf("create-via-@-write = %s, want not-found rejection", resultText(t, res))
 	}
+
+	// The workspace's own vault ID: refused with the write-locally message,
+	// even when legacy state still marks the self project editable.
+	warrenFixture(t, eng, "wp2", "self-proj", "local-vault")
+	state, body, err := warren.LoadWorkspaceStateFromMarmot(eng.MarmotDir)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceStateFromMarmot: %v", err)
+	}
+	entry := state.Warrens["wp2"]
+	entry.EditableProjects = []string{"self-proj"} // legacy editable self-mount
+	state.Warrens["wp2"] = entry
+	if err := warren.SaveWorkspaceStateToMarmot(eng.MarmotDir, state, body); err != nil {
+		t.Fatalf("SaveWorkspaceStateToMarmot: %v", err)
+	}
+	res, err = eng.HandleContextWrite(context.Background(), makeCallToolRequest("context_write", map[string]any{
+		"id":      "@local-vault/service/api",
+		"type":    "module",
+		"summary": "Self-qualified writes must stay out of the warren copy",
+	}))
+	if err != nil {
+		t.Fatalf("HandleContextWrite: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(t, res), "write the node locally") {
+		t.Fatalf("self-alias @-write = %s, want write-locally rejection", resultText(t, res))
+	}
 }

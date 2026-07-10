@@ -40,7 +40,7 @@ export interface GraphResponse {
 }
 
 export interface Provenance {
-  source?: 'local' | 'warren_mount' | 'warren_materialized' | string;
+  source?: 'local' | 'warren_mount' | 'warren_materialized' | 'local_alias' | string;
   warren_id?: string;
   project_id?: string;
   vault_id?: string;

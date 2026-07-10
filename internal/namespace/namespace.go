@@ -603,6 +603,13 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 	if remoteCfg.VaultID == "" {
 		return nil, fmt.Errorf("remote vault at %s has no vault_id set; run 'marmot configure' in that project first", remoteVaultDir)
 	}
+	// Bridging a vault to a copy of itself would write a degenerate
+	// @X--@X.md manifest and double-register X in the routing table (the
+	// second Set silently clobbers the first) — the same live-vault
+	// shadowing the warren self-alias machinery exists to prevent.
+	if localCfg.VaultID == remoteCfg.VaultID {
+		return nil, fmt.Errorf("both vaults have vault_id %q — refusing to bridge a vault to itself (a self-route would shadow the live vault); if these are truly different projects, give one a distinct vault_id in its .marmot/_config.md", localCfg.VaultID)
+	}
 
 	absLocal, err := filepath.Abs(localVaultDir)
 	if err != nil {

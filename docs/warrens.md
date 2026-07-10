@@ -222,10 +222,25 @@ git-backed warrens — notes a missing `_warren.md.lock` gitignore entry
 (`lockfile_not_ignored`). All DB inspection is strictly read-only.
 
 `marmot warren doctor --workspace` runs in a consuming workspace instead of a
-warren repo: it reports vault-ID collisions across the local vault and all
-registered warrens' active projects (`vault_id_collision_workspace`, an
-error). Mount refuses new collisions; this catches legacy state written by
-older binaries.
+warren repo and agrees with mount: it errors exactly where mount refuses and
+is healthy exactly where mount permits. Its codes:
+
+- `vault_id_collision_workspace` (error) — two claimants that are not the
+  local vault and its self-aliases share a `vault_id`; queries resolve to
+  one of them arbitrarily. Unmount or re-import with distinct vault IDs.
+- `self_alias_mount` (info) — a mounted project aliases the local workspace
+  vault; it serves from the live vault. Healthy state.
+- `self_alias_editable` (error) — legacy state marks a self-alias editable;
+  `@`-writes would split-brain. Run
+  `marmot warren edit <project> --warren <id> --off`.
+- `self_alias_materialized` (warning) — a legacy burrow cache shadows the
+  workspace's own vault. Drop it with
+  `marmot warren burrow --drop --warren <id> <project>`.
+- `local_route_mismatch` (warning) — the global routing table maps this
+  workspace's `vault_id` to a different path (e.g. after a manual
+  `marmot route add`); peers resolving that route read the other copy. A
+  warning, not an error: two checkouts of one repo legitimately share a
+  `vault_id`.
 
 These commands edit Warren files atomically but never commit, push, pull, or
 open PRs. Use normal git workflow to review and publish Warren changes.
@@ -259,12 +274,19 @@ activate the whole Warren, say so explicitly:
 marmot warren mount --warren product-platform --all
 ```
 
-Mounting refuses a project whose `vault_id` is already claimed by a project
-mounted from another Warren (vault IDs are one flat routing namespace per
+Mounting refuses a project whose `vault_id` is already claimed in this
+workspace, unconditionally (vault IDs are one flat routing namespace per
 workspace; a duplicate would silently answer queries from the wrong
-project). Mounting the Warren copy of the *local* project — same vault ID as
-the workspace vault, the documented way to activate Warren bridges — is
-allowed with a warning about the routing shadowing it causes.
+project). The one non-conflict is the Warren copy of the *local* project —
+same vault ID as the workspace vault. Mounting it succeeds as a
+**self-alias**: a declaration that this Warren project *is* this workspace,
+kept only so the Warren's bridges involving the local project can activate.
+A self-alias never claims a route (the live local vault is the sole answerer
+for its own vault ID — queries, `@<vault-id>/…` references, and bridge
+traversal all resolve to the live vault with zero staleness), and it can
+never be made editable or materialized (a cache or writable copy would be a
+stale or split-brained shadow of the live vault). `unmount` and
+`burrow --drop` stay available as the cleanup verbs.
 
 Deactivate projects again (`unmount` is non-destructive: burrow caches are
 kept, and it works even when the Warren checkout has been moved or deleted —
@@ -289,7 +311,10 @@ still renders rows from workspace state (AVAILABLE=false), and
 daemon owner logs the same condition through its reload warnings.
 
 Enable writes for one project (edit implies mount — an unmounted project is
-auto-mounted, and the command says so):
+auto-mounted, and the command says so). Self-aliases refuse `edit`: they are
+read-through views of the live vault, so edit their nodes directly in this
+workspace (no `@` prefix) instead; `--off` stays allowed as the legacy-state
+escape hatch:
 
 ```bash
 marmot warren edit --warren product-platform project-a
@@ -373,9 +398,11 @@ edges:
     relation: calls
 ```
 
-Both bridge endpoints must be active mounted projects. Dormant projects stay out
-of the queryable graph even if a bridge references them, and relations not listed
-in the Warren bridge are rejected on write.
+Both bridge endpoints must be active mounted projects. A self-alias mount (the
+Warren copy of this workspace's own project) satisfies the endpoint
+requirement and resolves to the live workspace vault, not the Warren copy.
+Dormant projects stay out of the queryable graph even if a bridge references
+them, and relations not listed in the Warren bridge are rejected on write.
 
 ## Read and write policy
 
@@ -389,7 +416,9 @@ marmot warren edit --warren product-platform project-a
 
 Editability is per project, not per Warren. This supports virtual monorepo
 workflows where an agent can reference many services but should only update graph
-knowledge for repositories the user is actively editing.
+knowledge for repositories the user is actively editing. Self-aliases (the
+Warren copy of this workspace's own project) refuse editability entirely:
+edit those nodes locally, without the `@` prefix.
 
 When a Warren node is editable, API/UI updates write back to that project's own
 `.marmot/` vault and embedding database. Read-only Warren nodes show provenance
@@ -411,7 +440,10 @@ updates its embedding database, and refreshes the engine's cached view. Both
 paths go through one shared write-back helper, so they cannot diverge.
 Creating brand-new nodes through an `@`-write is not supported — create
 nodes in the project's own workspace. Writes to read-only or unmounted
-vaults are rejected with the command that would enable them.
+vaults are rejected with the command that would enable them, and
+`@`-writes qualified with this workspace's *own* vault ID are always
+rejected (write the node locally, without the `@` prefix — a self-alias
+mount is a read-through view of the live vault).
 
 ### Write policy (author side)
 
@@ -494,6 +526,8 @@ one time bound:
   disable with `MARMOT_WARREN_TTL` (a Go duration; `0`/`off` disables).
   Remote **embedding stores** need no TTL: every search is a live read of the
   mounted project's SQLite database.
+- Self-alias mounts are exempt from all of this: reload never routes them,
+  so they answer from the live in-memory vault with zero staleness.
 
 While a mounted project's `embeddings.db` is open for cross-vault search, the
 reader holds a shared advisory lock (`.marmot-data/vault.read.lock` next to

@@ -1375,6 +1375,21 @@ func warrenRefreshPull(marmotDir, id string, entry warren.WorkspaceWarren) int {
 			fmt.Fprintf(os.Stderr, "warren refresh: warning: burrowed project %q is no longer in the warren manifest; cache left as-is (drop it with 'marmot warren burrow --drop --warren %s %s')\n", projectID, id, projectID)
 			continue
 		}
+		// Legacy self cache (pre-alias state: self-mount + burrow cache):
+		// Materialize now refuses self-alias projects, and a hard fail here
+		// would brick the whole refresh --pull over inert legacy state — skip
+		// with the drop hint instead (doctor owns the durable diagnostic).
+		if local := warren.LocalVaultID(marmotDir); local != "" {
+			checkoutDir := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
+			vaultID := project.ProjectID
+			if meta, _, metaErr := warren.LoadProjectMetadata(checkoutDir); metaErr == nil && meta != nil && meta.VaultID != "" {
+				vaultID = meta.VaultID
+			}
+			if vaultID == local {
+				fmt.Fprintf(os.Stderr, "warren refresh: warning: burrow cache for %q shadows this workspace's own vault; skipping re-materialize — drop it with 'marmot warren burrow --drop --warren %s %s'\n", projectID, id, projectID)
+				continue
+			}
+		}
 		if _, err := warren.Materialize(marmotDir, id, project, entry.Path, newHead); err != nil {
 			fmt.Fprintf(os.Stderr, "warren refresh: re-materialize %s: %v\n", projectID, err)
 			return 1

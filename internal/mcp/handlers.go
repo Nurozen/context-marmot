@@ -588,6 +588,14 @@ func (e *Engine) handleWarrenContextWrite(req mcp.CallToolRequest, qualifiedID s
 	if !ok {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid qualified node ID %q: expected @vault-id/node-id", qualifiedID)), nil
 	}
+	// Self-alias guard (defense in depth over ActiveMounts forcing
+	// Editable=false on alias statuses): an @-write to the workspace's own
+	// vault ID would land in the warren checkout copy and split-brain the
+	// live vault — including legacy state that still records the self
+	// project as editable.
+	if vaultID != "" && vaultID == e.LocalVaultID {
+		return mcp.NewToolResultError(fmt.Sprintf("vault %q is this workspace's own vault; write the node locally as %q (no @ prefix) — self-alias warren mounts are read-through views of the live vault", vaultID, localID)), nil
+	}
 	mounts, err := warren.ActiveMounts(e.MarmotDir)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("warren mounts unavailable: %v", err)), nil

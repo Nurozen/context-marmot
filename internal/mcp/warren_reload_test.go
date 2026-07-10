@@ -303,6 +303,149 @@ func TestReloadWarrenStateConcurrentQuery(t *testing.T) {
 	wg.Wait()
 }
 
+// addFixtureProject registers one more project vault (config + metadata +
+// one node) in an existing warren fixture's manifest, without mounting it.
+func addFixtureProject(t *testing.T, warrenRoot, warrenID, projectID, vaultID string) {
+	t.Helper()
+	projDir := filepath.Join(warrenRoot, "projects", projectID, ".marmot")
+	if err := os.MkdirAll(filepath.Join(projDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "---\nversion: \"1\"\nvault_id: " + vaultID + "\nnamespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(projDir, "_config.md"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := warren.SaveProjectMetadata(projDir, &warren.ProjectMetadata{
+		ProjectID: projectID, WarrenID: warrenID, VaultID: vaultID,
+	}, ""); err != nil {
+		t.Fatalf("SaveProjectMetadata: %v", err)
+	}
+	manifest, body, err := warren.LoadManifest(warrenRoot)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	manifest.Projects = append(manifest.Projects, warren.Project{
+		ProjectID: projectID,
+		Path:      filepath.ToSlash(filepath.Join("projects", projectID, ".marmot")),
+	})
+	if err := warren.SaveManifest(warrenRoot, manifest, body); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+}
+
+// setFixtureBridges replaces a warren fixture manifest's bridge declarations.
+func setFixtureBridges(t *testing.T, warrenRoot string, bridges []warren.Bridge) {
+	t.Helper()
+	manifest, body, err := warren.LoadManifest(warrenRoot)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	manifest.Bridges = bridges
+	if err := warren.SaveManifest(warrenRoot, manifest, body); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+}
+
+// TestReloadWarrenStateSelfAliasSkipsRoute (R1.3): a mounted project whose
+// vault_id equals the live vault's claims no route, and a previously poisoned
+// registry entry (the pre-alias bug: local ID resolved to the warren copy)
+// is evicted by the reload's Rebuild.
+func TestReloadWarrenStateSelfAliasSkipsRoute(t *testing.T) {
+	eng := warrenEngine(t)
+	warrenRoot := warrenFixture(t, eng, "wp", "self-proj", "local-vault")
+
+	// Simulate the poisoned pre-alias state: the registry resolves the local
+	// vault ID to the warren copy and has it cached.
+	copyPath := filepath.Join(warrenRoot, "projects", "self-proj", ".marmot")
+	poisoned := routes.EmptyTable()
+	poisoned.Set("local-vault", copyPath)
+	eng.VaultRegistry.Rebuild(nil, poisoned)
+	if _, err := eng.VaultRegistry.ResolveGraph("local-vault"); err != nil {
+		t.Fatalf("seed poisoned vault: %v", err)
+	}
+
+	if err := eng.ReloadWarrenState(); err != nil {
+		t.Fatalf("ReloadWarrenState: %v", err)
+	}
+	// The self-alias mount claims no route...
+	if knownVaults(eng)["local-vault"] {
+		t.Fatalf("self-alias mount routed local-vault: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+	// ...and the cached poisoned self-vault was evicted (Rebuild eviction:
+	// dirForLocked no longer resolves the local ID to the warren copy).
+	if _, err := eng.VaultRegistry.ResolveGraph("local-vault"); err == nil {
+		t.Fatal("registry still resolves the local vault after reload (stale warren-copy shadow)")
+	}
+}
+
+// TestWarrenRuntimeBridgesSelfAliasEndpoint (R1.3): a manifest bridge between
+// a self-alias and a foreign project synthesizes a runtime bridge whose alias
+// endpoint is the workspace's own .marmot (live), while the vault IDs stay
+// unchanged so edge validation still matches by ID.
+func TestWarrenRuntimeBridgesSelfAliasEndpoint(t *testing.T) {
+	eng := warrenEngine(t)
+	workspaceRoot := filepath.Dir(eng.MarmotDir)
+	warrenRoot := warrenFixture(t, eng, "wp", "proj-a", "proj-a-vault")
+	addFixtureProject(t, warrenRoot, "wp", "self-proj", "local-vault")
+	setFixtureBridges(t, warrenRoot, []warren.Bridge{{Source: "self-proj", Target: "proj-a", Relations: []string{"references"}}})
+	if _, err := warren.Mount(workspaceRoot, "wp", []string{"self-proj"}, false); err != nil {
+		t.Fatalf("Mount self-proj: %v", err)
+	}
+
+	mounts, err := warren.ActiveMounts(eng.MarmotDir)
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	bridges, declared := warrenRuntimeBridges(eng.MarmotDir, mounts)
+	if !declared {
+		t.Fatal("manifest bridges must force policy enforcement on")
+	}
+	if len(bridges) != 1 {
+		t.Fatalf("bridges = %+v, want exactly 1", bridges)
+	}
+	b := bridges[0]
+	absMarmot, err := filepath.Abs(eng.MarmotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SourceVaultID != "local-vault" {
+		t.Fatalf("SourceVaultID = %q, want the (unchanged) local vault ID", b.SourceVaultID)
+	}
+	if b.SourceVaultPath != absMarmot {
+		t.Fatalf("SourceVaultPath = %q, want the live workspace .marmot %q", b.SourceVaultPath, absMarmot)
+	}
+	if b.TargetVaultID != "proj-a-vault" || b.TargetVaultPath == absMarmot {
+		t.Fatalf("target endpoint = %q/%q, want the warren copy of proj-a", b.TargetVaultID, b.TargetVaultPath)
+	}
+}
+
+// TestWarrenRuntimeBridgesSkipsSelfToSelf (R1.3): a manifest bridge whose two
+// endpoints both carry the local vault ID resolves to one vault — a
+// self-bridge is meaningless and synthesizes nothing.
+func TestWarrenRuntimeBridgesSkipsSelfToSelf(t *testing.T) {
+	eng := warrenEngine(t)
+	workspaceRoot := filepath.Dir(eng.MarmotDir)
+	warrenRoot := warrenFixture(t, eng, "wp", "self-one", "local-vault")
+	addFixtureProject(t, warrenRoot, "wp", "self-two", "local-vault")
+	setFixtureBridges(t, warrenRoot, []warren.Bridge{{Source: "self-one", Target: "self-two", Relations: []string{"references"}}})
+	// Two aliases of one live vault are coherent, not a conflict.
+	if _, err := warren.Mount(workspaceRoot, "wp", []string{"self-two"}, false); err != nil {
+		t.Fatalf("Mount self-two: %v", err)
+	}
+
+	mounts, err := warren.ActiveMounts(eng.MarmotDir)
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	bridges, declared := warrenRuntimeBridges(eng.MarmotDir, mounts)
+	if !declared {
+		t.Fatal("manifest bridges must force policy enforcement on")
+	}
+	if len(bridges) != 0 {
+		t.Fatalf("bridges = %+v, want none (self-to-self skipped)", bridges)
+	}
+}
+
 func TestRuntimeBridgeKeyOrdering(t *testing.T) {
 	if runtimeBridgeKey("a", "b") != runtimeBridgeKey("b", "a") {
 		t.Fatal("runtimeBridgeKey should be order-independent")
