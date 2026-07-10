@@ -338,7 +338,7 @@ func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
 		if cfg, err := config.Load(e.MarmotDir); err == nil {
 			e.LocalVaultID = cfg.VaultID
 		} else {
-			fmt.Fprintf(os.Stderr, "warning: local vault config unreadable (%v); vault_id unknown — self-mount aliasing and cross-vault edge validation disabled\n", err)
+			fmt.Fprintf(os.Stderr, "warning: local vault config unreadable (%v); vault_id unknown — local identity (self-mount aliasing) and cross-vault edge validation disabled\n", err)
 		}
 	}
 }

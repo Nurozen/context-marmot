@@ -61,7 +61,13 @@ func (e *Engine) ReloadWarrenState() error {
 			rt.Set(mount.VaultID, mount.Path)
 		}
 		if len(mounts) > 0 {
-			fmt.Fprintf(os.Stderr, "warren: %d active project mounts loaded\n", len(mounts))
+			identity := 0
+			for _, mount := range mounts {
+				if mount.SelfAlias {
+					identity++
+				}
+			}
+			fmt.Fprintf(os.Stderr, "warren: %d active project mounts (%d identity) loaded\n", len(mounts), identity)
 		}
 	}
 	bridges, declared := warrenRuntimeBridges(e.MarmotDir, mounts)

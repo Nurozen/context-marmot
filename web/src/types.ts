@@ -68,6 +68,8 @@ export interface WorkspaceWarren {
   active_projects?: string[];
   editable_projects?: string[];
   materialized_projects?: string[];
+  /** Computed: projects whose vault_id matches this workspace (served live; never mounted). */
+  identified_projects?: string[];
 }
 
 export interface WarrensResponse {

@@ -764,13 +764,45 @@ func warrenRegister(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren register: %v\n", err)
 		return 1
 	}
-	_ = marmotDir
 	if _, err := warren.RegisterWorkspaceWarren(workspaceRoot, fs.Arg(0), fs.Arg(1)); err != nil {
 		fmt.Fprintf(os.Stderr, "warren register: %v\n", err)
 		return 1
 	}
 	fmt.Printf("Registered Warren %q -> %s\n", fs.Arg(0), fs.Arg(1))
+	// Identity is automatic (derived from vault_id, never mounted); register
+	// is the moment it becomes discoverable, so announce every match.
+	if local := warren.LocalVaultID(marmotDir); local != "" {
+		for _, projectID := range identifiedProjectsByWarren(marmotDir)[fs.Arg(0)] {
+			fmt.Printf("note: project %q in warren %q matches this workspace's vault ID %q — served as your live vault; manifest bridges involving it activate once their other endpoint is mounted\n", projectID, fs.Arg(0), local)
+		}
+	}
 	return 0
+}
+
+// identifiedProjectsByWarren derives each registered warren's identified
+// projects (checkout vault_id matches this workspace's) from the same
+// ActiveMounts scan the engine uses, so the CLI can never disagree with the
+// engine about who is identified. Best-effort: no vault_id or an unreadable
+// state derives nothing.
+func identifiedProjectsByWarren(marmotDir string) map[string][]string {
+	if warren.LocalVaultID(marmotDir) == "" {
+		return nil
+	}
+	mounts, err := warren.ActiveMounts(marmotDir)
+	if err != nil {
+		return nil
+	}
+	var out map[string][]string
+	for _, mount := range mounts {
+		if !mount.SelfAlias {
+			continue
+		}
+		if out == nil {
+			out = make(map[string][]string)
+		}
+		out[mount.WarrenID] = append(out[mount.WarrenID], mount.ProjectID)
+	}
+	return out
 }
 
 func warrenList(args []string) int {
@@ -780,7 +812,7 @@ func warrenList(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	_, workspaceRoot, err := locateWorkspace(*dir)
+	marmotDir, workspaceRoot, err := locateWorkspace(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren list: %v\n", err)
 		return 1
@@ -790,18 +822,23 @@ func warrenList(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren list: %v\n", err)
 		return 1
 	}
+	// Identity is derived, never stored, so the state passthrough alone
+	// cannot show it — graft the computed per-warren identified projects on.
+	identified := identifiedProjectsByWarren(marmotDir)
 	if *jsonOut {
-		// Same shape as the raw workspace state plus an additive per-warren
-		// "reachable" field (whether the registered checkout still exists).
+		// Same shape as the raw workspace state plus additive per-warren
+		// "reachable" (whether the registered checkout still exists) and
+		// "identified_projects" (vault_id matches this workspace) fields.
 		type listEntry struct {
 			warren.WorkspaceWarren
-			Reachable bool `json:"reachable"`
+			Reachable          bool     `json:"reachable"`
+			IdentifiedProjects []string `json:"identified_projects,omitempty"`
 		}
 		out := struct {
 			Warrens map[string]listEntry `json:"Warrens"`
 		}{Warrens: make(map[string]listEntry, len(state.Warrens))}
 		for id, entry := range state.Warrens {
-			out.Warrens[id] = listEntry{WorkspaceWarren: entry, Reachable: dirExistsCLI(entry.Path)}
+			out.Warrens[id] = listEntry{WorkspaceWarren: entry, Reachable: dirExistsCLI(entry.Path), IdentifiedProjects: identified[id]}
 		}
 		return printJSON(out)
 	}
@@ -815,10 +852,14 @@ func warrenList(args []string) int {
 	}
 	sort.Strings(ids)
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "WARREN_ID\tPATH\tREACHABLE\tACTIVE\tEDITABLE\tMATERIALIZED")
+	fmt.Fprintln(w, "WARREN_ID\tPATH\tREACHABLE\tACTIVE\tEDITABLE\tMATERIALIZED\tIDENTITY")
 	for _, id := range ids {
 		entry := state.Warrens[id]
-		fmt.Fprintf(w, "%s\t%s\t%t\t%d\t%d\t%t\n", id, entry.Path, dirExistsCLI(entry.Path), len(entry.ActiveProjects), len(entry.EditableProjects), entry.Materialized)
+		identity := "-"
+		if len(identified[id]) > 0 {
+			identity = strings.Join(identified[id], ",")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%t\t%d\t%d\t%t\t%s\n", id, entry.Path, dirExistsCLI(entry.Path), len(entry.ActiveProjects), len(entry.EditableProjects), entry.Materialized, identity)
 	}
 	_ = w.Flush()
 	return 0
@@ -1177,7 +1218,12 @@ func warrenStatus(args []string) int {
 	fmt.Fprintln(w, "PROJECT\tSTATE\tEDITABLE\tAVAILABLE\tPATH")
 	for _, status := range statuses {
 		state := "dormant"
-		if status.Active {
+		switch {
+		case status.SelfAlias:
+			// Identified with this workspace: served as the live vault, no
+			// mount needed (or honored).
+			state = "identity"
+		case status.Active:
 			state = "mounted"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%t\t%t\t%s\n", status.ProjectID, state, status.Editable, status.Available, status.Path)
@@ -1421,7 +1467,7 @@ func warrenPropose(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren propose [--warren <id>] [<project-id>]")
 		return 1
 	}
-	_, workspaceRoot, err := locateWorkspace(*dir)
+	marmotDir, workspaceRoot, err := locateWorkspace(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
@@ -1475,6 +1521,21 @@ func warrenPropose(args []string) int {
 	if !found {
 		fmt.Fprintf(os.Stderr, "warren propose: project %q is not registered in warren %q\n", projectID, id)
 		return 1
+	}
+	// An identified project's edits live in the workspace vault and never
+	// touch the checkout — a pathspec-limited commit of projects/<pid>/ would
+	// be meaningless. Default selection can never pick one (identified
+	// projects are never editable); only an explicit argument reaches this.
+	if local := warren.LocalVaultID(marmotDir); local != "" {
+		checkoutDir := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
+		vaultID := project.ProjectID
+		if meta, _, metaErr := warren.LoadProjectMetadata(checkoutDir); metaErr == nil && meta != nil && meta.VaultID != "" {
+			vaultID = meta.VaultID
+		}
+		if vaultID == local {
+			fmt.Fprintf(os.Stderr, "warren propose: project %q is this workspace (vault ID %q); its live context never lands in the warren checkout — refresh the warren's copy in the warren repo (project remove + project import) and commit there\n", projectID, vaultID)
+			return 1
+		}
 	}
 	// Scope check, pathspec-limited: only changes under the project count.
 	porcelain, err := gitOutput(entry.Path, "status", "--porcelain", "--", project.Path)

@@ -856,14 +856,28 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWarrens lists Warren registrations for the current local workspace.
+// handleWarrens lists Warren registrations for the current local workspace,
+// each with its computed identified projects (identity is derived from
+// vault_id at read time, never stored in workspace state).
 func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
 	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, WarrensResponse{Warrens: state.Warrens})
+	identified := make(map[string][]string)
+	if mounts, mountsErr := warren.ActiveMounts(s.engine.MarmotDir); mountsErr == nil {
+		for _, mount := range mounts {
+			if mount.SelfAlias {
+				identified[mount.WarrenID] = append(identified[mount.WarrenID], mount.ProjectID)
+			}
+		}
+	}
+	warrens := make(map[string]WarrenEntry, len(state.Warrens))
+	for id, entry := range state.Warrens {
+		warrens[id] = WarrenEntry{WorkspaceWarren: entry, IdentifiedProjects: identified[id]}
+	}
+	writeJSON(w, http.StatusOK, WarrensResponse{Warrens: warrens})
 }
 
 // handleWarrenStatus returns mounted/editable status for a single Warren.

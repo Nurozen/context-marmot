@@ -427,11 +427,13 @@ func TestMountRefusesVaultIDCollision(t *testing.T) {
 	}
 }
 
-// TestMountSelfAliasesLiveVault: mounting the warren copy of *this* project
-// (same vault ID as the local vault) succeeds as a self-alias: the mount
-// activates the warren's bridges against the LIVE vault, claims no route,
-// and can never be editable. (This replaces the pre-alias deliberate
-// deviation that warned and let the mount shadow the live vault.)
+// TestMountSelfAliasesLiveVault (reshaped for R2 identity): mounting the
+// warren copy of *this* project (same vault ID as the local vault) succeeds
+// as a pure no-op — identity is automatic and stateless, so nothing is
+// recorded, the note says so, and ActiveMounts serves the identity entry
+// either way. (This replaces R1's alias-mount record, which itself replaced
+// the pre-alias deliberate deviation that let the mount shadow the live
+// vault.)
 func TestMountSelfAliasesLiveVault(t *testing.T) {
 	workspace, _ := registerAndMount(t, "project-a")
 	writeSelfVaultConfig(t, workspace, "project-a-vault")
@@ -442,18 +444,26 @@ func TestMountSelfAliasesLiveVault(t *testing.T) {
 	defer func() { warnWriter = oldWarn }()
 
 	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
-		t.Fatalf("self-alias mount must succeed: %v", err)
+		t.Fatalf("self mount must succeed as a no-op: %v", err)
 	}
-	if !strings.Contains(warned.String(), "mounting as an alias of the live local vault") {
-		t.Fatalf("expected self-alias note, got %q", warned.String())
+	if !strings.Contains(warned.String(), "identity is automatic") {
+		t.Fatalf("expected identity note, got %q", warned.String())
+	}
+	state, _, err := LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	if got := state.Warrens["product-platform"].ActiveProjects; len(got) != 0 {
+		t.Fatalf("self mount recorded state: active = %v, want none (identity is derived)", got)
 	}
 
+	// ActiveMounts serves the identity entry without any mount record.
 	mounts, err := ActiveMounts(workspaceMarmotDir(workspace))
 	if err != nil {
 		t.Fatalf("ActiveMounts: %v", err)
 	}
 	if len(mounts) != 1 || !mounts[0].SelfAlias {
-		t.Fatalf("mounts = %+v, want one SelfAlias mount", mounts)
+		t.Fatalf("mounts = %+v, want one identity entry", mounts)
 	}
 
 	// A subsequent status carries no editable flag.
@@ -463,7 +473,7 @@ func TestMountSelfAliasesLiveVault(t *testing.T) {
 	}
 	for _, status := range statuses {
 		if status.Editable {
-			t.Fatalf("self-alias status carries editable flag: %+v", status)
+			t.Fatalf("identity status carries editable flag: %+v", status)
 		}
 		if !status.SelfAlias {
 			t.Fatalf("status missing SelfAlias: %+v", status)

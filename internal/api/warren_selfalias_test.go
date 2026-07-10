@@ -22,9 +22,12 @@ const selfAliasLiveSummary = "LIVE service API quartz revision"
 
 // setupSelfAliasWarren is the self-vault variant of setupAPIWarren: the
 // workspace's live vault carries the same vault_id ("local-vault") as the
-// mounted warren project, and the live copy of the shared node diverges from
+// warren's copy of it, and the live copy of the shared node diverges from
 // the warren snapshot (summary "Service API") so tests can tell which one a
-// surface served. Returns the warren root.
+// surface served. Under R2 identity the fixture is identity-only by
+// construction: setupAPIWarren's Mount call is a recorded-nothing no-op for
+// the self project (asserted below), so every test in this file exercises
+// the derived-identity path with zero mounts. Returns the warren root.
 func setupSelfAliasWarren(t *testing.T, engine *mcpserver.Engine) string {
 	t.Helper()
 	workspaceRoot := filepath.Dir(engine.MarmotDir)
@@ -33,6 +36,13 @@ func setupSelfAliasWarren(t *testing.T, engine *mcpserver.Engine) string {
 		t.Fatalf("write workspace config: %v", err)
 	}
 	warrenRoot := setupAPIWarren(t, workspaceRoot, "wp", "self-proj", "local-vault")
+	state, _, err := warrenpkg.LoadWorkspaceState(workspaceRoot)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	if got := state.Warrens["wp"].ActiveProjects; len(got) != 0 {
+		t.Fatalf("self mount recorded state %v; the fixture must be identity-only (mount of self is a no-op)", got)
+	}
 
 	// Diverge the LIVE vault's node from the warren snapshot and make the
 	// engine (graph + embeddings) see it.
@@ -183,6 +193,33 @@ func TestWarrenScopedSearchIncludesSelfAlias(t *testing.T) {
 	}
 	if hit.Provenance == nil || hit.Provenance.Source != "local_alias" || hit.Provenance.Editable {
 		t.Fatalf("provenance = %+v, want read-only local_alias", hit.Provenance)
+	}
+}
+
+// TestWarrensResponseIdentifiedProjects (R2.6): GET /api/warrens grafts the
+// computed identified_projects onto each warren entry — identity is derived,
+// never stored, so the raw state alone could not show it.
+func TestWarrensResponseIdentifiedProjects(t *testing.T) {
+	server, engine := newTestServer(t)
+	setupSelfAliasWarren(t, engine)
+
+	rec := doRequest(t, server.Handler(), "GET", "/api/warrens", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/warrens = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp WarrensResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode warrens response: %v", err)
+	}
+	entry, ok := resp.Warrens["wp"]
+	if !ok {
+		t.Fatalf("warren wp missing from response: %+v", resp.Warrens)
+	}
+	if len(entry.IdentifiedProjects) != 1 || entry.IdentifiedProjects[0] != "self-proj" {
+		t.Fatalf("identified_projects = %v, want [self-proj]", entry.IdentifiedProjects)
+	}
+	if len(entry.ActiveProjects) != 0 {
+		t.Fatalf("active_projects = %v, want none (identity is not a mount)", entry.ActiveProjects)
 	}
 }
 

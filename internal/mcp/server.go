@@ -91,7 +91,7 @@ EDGE GUIDELINES:
 
 When referencing nodes in other namespaces, use qualified IDs (e.g., 'other-namespace/node/path'). Cross-namespace edges require a bridge manifest with the relation type whitelisted.
 When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vault edges require a cross-vault bridge with the relation type whitelisted.
-Writing with an @vault-id/node-id ID updates that existing node in an active *editable* FOREIGN warren mount (summary/context/tags only; the write lands in the mounted project's own checkout). Read-only or unmounted vaults reject @-writes, and so does this workspace's own vault ID (self-alias mounts are read-through views of the live vault — write such nodes locally without the @ prefix).`),
+Writing with an @vault-id/node-id ID updates that existing node in an active *editable* FOREIGN warren mount (summary/context/tags only; the write lands in the mounted project's own checkout). Read-only or unmounted vaults reject @-writes, and so does this workspace's own vault ID (identified projects are read-through views of the live vault — write such nodes locally without the @ prefix).`),
 		mcp.WithString("id",
 			mcp.Required(),
 			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. When using a non-default namespace, prefix the ID with the namespace (e.g., 'my-ns/auth/login'). If you omit the namespace prefix, it will be added automatically. Examples: 'auth/login', 'db/users', 'my-namespace/render/api-client'. Must not contain '..' or start with '/'"),

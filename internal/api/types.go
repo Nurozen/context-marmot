@@ -82,7 +82,16 @@ type SearchResult struct {
 
 // WarrensResponse lists local workspace Warren registrations.
 type WarrensResponse struct {
-	Warrens map[string]warren.WorkspaceWarren `json:"warrens"`
+	Warrens map[string]WarrenEntry `json:"warrens"`
+}
+
+// WarrenEntry is a registered warren's workspace state plus its computed
+// identified projects (checkout vault_id matches this workspace's vault).
+// Identity is derived at read time, never stored, so the field lives on the
+// response type — additive over the raw WorkspaceWarren shape.
+type WarrenEntry struct {
+	warren.WorkspaceWarren
+	IdentifiedProjects []string `json:"identified_projects,omitempty"`
 }
 
 // WarrenStatusResponse describes a registered Warren in this workspace.

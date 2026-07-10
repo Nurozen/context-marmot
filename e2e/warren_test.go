@@ -700,26 +700,31 @@ func seedSelfAliasWarren(t *testing.T) (warrenRoot, consumer string) {
 	return warrenRoot, consumer
 }
 
-// TestWarrenSelfMountAlias is the R1 scenario: mounting the warren copy of
-// this workspace's own project (same vault_id — no e2e test exercised a
-// colliding vault_id before) succeeds as a self-alias that activates bridges
-// against the LIVE vault, refuses edit/materialize, and keeps doctor healthy.
-func TestWarrenSelfMountAlias(t *testing.T) {
+// TestWarrenLocalIdentity is the R2 scenario (extending R1's self-mount
+// alias test): a warren project whose vault_id matches the workspace IS the
+// workspace — identity is derived, so bridges involving it activate with
+// ONLY the foreign endpoint mounted, `mount self` is a recorded-nothing
+// no-op, status shows the identity state, doctor reports self_identity, and
+// R1-era self-mount state migrates cleanly (redundancy info + unmount).
+func TestWarrenLocalIdentity(t *testing.T) {
 	warrenRoot, consumer := seedSelfAliasWarren(t)
 
-	if out, err := runCLI(consumer, "warren", "register", "--dir", ".marmot", selfWarrenID, warrenRoot); err != nil {
-		t.Fatalf("warren register: %v\n%s", err, out)
-	}
-	out, err := runCLI(consumer, "warren", "mount", "--dir", ".marmot", "--warren", selfWarrenID, "--all")
+	registerOut, err := runCLI(consumer, "warren", "register", "--dir", ".marmot", selfWarrenID, warrenRoot)
 	if err != nil {
-		t.Fatalf("warren mount --all: %v\n%s", err, out)
+		t.Fatalf("warren register: %v\n%s", err, registerOut)
 	}
-	if !strings.Contains(out, "mounting as an alias of the live local vault") {
-		t.Fatalf("mount output missing the self-alias note:\n%s", out)
+	if !strings.Contains(registerOut, "matches this workspace's vault ID") {
+		t.Errorf("register did not announce the identity match:\n%s", registerOut)
+	}
+
+	// Mount ONLY the foreign endpoint: the self project is never mounted.
+	if out, mountErr := runCLI(consumer, "warren", "mount", "--dir", ".marmot", "--warren", selfWarrenID, projB); mountErr != nil {
+		t.Fatalf("warren mount %s: %v\n%s", projB, mountErr, out)
 	}
 
 	// A query entering the foreign project traverses the manifest bridge into
-	// @consumer-vault/... and must land on the LIVE node, never the snapshot.
+	// @consumer-vault/... and must land on the LIVE node, never the snapshot —
+	// with self never mounted.
 	queryOut, err := runCLI(consumer, "query", "--dir", ".marmot", "--query", bridgeheadQuery)
 	if err != nil {
 		t.Fatalf("query: %v\n%s", err, queryOut)
@@ -737,42 +742,105 @@ func TestWarrenSelfMountAlias(t *testing.T) {
 		t.Errorf("query served the STALE warren snapshot:\n%s", queryOut)
 	}
 
-	// Plain local query still answers with the live content too.
-	liveOut, err := runCLI(consumer, "query", "--dir", ".marmot", "--query", "falcon migration ledger crimson addendum")
+	// warren status shows the identity state for the never-mounted self.
+	statusOut, err := runCLI(consumer, "warren", "status", "--dir", ".marmot", "--warren", selfWarrenID)
 	if err != nil {
-		t.Fatalf("live query: %v\n%s", err, liveOut)
+		t.Fatalf("warren status: %v\n%s", err, statusOut)
 	}
-	if !strings.Contains(liveOut, selfNodeID) || !strings.Contains(liveOut, "crimson addendum") {
-		t.Errorf("live local query missing the updated node:\n%s", liveOut)
+	if !regexp.MustCompile(`(?m)^` + selfProj + `\s+identity\s`).MatchString(statusOut) {
+		t.Errorf("status missing the identity state for %q:\n%s", selfProj, statusOut)
 	}
 
-	// Self-aliases can never be editable or materialized.
+	// An explicit mount of the identified project is a no-op with the note.
+	mountSelfOut, err := runCLI(consumer, "warren", "mount", "--dir", ".marmot", "--warren", selfWarrenID, selfProj)
+	if err != nil {
+		t.Fatalf("warren mount %s: %v\n%s", selfProj, err, mountSelfOut)
+	}
+	if !strings.Contains(mountSelfOut, "identity is automatic") {
+		t.Errorf("mount self missing the no-op identity note:\n%s", mountSelfOut)
+	}
+	listOut, err := runCLI(consumer, "warren", "list", "--dir", ".marmot", "--json")
+	if err != nil {
+		t.Fatalf("warren list --json: %v\n%s", err, listOut)
+	}
+	if !strings.Contains(listOut, `"identified_projects"`) || !strings.Contains(listOut, `"`+selfProj+`"`) {
+		t.Errorf("list --json missing identified_projects:\n%s", listOut)
+	}
+	var listResp struct {
+		Warrens map[string]struct {
+			ActiveProjects []string `json:"active_projects"`
+		} `json:"Warrens"`
+	}
+	if jsonErr := json.Unmarshal([]byte(listOut[strings.Index(listOut, "{"):]), &listResp); jsonErr != nil {
+		t.Fatalf("parse list JSON: %v\n%s", jsonErr, listOut)
+	}
+	if got := listResp.Warrens[selfWarrenID].ActiveProjects; len(got) != 1 || got[0] != projB {
+		t.Errorf("mount self recorded state: active = %v, want only %q", got, projB)
+	}
+
+	// Identified projects can never be editable or materialized.
 	editOut, editErr := runCLI(consumer, "warren", "edit", "--dir", ".marmot", "--warren", selfWarrenID, selfProj)
 	if editErr == nil {
-		t.Fatalf("warren edit on a self-alias succeeded:\n%s", editOut)
+		t.Fatalf("warren edit on an identified project succeeded:\n%s", editOut)
 	}
 	if !strings.Contains(editOut, "alias of the live vault") {
 		t.Errorf("edit refusal missing the alias message:\n%s", editOut)
 	}
 	burrowOut, burrowErr := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", selfWarrenID, "--materialize", selfProj)
 	if burrowErr == nil {
-		t.Fatalf("warren burrow --materialize on a self-alias succeeded:\n%s", burrowOut)
+		t.Fatalf("warren burrow --materialize on an identified project succeeded:\n%s", burrowOut)
 	}
 	if !strings.Contains(burrowOut, "cannot be materialized") {
 		t.Errorf("burrow refusal missing the self-alias message:\n%s", burrowOut)
 	}
 
-	// Doctor agrees with mount: the alias is healthy (exit 0) and reported
-	// as info, not a collision.
+	// Doctor: healthy (exit 0), self_identity info, no redundancy (nothing
+	// recorded), never a collision.
 	doctorOut, doctorErr := runCLI(consumer, "warren", "doctor", "--workspace", "--dir", ".marmot", "--json")
 	if doctorErr != nil {
-		t.Fatalf("warren doctor --workspace on a self-alias mount failed: %v\n%s", doctorErr, doctorOut)
+		t.Fatalf("warren doctor --workspace on an identified project failed: %v\n%s", doctorErr, doctorOut)
 	}
-	if !strings.Contains(doctorOut, "self_alias_mount") {
-		t.Errorf("doctor JSON missing self_alias_mount:\n%s", doctorOut)
+	if !strings.Contains(doctorOut, "self_identity") {
+		t.Errorf("doctor JSON missing self_identity:\n%s", doctorOut)
+	}
+	if strings.Contains(doctorOut, "self_alias_mount") {
+		t.Errorf("doctor reported a redundant mount that was never recorded:\n%s", doctorOut)
 	}
 	if strings.Contains(doctorOut, "vault_id_collision_workspace") {
-		t.Errorf("doctor reported the self-alias as a collision:\n%s", doctorOut)
+		t.Errorf("doctor reported the identity as a collision:\n%s", doctorOut)
+	}
+
+	// --- Migration leg: hand-written R1-era state (self in active_projects).
+	stateYAML := "---\nwarrens:\n    " + selfWarrenID + ":\n        path: \"" + warrenRoot + "\"\n        active_projects:\n            - " + projB + "\n            - " + selfProj + "\n---\n"
+	if writeErr := os.WriteFile(filepath.Join(consumer, ".marmot", "_warren.md"), []byte(stateYAML), 0o644); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	// Behavior identical: bridge traversal still serves the live vault.
+	queryOut, err = runCLI(consumer, "query", "--dir", ".marmot", "--query", bridgeheadQuery)
+	if err != nil {
+		t.Fatalf("query with R1-era state: %v\n%s", err, queryOut)
+	}
+	if !strings.Contains(queryOut, "crimson addendum") || strings.Contains(queryOut, "original snapshot") {
+		t.Errorf("R1-era self entry changed behavior:\n%s", queryOut)
+	}
+	// Doctor shows the redundancy info (still healthy)...
+	doctorOut, doctorErr = runCLI(consumer, "warren", "doctor", "--workspace", "--dir", ".marmot", "--json")
+	if doctorErr != nil {
+		t.Fatalf("doctor with R1-era state failed: %v\n%s", doctorErr, doctorOut)
+	}
+	if !strings.Contains(doctorOut, "self_alias_mount") || !strings.Contains(doctorOut, "redundant self-mount") {
+		t.Errorf("doctor missing the redundancy info for R1-era state:\n%s", doctorOut)
+	}
+	// ...and unmount cleans it; queries still live afterwards.
+	if out, unmountErr := runCLI(consumer, "warren", "unmount", "--dir", ".marmot", "--warren", selfWarrenID, selfProj); unmountErr != nil {
+		t.Fatalf("warren unmount self (R1-era cleanup): %v\n%s", unmountErr, out)
+	}
+	queryOut, err = runCLI(consumer, "query", "--dir", ".marmot", "--query", bridgeheadQuery)
+	if err != nil {
+		t.Fatalf("query after cleanup: %v\n%s", err, queryOut)
+	}
+	if !strings.Contains(queryOut, "crimson addendum") || strings.Contains(queryOut, "original snapshot") {
+		t.Errorf("cleanup changed behavior:\n%s", queryOut)
 	}
 }
 
@@ -803,8 +871,8 @@ func TestWarrenSelfMountAliasLiveOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("warren mount --all: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "mounting as an alias of the live local vault") {
-		t.Fatalf("mount output missing the self-alias note:\n%s", out)
+	if !strings.Contains(out, "identity is automatic") {
+		t.Fatalf("mount output missing the identity no-op note:\n%s", out)
 	}
 	if out, err := runCLI(consumer, "warren", "refresh", "--dir", ".marmot", "--warren", selfWarrenID); err != nil {
 		t.Fatalf("warren refresh: %v\n%s", err, out)

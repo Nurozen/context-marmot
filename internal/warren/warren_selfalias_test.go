@@ -1,6 +1,8 @@
 package warren
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,34 +44,70 @@ func TestLocalVaultID(t *testing.T) {
 	}
 }
 
-// TestActiveMountsMarksSelfAlias: the mount whose vault_id matches the local
-// vault reports SelfAlias=true and Editable=false even when listed in
-// EditableProjects (legacy state); all other mounts stay SelfAlias=false.
-func TestActiveMountsMarksSelfAlias(t *testing.T) {
+// TestActiveMountsSynthesizesIdentity (R2.3): a registered warren with an
+// identified project and ZERO mounts yields exactly one identity status —
+// live path, active and available, never editable or materialized.
+func TestActiveMountsSynthesizesIdentity(t *testing.T) {
 	workspace, _ := registerAndMount(t, "project-a", "project-b")
 	writeSelfVaultConfig(t, workspace, "project-a-vault")
-	if _, err := Mount(workspace, "product-platform", []string{"project-a", "project-b"}, false); err != nil {
-		t.Fatalf("Mount: %v", err)
+	marmotDir := workspaceMarmotDir(workspace)
+
+	mounts, err := ActiveMounts(marmotDir)
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
 	}
-	// Legacy editable state written by an older binary: hand-edit past
-	// SetEditable's refusal.
+	if len(mounts) != 1 {
+		t.Fatalf("mounts = %+v, want exactly one identity entry", mounts)
+	}
+	got := mounts[0]
+	if !got.SelfAlias || got.ProjectID != "project-a" {
+		t.Fatalf("identity entry = %+v, want SelfAlias project-a", got)
+	}
+	if got.Path != marmotDir {
+		t.Fatalf("identity Path = %q, want live vault %q", got.Path, marmotDir)
+	}
+	if !got.Active || !got.Available {
+		t.Fatalf("identity entry = %+v, want Active && Available", got)
+	}
+	if got.Editable || got.Materialized {
+		t.Fatalf("identity entry = %+v, want !Editable && !Materialized", got)
+	}
+	if got.VaultID != "project-a-vault" {
+		t.Fatalf("identity VaultID = %q, want the local vault ID", got.VaultID)
+	}
+}
+
+// TestActiveMountsDedupesR1SelfMount: an R1-era self entry in ActiveProjects
+// (legacy editable flag included) produces exactly one identity-shaped
+// status — live path, not the warren-copy path — while foreign mounts are
+// untouched. (Merges R1.1's TestActiveMountsMarksSelfAlias.)
+func TestActiveMountsDedupesR1SelfMount(t *testing.T) {
+	workspace, _ := registerAndMount(t, "project-a", "project-b")
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
+	if _, err := Mount(workspace, "product-platform", []string{"project-b"}, false); err != nil {
+		t.Fatalf("Mount project-b: %v", err)
+	}
+	// Hand-write R1-era state: the self project recorded as an alias mount by
+	// an R1 binary, plus legacy editable state from an even older one.
 	state, body, err := LoadWorkspaceState(workspace)
 	if err != nil {
 		t.Fatalf("LoadWorkspaceState: %v", err)
 	}
 	entry := state.Warrens["product-platform"]
+	entry.ActiveProjects = addName(entry.ActiveProjects, "project-a")
 	entry.EditableProjects = []string{"project-a"}
 	state.Warrens["product-platform"] = entry
 	if err := SaveWorkspaceState(workspace, state, body); err != nil {
 		t.Fatalf("SaveWorkspaceState: %v", err)
 	}
 
-	mounts, err := ActiveMounts(workspaceMarmotDir(workspace))
+	marmotDir := workspaceMarmotDir(workspace)
+	mounts, err := ActiveMounts(marmotDir)
 	if err != nil {
 		t.Fatalf("ActiveMounts: %v", err)
 	}
 	if len(mounts) != 2 {
-		t.Fatalf("mounts = %+v, want 2", mounts)
+		t.Fatalf("mounts = %+v, want 2 (identity + foreign mount, deduped)", mounts)
 	}
 	byProject := make(map[string]ProjectStatus, len(mounts))
 	for _, mount := range mounts {
@@ -79,12 +117,61 @@ func TestActiveMountsMarksSelfAlias(t *testing.T) {
 	if !self.SelfAlias {
 		t.Fatalf("project-a mount = %+v, want SelfAlias=true", self)
 	}
+	if self.Path != marmotDir {
+		t.Fatalf("R1-era self mount Path = %q, want identity-shaped live path %q", self.Path, marmotDir)
+	}
 	if self.Editable {
-		t.Fatalf("self-alias mount reports Editable=true despite the alias forcing: %+v", self)
+		t.Fatalf("identity entry reports Editable=true despite legacy state: %+v", self)
 	}
 	other := byProject["project-b"]
 	if other.SelfAlias {
 		t.Fatalf("project-b mount = %+v, want SelfAlias=false", other)
+	}
+}
+
+// TestActiveMountsNoLocalIDSkipsDormantProbes (R2.3): without a workspace
+// vault_id identity is impossible, so dormant manifest projects are never
+// probed — an unreadable dormant metadata file emits no warning and no
+// entry. With a (non-matching) vault_id the dormant probe runs but stays
+// silent: only active mounts use the loud metadata loader.
+func TestActiveMountsNoLocalIDSkipsDormantProbes(t *testing.T) {
+	workspace, warrenRoot := registerAndMount(t, "project-a", "project-b")
+	if _, err := Mount(workspace, "product-platform", []string{"project-b"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	// Corrupt the dormant project's checkout metadata.
+	metaPath := filepath.Join(warrenRoot, "projects", "project-a", ".marmot", "_warren.md")
+	if err := os.WriteFile(metaPath, []byte("---\n\t: not yaml\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var warned bytes.Buffer
+	oldWarn := warnWriter
+	warnWriter = &warned
+	defer func() { warnWriter = oldWarn }()
+
+	mounts, err := ActiveMounts(workspaceMarmotDir(workspace))
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	if len(mounts) != 1 || mounts[0].ProjectID != "project-b" {
+		t.Fatalf("mounts = %+v, want only the active project-b", mounts)
+	}
+	if warned.Len() != 0 {
+		t.Fatalf("dormant project was probed without a local vault_id: %q", warned.String())
+	}
+
+	// With a non-matching vault_id the probe runs, silently.
+	writeSelfVaultConfig(t, workspace, "unrelated-vault")
+	mounts, err = ActiveMounts(workspaceMarmotDir(workspace))
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	if len(mounts) != 1 || mounts[0].ProjectID != "project-b" {
+		t.Fatalf("mounts = %+v, want only the active project-b", mounts)
+	}
+	if warned.Len() != 0 {
+		t.Fatalf("dormant metadata probe warned: %q", warned.String())
 	}
 }
 
@@ -132,9 +219,10 @@ func TestMountSelfAliasRefusesWhenEditable(t *testing.T) {
 	}
 }
 
-// TestSetEditableRefusesSelfAlias: warren edit refuses on a self-alias with
-// the edit-locally message; --off stays allowed (the legacy-state escape
-// hatch) and still auto-mounts an unmounted self project as an alias.
+// TestSetEditableRefusesSelfAlias: warren edit refuses on an identified
+// project with the edit-locally message; --off stays allowed (the
+// legacy-state escape hatch) and, under R2 identity, records no mount —
+// there is nothing to mount.
 func TestSetEditableRefusesSelfAlias(t *testing.T) {
 	workspace, _ := registerAndMount(t, "project-a")
 	writeSelfVaultConfig(t, workspace, "project-a-vault")
@@ -144,7 +232,7 @@ func TestSetEditableRefusesSelfAlias(t *testing.T) {
 		t.Fatalf("SetEditable err = %v, want self-alias refusal", err)
 	}
 
-	// --off is allowed and becomes an alias mount (no collision refusal).
+	// --off is allowed and stays a pure no-op on state (no auto-mount).
 	state, err := SetEditable(workspace, "product-platform", "project-a", false)
 	if err != nil {
 		t.Fatalf("SetEditable --off on self project: %v", err)
@@ -153,8 +241,135 @@ func TestSetEditableRefusesSelfAlias(t *testing.T) {
 	if len(entry.EditableProjects) != 0 {
 		t.Fatalf("--off left editable flags: %v", entry.EditableProjects)
 	}
-	if len(entry.ActiveProjects) != 1 || entry.ActiveProjects[0] != "project-a" {
-		t.Fatalf("--off auto-mount missing: active = %v", entry.ActiveProjects)
+	if len(entry.ActiveProjects) != 0 {
+		t.Fatalf("--off re-recorded self state: active = %v, want none (identity is derived)", entry.ActiveProjects)
+	}
+}
+
+// TestSetEditableOffSelfClearsWithoutMount (R2.4): legacy EditableProjects
+// state on an identified project is cleared by --off without writing a mount
+// record — the addName skip is what keeps R1-era self state from being
+// re-recorded on every --off.
+func TestSetEditableOffSelfClearsWithoutMount(t *testing.T) {
+	workspace, _ := registerAndMount(t, "project-a")
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
+	state, body, err := LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	entry := state.Warrens["product-platform"]
+	entry.EditableProjects = []string{"project-a"}
+	state.Warrens["product-platform"] = entry
+	if err := SaveWorkspaceState(workspace, state, body); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
+	}
+
+	after, err := SetEditable(workspace, "product-platform", "project-a", false)
+	if err != nil {
+		t.Fatalf("SetEditable --off: %v", err)
+	}
+	got := after.Warrens["product-platform"]
+	if len(got.EditableProjects) != 0 {
+		t.Fatalf("--off left editable flags: %v", got.EditableProjects)
+	}
+	if len(got.ActiveProjects) != 0 {
+		t.Fatalf("--off wrote a mount record: %v", got.ActiveProjects)
+	}
+}
+
+// TestMountAllSkipsSelf (R2.4): a mount list containing the identified
+// project (what `mount --all` expands to) mounts the foreign projects,
+// prints the identity note for self, and records nothing for it.
+func TestMountAllSkipsSelf(t *testing.T) {
+	workspace, _ := registerAndMount(t, "project-a", "project-b")
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
+
+	var warned bytes.Buffer
+	oldWarn := warnWriter
+	warnWriter = &warned
+	defer func() { warnWriter = oldWarn }()
+
+	state, err := Mount(workspace, "product-platform", []string{"project-a", "project-b"}, false)
+	if err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	if !strings.Contains(warned.String(), "identity is automatic") {
+		t.Fatalf("expected identity note, got %q", warned.String())
+	}
+	entry := state.Warrens["product-platform"]
+	if len(entry.ActiveProjects) != 1 || entry.ActiveProjects[0] != "project-b" {
+		t.Fatalf("active = %v, want only project-b (self skipped)", entry.ActiveProjects)
+	}
+}
+
+// TestUnmountCleansR1SelfMount (R2.8): unmount is the cleanup path for
+// R1-era self entries; afterwards unmounting the (never really mounted)
+// identified project errors with the identity clause.
+func TestUnmountCleansR1SelfMount(t *testing.T) {
+	workspace, _ := registerAndMount(t, "project-a")
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
+	state, body, err := LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	entry := state.Warrens["product-platform"]
+	entry.ActiveProjects = []string{"project-a"}
+	state.Warrens["product-platform"] = entry
+	if err := SaveWorkspaceState(workspace, state, body); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
+	}
+
+	after, err := Unmount(workspace, "product-platform", []string{"project-a"})
+	if err != nil {
+		t.Fatalf("Unmount R1-era self entry: %v", err)
+	}
+	if got := after.Warrens["product-platform"].ActiveProjects; len(got) != 0 {
+		t.Fatalf("unmount left the self entry: %v", got)
+	}
+
+	_, err = Unmount(workspace, "product-platform", []string{"project-a"})
+	if err == nil || !strings.Contains(err.Error(), "identity is derived from vault_id, not a mount") {
+		t.Fatalf("Unmount err = %v, want not-mounted error with the identity clause", err)
+	}
+
+	// A foreign never-mounted project keeps the plain message.
+	_, err = Unmount(workspace, "product-platform", []string{"ghost"})
+	if err == nil || strings.Contains(err.Error(), "identity is derived") {
+		t.Fatalf("Unmount ghost err = %v, want plain not-mounted error", err)
+	}
+}
+
+// TestStatusIdentityRow (R2.6): Status reports identified projects with the
+// live vault path (never the checkout path) and Available=true, mounted or
+// not.
+func TestStatusIdentityRow(t *testing.T) {
+	workspace, warrenRoot := registerAndMount(t, "project-a", "project-b")
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
+
+	statuses, err := Status(workspace, "product-platform")
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	byProject := make(map[string]ProjectStatus, len(statuses))
+	for _, status := range statuses {
+		byProject[status.ProjectID] = status
+	}
+	self := byProject["project-a"]
+	if !self.SelfAlias {
+		t.Fatalf("project-a status = %+v, want SelfAlias", self)
+	}
+	if want := workspaceMarmotDir(workspace); self.Path != want {
+		t.Fatalf("identity status Path = %q, want live vault %q", self.Path, want)
+	}
+	if !self.Available {
+		t.Fatalf("identity status = %+v, want Available", self)
+	}
+	other := byProject["project-b"]
+	if other.SelfAlias || other.Path == workspaceMarmotDir(workspace) {
+		t.Fatalf("project-b status = %+v, want checkout-path row", other)
+	}
+	if !strings.HasPrefix(other.Path, warrenRoot) {
+		t.Fatalf("project-b Path = %q, want under warren root %q", other.Path, warrenRoot)
 	}
 }
 
@@ -207,14 +422,52 @@ func TestRefuseVaultIDCollisionUnconditional(t *testing.T) {
 
 // --- R1.6: DoctorWorkspace alignment ----------------------------------------
 
-// TestDoctorWorkspaceSelfAliasHealthy: a plain self-alias mount is healthy —
-// no error-severity issues, one self_alias_mount info.
+// TestDoctorWorkspaceSelfAliasHealthy (reshaped for R2): an identified
+// project is healthy with zero mounts — one self_identity info, no
+// self_alias_mount (nothing redundant is recorded), no collision.
 func TestDoctorWorkspaceSelfAliasHealthy(t *testing.T) {
 	t.Setenv("MARMOT_ROUTES", "off")
 	workspace, _ := registerAndMount(t, "project-a")
 	writeSelfVaultConfig(t, workspace, "project-a-vault")
-	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
-		t.Fatalf("Mount: %v", err)
+
+	report, err := DoctorWorkspace(workspaceMarmotDir(workspace), workspace)
+	if err != nil {
+		t.Fatalf("DoctorWorkspace: %v", err)
+	}
+	if !report.OK() {
+		t.Fatalf("identified project must be healthy, got %+v", report.Issues)
+	}
+	if findIssue(report, "vault_id_collision_workspace") != nil {
+		t.Fatalf("identity reported as collision: %+v", report.Issues)
+	}
+	issue := findIssue(report, "self_identity")
+	if issue == nil {
+		t.Fatalf("issues = %+v, want self_identity info", report.Issues)
+	}
+	if issue.Severity != "info" || !strings.Contains(issue.Message, "serves from the live vault") {
+		t.Fatalf("self_identity issue = %+v", issue)
+	}
+	if findIssue(report, "self_alias_mount") != nil {
+		t.Fatalf("no mount recorded, so nothing is redundant: %+v", report.Issues)
+	}
+}
+
+// TestDoctorWorkspaceRedundantSelfMount (R2.7): an R1-era self entry in
+// ActiveProjects stays healthy but doctor reports the redundancy with the
+// unmount cleanup, alongside the self_identity info.
+func TestDoctorWorkspaceRedundantSelfMount(t *testing.T) {
+	t.Setenv("MARMOT_ROUTES", "off")
+	workspace, _ := registerAndMount(t, "project-a")
+	writeSelfVaultConfig(t, workspace, "project-a-vault")
+	state, body, err := LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	entry := state.Warrens["product-platform"]
+	entry.ActiveProjects = []string{"project-a"}
+	state.Warrens["product-platform"] = entry
+	if err := SaveWorkspaceState(workspace, state, body); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
 	}
 
 	report, err := DoctorWorkspace(workspaceMarmotDir(workspace), workspace)
@@ -222,17 +475,17 @@ func TestDoctorWorkspaceSelfAliasHealthy(t *testing.T) {
 		t.Fatalf("DoctorWorkspace: %v", err)
 	}
 	if !report.OK() {
-		t.Fatalf("plain self-alias must be healthy, got %+v", report.Issues)
+		t.Fatalf("redundant self-mount must stay healthy, got %+v", report.Issues)
 	}
-	if findIssue(report, "vault_id_collision_workspace") != nil {
-		t.Fatalf("self-alias reported as collision: %+v", report.Issues)
+	if findIssue(report, "self_identity") == nil {
+		t.Fatalf("issues = %+v, want self_identity info", report.Issues)
 	}
 	issue := findIssue(report, "self_alias_mount")
 	if issue == nil {
-		t.Fatalf("issues = %+v, want self_alias_mount info", report.Issues)
+		t.Fatalf("issues = %+v, want self_alias_mount redundancy info", report.Issues)
 	}
-	if issue.Severity != "info" || !strings.Contains(issue.Message, "serves from the live vault") {
-		t.Fatalf("self_alias_mount issue = %+v", issue)
+	if issue.Severity != "info" || !strings.Contains(issue.Message, "redundant self-mount") || !strings.Contains(issue.Message, "marmot warren unmount --warren product-platform project-a") {
+		t.Fatalf("self_alias_mount issue = %+v, want redundancy message with unmount cleanup", issue)
 	}
 }
 
@@ -242,14 +495,14 @@ func TestDoctorWorkspaceSelfAliasEditableError(t *testing.T) {
 	t.Setenv("MARMOT_ROUTES", "off")
 	workspace, _ := registerAndMount(t, "project-a")
 	writeSelfVaultConfig(t, workspace, "project-a-vault")
-	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
-		t.Fatalf("Mount: %v", err)
-	}
+	// Hand-write R1-era state (mount is a no-op under R2 identity): the self
+	// project active and marked editable by an older binary.
 	state, body, err := LoadWorkspaceState(workspace)
 	if err != nil {
 		t.Fatalf("LoadWorkspaceState: %v", err)
 	}
 	entry := state.Warrens["product-platform"]
+	entry.ActiveProjects = []string{"project-a"}
 	entry.EditableProjects = []string{"project-a"}
 	state.Warrens["product-platform"] = entry
 	if err := SaveWorkspaceState(workspace, state, body); err != nil {
@@ -279,8 +532,17 @@ func TestDoctorWorkspaceSelfAliasMaterializedWarns(t *testing.T) {
 	t.Setenv("MARMOT_ROUTES", "off")
 	workspace, _ := registerAndMount(t, "project-a")
 	writeSelfVaultConfig(t, workspace, "project-a-vault")
-	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
-		t.Fatalf("Mount: %v", err)
+	// Hand-write R1-era state (mount is a no-op under R2 identity): the self
+	// project recorded active by an older binary.
+	state, body, err := LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	entry := state.Warrens["product-platform"]
+	entry.ActiveProjects = []string{"project-a"}
+	state.Warrens["product-platform"] = entry
+	if err := SaveWorkspaceState(workspace, state, body); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
 	}
 	// A legacy cache dir written before the Materialize refusal existed.
 	cached := materializedProjectPath(workspaceMarmotDir(workspace), "product-platform", "project-a")
@@ -355,5 +617,63 @@ func TestDoctorLocalRouteMismatch(t *testing.T) {
 	}
 	if !report.OK() {
 		t.Error("route mismatch must stay a warning")
+	}
+}
+
+// BenchmarkActiveMountsDormantIdentityScan measures the R2 identity scan's
+// cost (defer criterion 3 of the identity plan): with a workspace vault_id,
+// ActiveMounts probes every dormant manifest project's metadata once per
+// call. The NoVaultID variant is the pre-R2 baseline (the early-continue
+// skips all dormant probes). Run with a realistically large warren:
+//
+//	go test -bench BenchmarkActiveMountsDormant -run ^$ ./internal/warren/
+func BenchmarkActiveMountsDormantIdentityScan(b *testing.B) {
+	for _, tc := range []struct {
+		name    string
+		vaultID string
+	}{
+		{"NoVaultID", ""},           // pre-R2 baseline: dormant probes skipped
+		{"WithVaultID", "no-match"}, // identity scan: one metadata read per dormant project
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			workspace := b.TempDir()
+			warrenRoot := b.TempDir()
+			manifest := &Manifest{WarrenID: "bench-warren"}
+			for i := 0; i < 200; i++ {
+				projectID := fmt.Sprintf("proj-%03d", i)
+				marmotDir := filepath.Join(warrenRoot, "projects", projectID, ".marmot")
+				if err := SaveProjectMetadata(marmotDir, &ProjectMetadata{
+					ProjectID: projectID,
+					WarrenID:  "bench-warren",
+					VaultID:   projectID + "-vault",
+				}, ""); err != nil {
+					b.Fatal(err)
+				}
+				manifest.Projects = append(manifest.Projects, Project{
+					ProjectID: projectID,
+					Path:      filepath.ToSlash(filepath.Join("projects", projectID, ".marmot")),
+				})
+			}
+			if err := SaveManifest(warrenRoot, manifest, ""); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := RegisterWorkspaceWarren(workspace, "bench-warren", warrenRoot); err != nil {
+				b.Fatal(err)
+			}
+			if tc.vaultID != "" {
+				marmotDir := workspaceMarmotDir(workspace)
+				cfg := "---\nversion: \"1\"\nvault_id: " + tc.vaultID + "\nnamespace: default\nembedding_provider: mock\n---\n"
+				if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(cfg), 0o644); err != nil {
+					b.Fatal(err)
+				}
+			}
+			marmotDir := workspaceMarmotDir(workspace)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := ActiveMounts(marmotDir); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }

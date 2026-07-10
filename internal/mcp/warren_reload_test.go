@@ -378,6 +378,100 @@ func TestReloadWarrenStateSelfAliasSkipsRoute(t *testing.T) {
 	}
 }
 
+// TestReloadWarrenStateIdentityBridgeWithoutMount (R2.3): a manifest bridge
+// between the identified project and a foreign project activates with ONLY
+// the foreign side mounted — the identified endpoint is synthesized by
+// ActiveMounts (no self-mount ritual), resolves to the live workspace
+// .marmot, and still claims no route. (This is R1.3's
+// TestWarrenRuntimeBridgesSelfAliasEndpoint minus the self-mount step — the
+// delta IS R2.)
+func TestReloadWarrenStateIdentityBridgeWithoutMount(t *testing.T) {
+	eng := warrenEngine(t)
+	warrenRoot := warrenFixture(t, eng, "wp", "proj-a", "proj-a-vault")
+	addFixtureProject(t, warrenRoot, "wp", "self-proj", "local-vault")
+	setFixtureBridges(t, warrenRoot, []warren.Bridge{{Source: "self-proj", Target: "proj-a", Relations: []string{"references"}}})
+	// self-proj is deliberately NEVER mounted.
+
+	if err := eng.ReloadWarrenState(); err != nil {
+		t.Fatalf("ReloadWarrenState: %v", err)
+	}
+	if knownVaults(eng)["local-vault"] {
+		t.Fatalf("identity claimed a route: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+	if !knownVaults(eng)["proj-a-vault"] {
+		t.Fatalf("foreign mount missing from registry: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+	bridges := eng.crossVaultBridges()
+	if len(bridges) != 1 {
+		t.Fatalf("bridges = %+v, want exactly 1 (identity endpoint needs no mount)", bridges)
+	}
+	b := bridges[0]
+	absMarmot, err := filepath.Abs(eng.MarmotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.SourceVaultID != "local-vault" || b.SourceVaultPath != absMarmot {
+		t.Fatalf("identity endpoint = %q/%q, want local-vault at the live %q", b.SourceVaultID, b.SourceVaultPath, absMarmot)
+	}
+	if b.TargetVaultID != "proj-a-vault" {
+		t.Fatalf("TargetVaultID = %q, want proj-a-vault", b.TargetVaultID)
+	}
+}
+
+// TestReloadLegacySelfCacheFallbackStillFlagsSelf (R2.3 carve-out): when a
+// warren's manifest is unreachable, ActiveMounts degrades to
+// materializedStatuses — which must KEEP its own SelfAlias computation, or a
+// legacy self burrow cache surfacing through that fallback would be routed
+// by the reload loop, re-poisoning @local-id with the pre-R1 stale shadow.
+func TestReloadLegacySelfCacheFallbackStillFlagsSelf(t *testing.T) {
+	eng := warrenEngine(t)
+	workspaceRoot := filepath.Dir(eng.MarmotDir)
+	warrenRoot := warrenFixture(t, eng, "wp", "self-proj", "local-vault")
+
+	// Hand-write the legacy shape (pre-R1 binaries could create it; Mount and
+	// Materialize both refuse it now): the self project active with a burrow
+	// cache, then the checkout disappears.
+	cachePath := filepath.Join(eng.MarmotDir, ".marmot-data", "warrens", "wp", "projects", "self-proj", ".marmot")
+	if err := os.MkdirAll(cachePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := warren.SaveProjectMetadata(cachePath, &warren.ProjectMetadata{
+		ProjectID: "self-proj",
+		WarrenID:  "wp",
+		VaultID:   "local-vault",
+	}, ""); err != nil {
+		t.Fatalf("SaveProjectMetadata: %v", err)
+	}
+	state, body, err := warren.LoadWorkspaceState(workspaceRoot)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	entry := state.Warrens["wp"]
+	entry.ActiveProjects = []string{"self-proj"}
+	entry.Materialized = true
+	state.Warrens["wp"] = entry
+	if err := warren.SaveWorkspaceState(workspaceRoot, state, body); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
+	}
+	if err := os.RemoveAll(warrenRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	mounts, err := warren.ActiveMounts(eng.MarmotDir)
+	if err != nil {
+		t.Fatalf("ActiveMounts: %v", err)
+	}
+	if len(mounts) != 1 || !mounts[0].SelfAlias {
+		t.Fatalf("mounts = %+v, want the cache fallback status flagged SelfAlias", mounts)
+	}
+	if err := eng.ReloadWarrenState(); err != nil {
+		t.Fatalf("ReloadWarrenState: %v", err)
+	}
+	if knownVaults(eng)["local-vault"] {
+		t.Fatalf("legacy self cache re-poisoned @local-id routing: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+}
+
 // TestWarrenRuntimeBridgesSelfAliasEndpoint (R1.3): a manifest bridge between
 // a self-alias and a foreign project synthesizes a runtime bridge whose alias
 // endpoint is the workspace's own .marmot (live), while the vault IDs stay

@@ -340,9 +340,11 @@ func TestWarrenDoctorWorkspaceCLI(t *testing.T) {
 	}
 }
 
-// TestWarrenDoctorWorkspaceSelfAliasHealthyCLI (R1.6 companion): a self-alias
-// mount (project vault_id == workspace vault_id) is healthy — doctor exits 0
-// and reports it as the self_alias_mount info, agreeing with mount.
+// TestWarrenDoctorWorkspaceSelfAliasHealthyCLI (R2.7 companion): an
+// identified project (project vault_id == workspace vault_id) is healthy
+// with no mount at all — doctor exits 0 with the self_identity info; the
+// explicit mount attempt is a no-op that records nothing, so no redundancy
+// info appears either.
 func TestWarrenDoctorWorkspaceSelfAliasHealthyCLI(t *testing.T) {
 	t.Setenv("MARMOT_ROUTES", "off")
 	workspace := t.TempDir()
@@ -367,19 +369,30 @@ func TestWarrenDoctorWorkspaceSelfAliasHealthyCLI(t *testing.T) {
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
 		t.Fatal("register failed")
 	}
+	// Explicit mount of the identified project: exit 0, nothing recorded.
 	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "self-proj"}); code != 0 {
-		t.Fatal("self-alias mount failed")
+		t.Fatal("self mount no-op failed")
+	}
+	state, _, err := warrenpkg.LoadWorkspaceState(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Warrens["wp"].ActiveProjects; len(got) != 0 {
+		t.Fatalf("self mount recorded state: %v, want none", got)
 	}
 
 	stdout, _, code := captureRunBoth(t, []string{"warren", "doctor", "--workspace", "--dir", marmotDir, "--json"})
 	if code != 0 {
-		t.Fatalf("doctor --workspace on a self-alias mount = code %d, want 0 (stdout %q)", code, stdout)
+		t.Fatalf("doctor --workspace on an identified project = code %d, want 0 (stdout %q)", code, stdout)
 	}
-	if !strings.Contains(stdout, "self_alias_mount") {
-		t.Fatalf("doctor JSON missing self_alias_mount info: %q", stdout)
+	if !strings.Contains(stdout, "self_identity") {
+		t.Fatalf("doctor JSON missing self_identity info: %q", stdout)
+	}
+	if strings.Contains(stdout, "self_alias_mount") {
+		t.Fatalf("nothing recorded, so nothing is redundant: %q", stdout)
 	}
 	if strings.Contains(stdout, "vault_id_collision_workspace") {
-		t.Fatalf("self-alias reported as collision: %q", stdout)
+		t.Fatalf("identity reported as collision: %q", stdout)
 	}
 }
 
