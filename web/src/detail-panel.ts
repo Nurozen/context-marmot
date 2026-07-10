@@ -235,8 +235,20 @@ export class DetailPanel {
       transition: 'opacity var(--transition-fast)',
     });
 
+    let readOnlyHint: HTMLElement | null = null;
     if (isReadOnlyWarrenNode) {
       saveBtn.textContent = 'Read-only Warren Node';
+      readOnlyHint = document.createElement('p');
+      readOnlyHint.className = 'readonly-hint';
+      if (node.provenance?.source === 'local_alias') {
+        // Identity/self-alias: the @-qualified view is a read-through of the
+        // live workspace vault; the write path is the unqualified node.
+        readOnlyHint.textContent = 'This is your live vault — edit the unqualified node.';
+      } else {
+        const project = node.provenance?.project_id ?? '<project>';
+        const warrenId = node.provenance?.warren_id ?? '<warren>';
+        readOnlyHint.textContent = `Enable writes: marmot warren edit ${project} --warren ${warrenId}`;
+      }
     }
 
     const enableSave = () => {
@@ -273,6 +285,7 @@ export class DetailPanel {
     });
 
     this.content.appendChild(saveBtn);
+    if (readOnlyHint) this.content.appendChild(readOnlyHint);
 
     // Show the panel
     this.container.classList.remove('hidden');

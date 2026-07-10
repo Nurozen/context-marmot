@@ -627,6 +627,13 @@ func TestDoctorLocalRouteMismatch(t *testing.T) {
 // skips all dormant probes). Run with a realistically large warren:
 //
 //	go test -bench BenchmarkActiveMountsDormant -run ^$ ./internal/warren/
+//
+// Measured for the R2 ship decision (Apple M4, darwin/arm64, go1.26,
+// 200 dormant projects): NoVaultID 0.58ms/op vs WithVaultID 3.68ms/op —
+// ~15.5µs per dormant-project probe. Against the 1s-debounced reload and
+// buildEngine startup, +3.1ms per call at 2x the plan's "realistic large
+// warren" (≳100 projects) is invisible; criterion 3 does not fire, no
+// metadata mtime-cache needed. Conclusion: SHIP.
 func BenchmarkActiveMountsDormantIdentityScan(b *testing.B) {
 	for _, tc := range []struct {
 		name    string

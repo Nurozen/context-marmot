@@ -136,8 +136,16 @@ func TestAuthoringInitAddRenameRemoveProjectPreservesBody(t *testing.T) {
 	if _, err := AddBridge(root, Bridge{Source: "api", Target: "web", Relations: []string{"references", "calls", "calls"}}); err != nil {
 		t.Fatalf("AddBridge: %v", err)
 	}
-	if _, err := RenameProject(root, "api", "api-service"); err != nil {
+	renamed, err := RenameProject(root, "api", "api-service", false)
+	if err != nil {
 		t.Fatalf("RenameProject: %v", err)
+	}
+	// U6: the conventional projects/<oldID> directory moves with the rename.
+	if !renamed.Moved || renamed.OldDir != "projects/api" || renamed.NewDir != "projects/api-service" {
+		t.Fatalf("rename result = %+v, want move projects/api -> projects/api-service", renamed)
+	}
+	if _, err := os.Stat(filepath.Join(root, "projects", "api")); !os.IsNotExist(err) {
+		t.Fatalf("old project dir still present after rename (err=%v)", err)
 	}
 	bridges, err := ListBridges(root)
 	if err != nil {
@@ -146,12 +154,16 @@ func TestAuthoringInitAddRenameRemoveProjectPreservesBody(t *testing.T) {
 	if len(bridges) != 1 || bridges[0].Source != "api-service" || strings.Join(bridges[0].Relations, ",") != "calls,references" {
 		t.Fatalf("bridge not renamed/normalized: %+v", bridges)
 	}
-	meta, _, err = LoadProjectMetadata(filepath.Join(root, "projects", "api", ".marmot"))
+	meta, _, err = LoadProjectMetadata(filepath.Join(root, "projects", "api-service", ".marmot"))
 	if err != nil {
 		t.Fatalf("LoadProjectMetadata renamed: %v", err)
 	}
 	if meta.ProjectID != "api-service" {
 		t.Fatalf("renamed metadata project ID = %q", meta.ProjectID)
+	}
+	// vault_id is the identity key: the rename must never rewrite it.
+	if meta.VaultID != "api" || renamed.VaultID != "api" {
+		t.Fatalf("rename rewrote vault_id: meta=%q result=%q, want \"api\"", meta.VaultID, renamed.VaultID)
 	}
 
 	if _, err := RemoveProject(root, "api-service"); err != nil {

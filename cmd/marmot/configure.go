@@ -5,12 +5,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"golang.org/x/term"
 
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/warren"
 )
 
 // modelPreset describes an embedding model option shown to the user.
@@ -39,6 +41,7 @@ var classifierPresets = []classifierPreset{
 func cmdConfigure(args []string) int {
 	fs := flag.NewFlagSet("configure", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	vaultID := fs.String("vault-id", "", "set the vault ID (cross-vault identity for warrens and bridges) non-interactively and exit")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -46,11 +49,53 @@ func cmdConfigure(args []string) int {
 		*dir = discoverVault()
 	}
 
+	if *vaultID != "" {
+		if err := setVaultID(*dir, *vaultID); err != nil {
+			fmt.Fprintf(os.Stderr, "configure: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	if err := runConfigure(*dir, os.Stdin); err != nil {
 		fmt.Fprintf(os.Stderr, "configure: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// setVaultID persists vault_id into _config.md without the interactive flow,
+// so scripts and docs can say 'marmot configure --vault-id <id>'. The
+// vault ID is the identity key for warren bridges: a warren project whose
+// checkout vault_id matches it is served as this workspace's live vault.
+func setVaultID(dir, vaultID string) error {
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
+	}
+	if err := warren.ValidateProjectID(vaultID); err != nil {
+		return fmt.Errorf("invalid vault ID: %w", err)
+	}
+	cfg, body, err := config.LoadRaw(dir)
+	if err != nil {
+		return err
+	}
+	cfg.VaultID = vaultID
+	if err := config.Save(dir, cfg, body); err != nil {
+		return err
+	}
+	fmt.Printf("vault_id set to %q\n", vaultID)
+	return nil
+}
+
+// defaultVaultIDFor derives the interactive prompt's default vault ID: the
+// current value when set, else a slug of the workspace directory name (the
+// parent of the .marmot dir).
+func defaultVaultIDFor(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "vault"
+	}
+	return warren.GenerateProjectID(filepath.Base(filepath.Dir(abs)))
 }
 
 // runConfigure drives the interactive configuration flow.
@@ -125,6 +170,26 @@ func runConfigure(dir string, input *os.File) error {
 		if err := promptAPIKey(scanner, input, dir, selected.Provider); err != nil {
 			return err
 		}
+	}
+
+	// --- Vault ID (cross-vault identity for warrens and bridges) ---
+	// Placed last so earlier prompt inputs are unaffected; EOF or an empty
+	// line accepts the default (current value, else a workspace-name slug).
+	defaultVaultID := cfg.VaultID
+	if defaultVaultID == "" {
+		defaultVaultID = defaultVaultIDFor(dir)
+	}
+	fmt.Printf("\nVault ID (identity for warren bridges and @-references) [%s]: ", defaultVaultID)
+	vaultID := defaultVaultID
+	if scanner.Scan() {
+		if line := strings.TrimSpace(scanner.Text()); line != "" {
+			vaultID = line
+		}
+	}
+	if err := warren.ValidateProjectID(vaultID); err != nil {
+		fmt.Printf("  Invalid vault ID (%v); keeping %q\n", err, cfg.VaultID)
+	} else {
+		cfg.VaultID = vaultID
 	}
 
 	// --- Save ---

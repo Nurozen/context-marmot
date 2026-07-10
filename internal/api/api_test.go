@@ -132,7 +132,20 @@ func newTestServer(t *testing.T) (*Server, *mcpserver.Engine) {
 	return server, engine
 }
 
+// setupAPIWarren registers AND mounts a one-project warren. The endpoint
+// tests that drive mounting over HTTP use registerAPIWarren instead.
 func setupAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID string) string {
+	t.Helper()
+	warrenRoot := registerAPIWarren(t, workspaceRoot, warrenID, projectID, vaultID)
+	if _, err := warrenpkg.Mount(workspaceRoot, warrenID, []string{projectID}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	return warrenRoot
+}
+
+// registerAPIWarren builds a one-project warren checkout and registers it in
+// the workspace without mounting anything.
+func registerAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID string) string {
 	t.Helper()
 	warrenRoot := t.TempDir()
 	marmotDir := filepath.Join(warrenRoot, "projects", projectID, ".marmot")
@@ -163,9 +176,6 @@ func setupAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID st
 	}
 	if _, err := warrenpkg.RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot); err != nil {
 		t.Fatalf("RegisterWorkspaceWarren: %v", err)
-	}
-	if _, err := warrenpkg.Mount(workspaceRoot, warrenID, []string{projectID}, false); err != nil {
-		t.Fatalf("Mount: %v", err)
 	}
 	return warrenRoot
 }
@@ -318,6 +328,11 @@ func TestWarrenGraphAndEditableWritePolicy(t *testing.T) {
 	rec = doRequest(t, handler, "PUT", updatePath, `{"summary":"updated summary"}`)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected read-only 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// U4.2: the refusal names its remediation command.
+	if body := rec.Body.String(); !strings.Contains(body, "'marmot warren edit project-a --warren product-platform'") ||
+		!strings.Contains(body, "unless the warren author marked it read-only") {
+		t.Fatalf("read-only refusal = %q, want the warren edit remediation hint", body)
 	}
 
 	if _, err := warrenpkg.SetEditable(workspaceRoot, "product-platform", "project-a", true); err != nil {

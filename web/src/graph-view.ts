@@ -625,15 +625,22 @@ export class GraphView {
       .selectAll<SVGGElement, SimNode>('.node')
       .data(this.nodes, (d) => d.id);
 
-    /* Deleted nodes: shrink + fade out over 300ms */
-    nodeSel.exit()
-      .classed('node-exiting', true)
+    /* Deleted nodes: shrink + fade out over 300ms. The remove() must run on
+       the <g class="node"> transition itself — chaining it after
+       select('circle') only removed the circle and left invisible ghost
+       groups behind on every namespace switch (they still intercepted
+       clicks and inflated node counts). */
+    const exitSel = nodeSel.exit().classed('node-exiting', true);
+    exitSel.select('circle')
+      .transition()
+      .duration(300)
+      .ease(d3.easeCubicIn)
+      .attr('r', 0);
+    exitSel
       .transition()
       .duration(300)
       .ease(d3.easeCubicIn)
       .style('opacity', 0)
-      .select('circle')
-      .attr('r', 0)
       .remove();
 
     const enter = nodeSel.enter().append('g').attr('class', (d) => {

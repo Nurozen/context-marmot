@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -583,8 +584,10 @@ func ownerAlive(dir string) (daemon.Info, bool) {
 	return info, true
 }
 
-// runUIPipeline starts the HTTP UI server backed by the shared engine.
-func runUIPipeline(dir string, port int, noOpen bool) error {
+// runUIPipeline starts the HTTP UI server backed by the shared engine. The
+// server binds host (loopback by default — the API carries workspace-state
+// mutation, so exposing it beyond the machine is an explicit --host opt-in).
+func runUIPipeline(dir, host string, port int, noOpen bool) error {
 	result, err := buildEngine(dir)
 	if err != nil {
 		return err
@@ -629,8 +632,15 @@ func runUIPipeline(dir string, port int, noOpen bool) error {
 		fmt.Fprintln(os.Stderr, "live-reload: watching vault for changes")
 	}
 
-	addr := fmt.Sprintf(":%d", port)
-	url := fmt.Sprintf("http://localhost:%d", port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	// Wildcard and loopback binds are both reachable via localhost; only a
+	// specific non-loopback --host needs its own name in the printed URL.
+	urlHost := host
+	switch host {
+	case "", "0.0.0.0", "::":
+		urlHost = "localhost"
+	}
+	url := fmt.Sprintf("http://%s", net.JoinHostPort(urlHost, strconv.Itoa(port)))
 	fmt.Fprintf(os.Stderr, "ContextMarmot UI server starting at %s\n", url)
 
 	// Auto-open browser (best-effort).

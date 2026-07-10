@@ -9,6 +9,65 @@ Warrens are mounted explicitly. Registered projects stay dormant until activated
 with `marmot warren mount`, so large company graphs do not become queryable by
 accident.
 
+## Quickstart: zero to first bridge
+
+One workspace (`my-project`) wants its queries to traverse a bridge into a
+second project (`pb`) published through a Warren. Everything below is
+copy-pasteable; adjust paths.
+
+**0. Give your workspace an identity.** A `vault_id` in `.marmot/_config.md`
+is the one prerequisite for bridges involving your *own* project: the
+Warren's copy of your project is recognized as *you* by comparing its
+`vault_id` with yours.
+
+```bash
+cd ~/src/my-project
+marmot configure --vault-id my-project
+```
+
+**1. Author the Warren** (in the warren repository, usually its own git
+repo):
+
+```bash
+mkdir product-warren && cd product-warren && git init
+marmot warren init --id product-platform
+# Import your own project WITHOUT --vault-id so the copy keeps your
+# vault_id — that is what identifies it with your workspace:
+marmot warren project import my-project ~/src/my-project/.marmot
+marmot warren project import pb ~/src/pb/.marmot --vault-id pb-vault
+marmot warren bridge add my-project pb --relations references,calls
+marmot warren doctor            # exits 0 when the manifest is coherent
+```
+
+**2. Consume it** (back in your workspace):
+
+```bash
+cd ~/src/my-project
+marmot warren register product-platform /path/to/product-warren
+# register announces: project "my-project" ... matches this workspace's vault ID
+marmot warren mount --warren product-platform pb
+```
+
+Identity is automatic: your own project needs **no mount** (mounting it is a
+harmless no-op) — mounting the *other* endpoint is the single deliberate act
+that turns the manifest bridge on.
+
+**3. What you should see:**
+
+```bash
+marmot warren status --warren product-platform
+# PROJECT     STATE     EDITABLE  AVAILABLE  PATH
+# my-project  identity  false     true       /Users/you/src/my-project/.marmot
+# pb          mounted   false     true       /path/to/product-warren/projects/pb/.marmot
+
+marmot warren doctor --workspace   # exits 0, with a self_identity info line
+marmot query --query "..."         # may return @pb-vault/... nodes across the bridge
+```
+
+Cross-vault edges into the mounted project use qualified IDs
+(`@pb-vault/service/api`) and validate against the Warren's bridge policy.
+The rest of this document is the reference behind each step.
+
 ## Repository layout
 
 A Warren has a top-level `_warren.md` manifest and project vaults below
@@ -202,6 +261,20 @@ marmot warren project rename project-a payments-api
 marmot warren project remove payments-api
 ```
 
+`project rename` also moves the conventional `projects/<old-id>/` directory
+to `projects/<new-id>/` (pass `--keep-path` to rename the ID only;
+unconventional paths are never moved, and an existing target directory is
+refused). The move is a plain filesystem rename, so `git add -A` in the
+warren repo records it as a rename. The project's `vault_id` is deliberately
+untouched — it is the identity key consumers route (and identify their own
+workspace) by, so it must stay stable across renames; change it only by
+re-importing with `--vault-id`. The command says what happened to both:
+
+```text
+Renamed project "api" -> "api-service" (moved projects/api -> projects/api-service)
+note: vault_id "api-vault" unchanged — vault identity is stable across renames; re-import with --vault-id to change it
+```
+
 Add Warren-owned bridge policy between projects:
 
 ```bash
@@ -334,6 +407,11 @@ with the additive `self_alias` flag. `warren list` adds an IDENTITY column
 listing each Warren's identified projects (`-` when none;
 `"identified_projects"` in `--json`), and `GET /api/warrens` carries the
 same computed field per Warren.
+
+In `--json` mode stdout is exactly one JSON document; diagnostics
+(unreachable-checkout banners, model-skew warnings, deprecation notices, the
+vault_id nudge) go to stderr. Scripts can parse stdout whole without
+scraping.
 
 When the registered checkout no longer exists, `status` prints an
 `UNREACHABLE` banner naming the re-register/unregister escape hatches and
@@ -535,6 +613,14 @@ Plain local graph views stay local:
 - `GET /api/search?q=...&ns=_warren/product-platform` returns Warren-scoped results.
 
 The web UI exposes active Warrens in the graph selector as `Warren <id>`.
+
+Cross-vault resolution reads the global routing table at
+`~/.marmot/routes.yml` (populated by `marmot route add`, `marmot bridge`,
+and warren registration). The `MARMOT_ROUTES` environment variable overrides
+it: `MARMOT_ROUTES=off` (also `none` or `0`) disables the global table
+entirely — useful for hermetic tests and scratch vaults that must not
+inherit your real vault registry — and any other non-empty value is used as
+the routes file path instead of the default.
 
 ## Freshness and refresh
 

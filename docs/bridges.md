@@ -122,6 +122,18 @@ requirement automatically, with no mount, and its side of the bridge
 resolves to the live workspace vault rather than the Warren copy — mounting
 the other endpoint is all it takes to turn such a bridge on.
 
+**When to use which cross-project mechanism:** `marmot bridge <path>` (the
+cross-vault bridge above) is the right tool for a *pair* of independent
+vaults you both control locally — it writes matching `_bridges/` manifests
+into each vault and registers both in the global routing table, with a
+different default relation set. A Warren is the right tool when a *curated
+set* of projects should be shareable and mounted on demand: bridge policy
+lives in one reviewed manifest, endpoints activate per workspace, and
+nothing touches the other project's vault. The two systems are separate
+surfaces today (a warren bridge never creates `_bridges/` files and vice
+versa); both refuse to bridge a vault to a copy of itself. Reconciling them
+into one surface is future design work.
+
 ## Namespace setup
 
 To use namespace bridges, each namespace needs a `_namespace.md` file:

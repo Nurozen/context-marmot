@@ -205,6 +205,68 @@ func TestConfigureClassifierAnthropic(t *testing.T) {
 	}
 }
 
+// TestConfigureSetsVaultID (U1 piece 0): the interactive prompt and the
+// non-interactive --vault-id flag both persist vault_id through
+// config.Save and round-trip through config.Load.
+func TestConfigureSetsVaultID(t *testing.T) {
+	dir := newTestVault(t)
+
+	// Interactive: provider mock (2), classifier default (empty), vault ID.
+	input := createInput(t, "2\n\nmy-vault\n")
+	defer input.Close()
+	if err := runConfigure(dir, input); err != nil {
+		t.Fatalf("runConfigure: %v", err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.VaultID != "my-vault" {
+		t.Fatalf("VaultID after prompt = %q, want my-vault", cfg.VaultID)
+	}
+
+	// Non-interactive flag path.
+	if code := run([]string{"configure", "--dir", dir, "--vault-id", "flag-vault"}); code != 0 {
+		t.Fatalf("configure --vault-id exit code = %d", code)
+	}
+	cfg, err = config.Load(dir)
+	if err != nil {
+		t.Fatalf("load config after flag: %v", err)
+	}
+	if cfg.VaultID != "flag-vault" {
+		t.Fatalf("VaultID after flag = %q, want flag-vault", cfg.VaultID)
+	}
+	if cfg.EmbeddingProvider != "mock" {
+		t.Fatalf("flag path clobbered provider: %q", cfg.EmbeddingProvider)
+	}
+
+	// An empty prompt line keeps the current value as the default.
+	input2 := createInput(t, "2\n\n\n")
+	defer input2.Close()
+	if err := runConfigure(dir, input2); err != nil {
+		t.Fatalf("runConfigure (defaults): %v", err)
+	}
+	cfg, err = config.Load(dir)
+	if err != nil {
+		t.Fatalf("load config after defaults: %v", err)
+	}
+	if cfg.VaultID != "flag-vault" {
+		t.Fatalf("VaultID after empty prompt = %q, want flag-vault kept", cfg.VaultID)
+	}
+
+	// Invalid vault IDs are refused and change nothing.
+	if code := run([]string{"configure", "--dir", dir, "--vault-id", "../bad"}); code != 1 {
+		t.Fatalf("configure --vault-id ../bad exit code = %d, want 1", code)
+	}
+	cfg, err = config.Load(dir)
+	if err != nil {
+		t.Fatalf("load config after refusal: %v", err)
+	}
+	if cfg.VaultID != "flag-vault" {
+		t.Fatalf("VaultID after refused flag = %q, want flag-vault", cfg.VaultID)
+	}
+}
+
 func TestMaskKey(t *testing.T) {
 	tests := []struct {
 		in, want string

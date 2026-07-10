@@ -162,6 +162,67 @@ func TestWarrenGraphSelfAliasServesLiveNodes(t *testing.T) {
 	}
 }
 
+// TestWarrenGraphDedupesIdentifiedProjects: a warren can carry two projects
+// that both hold the workspace's vault_id — coherent, not a conflict, per the
+// alias contract (R1.2) — and ActiveMounts synthesizes an identity entry for
+// each. The graph endpoint must render the live vault once: node IDs are
+// keyed by vault (@<vault_id>/<node>), so a second pass would duplicate every
+// node and edge in one GraphResponse.
+func TestWarrenGraphDedupesIdentifiedProjects(t *testing.T) {
+	server, engine := newTestServer(t)
+	warrenRoot := setupSelfAliasWarren(t, engine)
+
+	// A second identified project in the same warren: its checkout carries
+	// the workspace's vault_id too.
+	marmotDir := filepath.Join(warrenRoot, "projects", "self-proj-2", ".marmot")
+	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
+		t.Fatalf("mkdir second checkout: %v", err)
+	}
+	if err := warrenpkg.SaveProjectMetadata(marmotDir, &warrenpkg.ProjectMetadata{
+		ProjectID: "self-proj-2",
+		WarrenID:  "wp",
+		VaultID:   "local-vault",
+	}, ""); err != nil {
+		t.Fatalf("SaveProjectMetadata: %v", err)
+	}
+	if _, err := warrenpkg.AddProject(warrenRoot, warrenpkg.Project{
+		ProjectID: "self-proj-2",
+		Path:      "projects/self-proj-2/.marmot",
+	}); err != nil {
+		t.Fatalf("AddProject: %v", err)
+	}
+
+	rec := doRequest(t, server.Handler(), "GET", "/api/warren/wp/graph", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("warren graph = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp GraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode graph response: %v", err)
+	}
+	if len(resp.Nodes) == 0 {
+		t.Fatal("warren graph is empty; expected the live vault rendered once")
+	}
+	seen := make(map[string]bool, len(resp.Nodes))
+	for _, n := range resp.Nodes {
+		if seen[n.ID] {
+			t.Errorf("duplicate node ID %q in warren graph (live vault rendered per identity mount, not per vault)", n.ID)
+		}
+		seen[n.ID] = true
+	}
+	edges := make(map[string]bool, len(resp.Edges))
+	for _, e := range resp.Edges {
+		key := e.Source + "->" + e.Target + ":" + e.Relation
+		if edges[key] {
+			t.Errorf("duplicate edge %s in warren graph", key)
+		}
+		edges[key] = true
+	}
+	if len(resp.Skipped) != 0 {
+		t.Errorf("identity dedupe must not report skips, got %v", resp.Skipped)
+	}
+}
+
 // TestWarrenScopedSearchIncludesSelfAlias (R1.5d): _warren/<id>-scoped search
 // returns the self-alias project's LIVE results @-qualified — before the
 // alias-aware branch the local-ID skip made the project invisible in its own

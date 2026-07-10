@@ -315,7 +315,7 @@ func (r *VaultRegistry) ResolveEmbeddingStore(vaultID string) (*embedding.Store,
 	// Find vault directory.
 	vaultDir := r.dirForLocked(vaultID)
 	if vaultDir == "" {
-		return nil, fmt.Errorf("unknown vault %q", vaultID)
+		return nil, fmt.Errorf("unknown vault %q: not in routing table or bridge manifests", vaultID)
 	}
 
 	// Advertise the upcoming open with a shared read lock so a foreign

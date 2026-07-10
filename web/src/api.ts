@@ -1,11 +1,30 @@
 import type {
   BridgeInfo,
+  DoctorReport,
   GraphResponse,
   NamespaceInfo,
   SearchResult,
   SummaryInfo,
+  WarrenMountResponse,
+  WarrenStatusResponse,
   WarrensResponse,
 } from './types';
+
+/**
+ * Throws an Error carrying the server's JSON `{error}` message when the
+ * response body has one, so warren refusals (collisions, not-mounted, …)
+ * surface with the same message quality as the CLI.
+ */
+async function throwApiError(res: Response, fallback: string): Promise<never> {
+  let msg = `${fallback}: ${res.status} ${res.statusText}`;
+  try {
+    const data = (await res.json()) as { error?: string };
+    if (data && typeof data.error === 'string' && data.error !== '') msg = data.error;
+  } catch {
+    // Body was not JSON — keep the fallback message.
+  }
+  throw new Error(msg);
+}
 
 export async function fetchGraph(
   namespace: string,
@@ -72,6 +91,58 @@ export async function fetchWarrenGraph(warrenId: string): Promise<GraphResponse>
   const res = await fetch(`/api/warren/${encodeURIComponent(warrenId)}/graph`);
   if (!res.ok) throw new Error(`fetchWarrenGraph: ${res.status}`);
   return res.json();
+}
+
+export async function fetchWarrenStatus(warrenId: string): Promise<WarrenStatusResponse> {
+  const res = await fetch(`/api/warren/${encodeURIComponent(warrenId)}/status`);
+  if (!res.ok) return throwApiError(res, `fetchWarrenStatus ${warrenId}`);
+  return res.json();
+}
+
+export async function fetchDoctorWorkspace(): Promise<DoctorReport> {
+  const res = await fetch('/api/doctor/workspace');
+  if (!res.ok) return throwApiError(res, 'fetchDoctorWorkspace');
+  return res.json();
+}
+
+/**
+ * Asks the server to reload its warren state (mounts, routes, runtime
+ * bridges) from disk. Shared by the toolbar refresh button and the warren
+ * panel; throws with the server's message so callers can surface failures.
+ */
+export async function refreshWarrenState(warrenId: string): Promise<void> {
+  const res = await fetch(`/api/warren/${encodeURIComponent(warrenId)}/refresh`, {
+    method: 'POST',
+  });
+  if (!res.ok) return throwApiError(res, `refreshWarrenState ${warrenId}`);
+}
+
+async function postWarrenMountChange(
+  warrenId: string,
+  verb: 'mount' | 'unmount',
+  projects: string[],
+): Promise<WarrenMountResponse> {
+  const res = await fetch(`/api/warren/${encodeURIComponent(warrenId)}/${verb}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projects }),
+  });
+  if (!res.ok) return throwApiError(res, `${verb} ${warrenId}`);
+  return res.json();
+}
+
+export async function mountWarrenProjects(
+  warrenId: string,
+  projects: string[],
+): Promise<WarrenMountResponse> {
+  return postWarrenMountChange(warrenId, 'mount', projects);
+}
+
+export async function unmountWarrenProjects(
+  warrenId: string,
+  projects: string[],
+): Promise<WarrenMountResponse> {
+  return postWarrenMountChange(warrenId, 'unmount', projects);
 }
 
 export async function updateNode(

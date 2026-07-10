@@ -920,6 +920,98 @@ func TestWarrenFormatAndRegisterErrors(t *testing.T) {
 	}
 }
 
+// TestWarrenDeprecatedFlagSpellingsWarn (U2): legacy flag spellings keep
+// working but print a one-line stderr deprecation notice; canonical
+// spellings stay silent. Nothing schedules the legacy spellings' removal.
+func TestWarrenDeprecatedFlagSpellingsWarn(t *testing.T) {
+	root := t.TempDir()
+	_, stderr, code := captureRunBoth(t, []string{"warren", "init", "--root", root, "--id", "wp"})
+	if code != 0 {
+		t.Fatalf("init --root exit code = %d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: --root is deprecated; use --warren-dir") {
+		t.Fatalf("init --root missing deprecation warning: %q", stderr)
+	}
+
+	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "add", "billing", "--root", root, "--aliases", "pay,bill"})
+	if code != 0 {
+		t.Fatalf("project add --root --aliases exit code = %d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: --root is deprecated; use --warren-dir") ||
+		!strings.Contains(stderr, "warning: --aliases is deprecated; use --alias") {
+		t.Fatalf("project add legacy spellings missing warnings: %q", stderr)
+	}
+
+	// --id without a positional keeps working, pointing at the positional.
+	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "add", "--id", "ledger", "--warren-dir", root})
+	if code != 0 {
+		t.Fatalf("project add --id exit code = %d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: --id is deprecated; use the positional <project-id> argument") {
+		t.Fatalf("project add --id missing deprecation warning: %q", stderr)
+	}
+
+	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "import", "--id", "imported", writeCLIImportSourceVault(t, filepath.Join(t.TempDir(), ".marmot"), "imported-vault"), "--warren-dir", root})
+	if code != 0 {
+		t.Fatalf("project import --id exit code = %d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, "warning: --id is deprecated; use the positional <project-id> argument") {
+		t.Fatalf("project import --id missing deprecation warning: %q", stderr)
+	}
+
+	// Canonical spellings never warn.
+	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "add", "reports", "--warren-dir", root, "--alias", "rep"})
+	if code != 0 {
+		t.Fatalf("canonical project add exit code = %d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stderr, "deprecated") {
+		t.Fatalf("canonical spellings warned: %q", stderr)
+	}
+}
+
+// TestWarrenProjectAddRefusesIDPlusPositional (U2): the old silent
+// reinterpretation of the positional as --path is now a refusal that names
+// the unambiguous invocation.
+func TestWarrenProjectAddRefusesIDPlusPositional(t *testing.T) {
+	root := t.TempDir()
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "wp"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	_, stderr, code := captureRunBoth(t, []string{"warren", "project", "add", "--id", "pay", "./svc", "--warren-dir", root})
+	if code != 1 {
+		t.Fatalf("project add --id + positional exit code = %d, want 1 (stderr=%q)", code, stderr)
+	}
+	if !strings.Contains(stderr, `both --id "pay" and a positional argument "./svc" given`) ||
+		!strings.Contains(stderr, `write 'marmot warren project add pay --path ./svc'`) {
+		t.Fatalf("ambiguity refusal message wrong: %q", stderr)
+	}
+	out, code := captureRun([]string{"warren", "project", "list", "--warren-dir", root, "--json"})
+	if code != 0 || strings.Contains(out, "pay") {
+		t.Fatalf("refused project was still registered: %s", out)
+	}
+}
+
+// TestWarrenUsageShowsOnlyCanonicalSpellings (U2): usage lines must never
+// advertise a deprecated spelling (--root, --aliases, or --id outside
+// warren init, where --id is the canonical form).
+func TestWarrenUsageShowsOnlyCanonicalSpellings(t *testing.T) {
+	data, err := os.ReadFile("warren.go")
+	if err != nil {
+		t.Fatalf("read warren.go: %v", err)
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, "usage: marmot warren") {
+			continue
+		}
+		if strings.Contains(line, "--root") || strings.Contains(line, "--aliases") {
+			t.Errorf("warren.go:%d usage line advertises a deprecated spelling: %s", i+1, strings.TrimSpace(line))
+		}
+		if strings.Contains(line, "--id") && !strings.Contains(line, "warren init") {
+			t.Errorf("warren.go:%d usage line advertises --id outside warren init: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
 func TestWarrenInitPositionalID(t *testing.T) {
 	// Positional id form plus --root compatibility alias; interspersed flags
 	// are reordered, so the id may come before or after the flags.

@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -994,10 +995,14 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-func TestUIServer(t *testing.T) {
-	proj := seedProject(t)
-	port := freePort(t)
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+// startUI starts `marmot ui` (default flags, so the default loopback bind is
+// what e2e exercises) for the project at proj, waits until the server answers
+// on 127.0.0.1, and returns the base URL plus the bound port. The process is
+// stopped via t.Cleanup.
+func startUI(t *testing.T, proj string) (base string, port int) {
+	t.Helper()
+	port = freePort(t)
+	base = fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	cmd := exec.Command(binPath, "ui", "--dir", ".marmot", "--port", fmt.Sprint(port), "--no-open")
 	cmd.Dir = proj
@@ -1022,21 +1027,31 @@ func TestUIServer(t *testing.T) {
 	// Wait for the server to come up. Generous timeout: e2e may run on a
 	// heavily loaded machine (parallel CI jobs).
 	client := &http.Client{Timeout: 2 * time.Second}
-	var ready bool
 	for i := 0; i < 150; i++ {
 		resp, err := client.Get(base + "/api/version")
 		if err == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
-				ready = true
-				break
+				return base, port
 			}
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if !ready {
-		t.Fatal("ui server did not become ready within 30s")
+	t.Fatal("ui server did not become ready within 30s")
+	return "", 0
+}
+
+func TestUIServer(t *testing.T) {
+	// Warren fixture (U5): the workspace registers a warren (nothing mounted)
+	// so the warren_endpoints subtest can drive the management endpoints —
+	// mount over POST, status flip, graph render, unmount, doctor — against a
+	// real `marmot ui` process.
+	warrenRoot, proj := seedWarren(t)
+	if out, err := runCLI(proj, "warren", "register", "--dir", ".marmot", warrenID, warrenRoot); err != nil {
+		t.Fatalf("warren register: %v\n%s", err, out)
 	}
+	base, _ := startUI(t, proj)
+	client := &http.Client{Timeout: 2 * time.Second}
 
 	get := func(path string) (int, string) {
 		t.Helper()
@@ -1107,4 +1122,128 @@ func TestUIServer(t *testing.T) {
 			t.Errorf("node: status %d body %s", code, body)
 		}
 	})
+
+	// U5a: mount via POST → status shows active → graph serves the mounted
+	// project's nodes → unmount → doctor endpoint shape.
+	t.Run("warren_endpoints", func(t *testing.T) {
+		post := func(path, body string) (int, string) {
+			t.Helper()
+			resp, err := client.Post(base+path, "application/json", strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("POST %s: %v", path, err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			respBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			return resp.StatusCode, string(respBody)
+		}
+		projActive := func() bool {
+			t.Helper()
+			code, body := get("/api/warren/" + warrenID + "/status")
+			if code != http.StatusOK {
+				t.Fatalf("warren status = %d: %s", code, body)
+			}
+			var resp struct {
+				Projects []struct {
+					ProjectID string `json:"project_id"`
+					Active    bool   `json:"active"`
+					Available bool   `json:"available"`
+				} `json:"projects"`
+			}
+			if err := json.Unmarshal([]byte(body), &resp); err != nil {
+				t.Fatalf("decode warren status: %v (%s)", err, body)
+			}
+			for _, p := range resp.Projects {
+				if p.ProjectID == projA {
+					if p.Active && !p.Available {
+						t.Fatalf("mounted project unavailable: %+v", p)
+					}
+					return p.Active
+				}
+			}
+			t.Fatalf("project %q missing from warren status: %s", projA, body)
+			return false
+		}
+
+		if projActive() {
+			t.Fatal("fixture must start with nothing mounted")
+		}
+
+		code, body := post("/api/warren/"+warrenID+"/mount", `{"projects":["`+projA+`"]}`)
+		if code != http.StatusOK || !strings.Contains(body, `"action":"mounted"`) || !strings.Contains(body, `"status":"reloaded"`) {
+			t.Fatalf("mount = %d: %s", code, body)
+		}
+		if !projActive() {
+			t.Fatal("mounted project not active in status")
+		}
+
+		code, body = get("/api/warren/" + warrenID + "/graph")
+		if code != http.StatusOK || !strings.Contains(body, "@"+projAVault+"/"+hotwalID) {
+			t.Fatalf("warren graph = %d, missing @%s/%s: %s", code, projAVault, hotwalID, body)
+		}
+
+		code, body = post("/api/warren/"+warrenID+"/unmount", `{"projects":["`+projA+`"]}`)
+		if code != http.StatusOK || !strings.Contains(body, `"action":"unmounted"`) {
+			t.Fatalf("unmount = %d: %s", code, body)
+		}
+		if projActive() {
+			t.Fatal("unmounted project still active in status")
+		}
+
+		code, body = get("/api/doctor/workspace")
+		if code != http.StatusOK {
+			t.Fatalf("doctor workspace = %d: %s", code, body)
+		}
+		var report struct {
+			Issues []struct {
+				Severity string `json:"severity"`
+				Code     string `json:"code"`
+				Message  string `json:"message"`
+			} `json:"issues"`
+		}
+		if err := json.Unmarshal([]byte(body), &report); err != nil {
+			t.Fatalf("decode doctor report: %v (%s)", err, body)
+		}
+		for _, issue := range report.Issues {
+			if issue.Severity == "" || issue.Code == "" || issue.Message == "" {
+				t.Errorf("doctor issue missing fields: %+v", issue)
+			}
+			if issue.Severity == "error" {
+				t.Errorf("healthy workspace reported doctor error: %+v", issue)
+			}
+		}
+	})
+}
+
+// TestUIBindsLoopbackByDefault (U5a prerequisite): the UI's API carries
+// workspace-state mutation (POST /api/warren/{id}/mount|unmount), so
+// `marmot ui` must bind 127.0.0.1 unless --host explicitly opts out —
+// no other host on the network may reach the server by default.
+func TestUIBindsLoopbackByDefault(t *testing.T) {
+	proj := seedProject(t)
+	_, port := startUI(t, proj) // startUI proves loopback answers
+
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("interface addrs: %v", err)
+	}
+	checked := 0
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok || ipnet.IP.IsLoopback() || ipnet.IP.To4() == nil {
+			continue
+		}
+		checked++
+		hostPort := net.JoinHostPort(ipnet.IP.String(), strconv.Itoa(port))
+		conn, dialErr := net.DialTimeout("tcp", hostPort, 2*time.Second)
+		if dialErr == nil {
+			_ = conn.Close()
+			t.Errorf("UI accepted a connection on non-loopback %s — must bind loopback by default", hostPort)
+		}
+	}
+	if checked == 0 {
+		t.Log("no non-loopback IPv4 interface present; only loopback reachability was verified")
+	}
 }

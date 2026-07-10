@@ -433,8 +433,39 @@ func RemoveProject(root, projectID string) (*Manifest, error) {
 	})
 }
 
-// RenameProject renames a project ID in the manifest, project metadata, and bridges.
-func RenameProject(root, oldID, newID string) (*Manifest, error) {
+// RenameResult reports what RenameProject changed beyond the manifest edit.
+type RenameResult struct {
+	Manifest *Manifest
+	// Moved is true when the conventional projects/<oldID>/ directory was
+	// renamed to projects/<newID>/ (and the manifest path updated with it).
+	Moved bool
+	// OldDir and NewDir are the warren-relative directories of the move
+	// (set only when Moved).
+	OldDir string
+	NewDir string
+	// PathKept is the unchanged manifest path when no move happened
+	// (keepPath requested, unconventional layout, or missing directory).
+	PathKept string
+	// Repointed lists other projects whose checkouts were nested under the
+	// moved projects/<oldID>/ directory; their manifest paths were rewritten
+	// to the new prefix in the same transaction so the move never strands
+	// them (set only when Moved).
+	Repointed []string
+	// VaultID is the project's checkout metadata vault_id after the rename
+	// ("" when the checkout metadata is unreadable). Rename never rewrites
+	// it: vault_id is the identity key (what warren mounts route by and
+	// what identifies a workspace's own project) and must stay stable
+	// across renames — change it only by re-importing with --vault-id.
+	VaultID string
+}
+
+// RenameProject renames a project ID in the manifest, project metadata, and
+// bridges. When the project lives at the conventional
+// projects/<oldID>/.marmot path (and keepPath is false), the project
+// directory is moved to projects/<newID>/ as well — the move happens before
+// the manifest write, so a failed move leaves the manifest consistent.
+// The checkout's vault_id is deliberately left untouched.
+func RenameProject(root, oldID, newID string, keepPath bool) (*RenameResult, error) {
 	if err := ValidateProjectID(oldID); err != nil {
 		return nil, err
 	}
@@ -444,22 +475,66 @@ func RenameProject(root, oldID, newID string) (*Manifest, error) {
 	if oldID == newID {
 		return nil, fmt.Errorf("new project ID must differ from old project ID")
 	}
+	result := &RenameResult{}
 	var renamed Project
 	manifest, err := updateManifest(root, func(manifest *Manifest) error {
-		found := false
+		idx := -1
 		for i := range manifest.Projects {
 			if manifest.Projects[i].ProjectID == newID {
 				return fmt.Errorf("project %q already exists", newID)
 			}
 			if manifest.Projects[i].ProjectID == oldID {
-				found = true
-				manifest.Projects[i].ProjectID = newID
-				renamed = manifest.Projects[i]
+				idx = i
 			}
 		}
-		if !found {
+		if idx < 0 {
 			return fmt.Errorf("project %q does not exist", oldID)
 		}
+		project := &manifest.Projects[idx]
+		project.ProjectID = newID
+		oldPath := filepath.ToSlash(project.Path)
+		oldDir := "projects/" + oldID
+		conventional := !filepath.IsAbs(project.Path) && strings.HasPrefix(oldPath, oldDir+"/")
+		sourceDir := filepath.Join(root, filepath.FromSlash(oldDir))
+		if conventional {
+			if fi, statErr := os.Stat(sourceDir); statErr != nil || !fi.IsDir() {
+				conventional = false // torn or never-created checkout: rename the ID only
+			}
+		}
+		if !keepPath && conventional {
+			newDir := "projects/" + newID
+			target := filepath.Join(root, filepath.FromSlash(newDir))
+			if _, statErr := os.Stat(target); statErr == nil {
+				return fmt.Errorf("cannot move project directory: %s already exists in the warren — remove it or re-run with --keep-path", newDir)
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return fmt.Errorf("stat %s: %w", newDir, statErr)
+			}
+			// Move first, manifest write last (updateManifest saves after
+			// this callback returns): a failed move aborts before the
+			// manifest commit point.
+			if err := os.Rename(sourceDir, target); err != nil {
+				return fmt.Errorf("move project directory: %w", err)
+			}
+			project.Path = filepath.ToSlash(filepath.Join(newDir, strings.TrimPrefix(oldPath, oldDir+"/")))
+			result.Moved, result.OldDir, result.NewDir = true, oldDir, newDir
+			// The move relocates everything under projects/<oldID>/ — any
+			// other project whose checkout is nested there (the manifest
+			// accepts arbitrary relative paths) moved with it, so repoint
+			// its manifest path in the same transaction.
+			for i := range manifest.Projects {
+				if i == idx {
+					continue
+				}
+				nested := filepath.ToSlash(manifest.Projects[i].Path)
+				if !filepath.IsAbs(manifest.Projects[i].Path) && strings.HasPrefix(nested, oldDir+"/") {
+					manifest.Projects[i].Path = filepath.ToSlash(filepath.Join(newDir, strings.TrimPrefix(nested, oldDir+"/")))
+					result.Repointed = append(result.Repointed, manifest.Projects[i].ProjectID)
+				}
+			}
+		} else {
+			result.PathKept = oldPath
+		}
+		renamed = *project
 		for i := range manifest.Bridges {
 			if manifest.Bridges[i].Source == oldID {
 				manifest.Bridges[i].Source = newID
@@ -476,7 +551,11 @@ func RenameProject(root, oldID, newID string) (*Manifest, error) {
 	if err := ensureProjectMetadata(root, manifest.WarrenID, renamed); err != nil {
 		return nil, err
 	}
-	return manifest, nil
+	if meta, _, metaErr := LoadProjectMetadata(filepath.Join(root, filepath.FromSlash(renamed.Path))); metaErr == nil && meta != nil {
+		result.VaultID = meta.VaultID
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
 // SetProjectReadOnly flips the warren author's write policy for one project.
@@ -1597,7 +1676,7 @@ func refuseVaultIDCollision(claimed map[string]vaultClaim, vaultID, warrenID, pr
 	if claim.WarrenID == "" {
 		owner = claim.ProjectID // "the local workspace vault"
 	}
-	return fmt.Errorf("vault ID %q of project %s/%s collides with %s already mounted in this workspace", vaultID, warrenID, projectID, owner)
+	return fmt.Errorf("vault ID %q of project %s/%s collides with %s already mounted in this workspace — unmount it or re-import one with a distinct --vault-id", vaultID, warrenID, projectID, owner)
 }
 
 // SplitQualifiedVaultID splits a qualified "@vault-id/node-id" reference into

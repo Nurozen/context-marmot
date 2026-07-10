@@ -130,6 +130,68 @@ func burrowCachePath(consumer, projectID string) string {
 	return filepath.Join(consumer, ".marmot", ".marmot-data", "warrens", warrenID, "projects", projectID, ".marmot")
 }
 
+// runCLIStreams runs the marmot binary with stdout and stderr captured
+// separately, for tests that pin the --json purity contract (stdout is
+// exactly one JSON document; diagnostics go to stderr).
+func runCLIStreams(dir string, args ...string) (stdout, stderr string, err error) {
+	cmd := exec.Command(binPath, args...)
+	cmd.Dir = dir
+	cmd.Env = hermeticEnv(dir)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+	err = cmd.Run()
+	return outBuf.String(), errBuf.String(), err
+}
+
+// TestWarrenStatusJSONStreamPurity (U3.2): in --json mode stdout is exactly
+// one JSON document; every diagnostic — including the vault_id onboarding
+// nudge that register's fabricated workspace config provokes — lands on
+// stderr. This retires index/scrape as the pattern for consuming --json.
+func TestWarrenStatusJSONStreamPurity(t *testing.T) {
+	warrenRoot := t.TempDir()
+	if out, err := runCLI(warrenRoot, "warren", "init", "--id", "wsp"); err != nil {
+		t.Fatalf("warren init: %v\n%s", err, out)
+	}
+	if out, err := runCLI(warrenRoot, "warren", "project", "add", "pa", "--warren-dir", ".", "--path", "projects/pa/.marmot"); err != nil {
+		t.Fatalf("project add: %v\n%s", err, out)
+	}
+	consumer := t.TempDir()
+	// register fabricates a vault_id-less workspace config, so the nudge
+	// diagnostic exists in this workspace's warren verbs by construction.
+	regOut, regErr, err := runCLIStreams(consumer, "warren", "register", "--dir", ".marmot", "wsp", warrenRoot)
+	if err != nil {
+		t.Fatalf("register: %v\n%s%s", err, regOut, regErr)
+	}
+	if !strings.Contains(regErr, "no vault_id in _config.md") {
+		t.Fatalf("expected the vault_id nudge on stderr, got stdout %q stderr %q", regOut, regErr)
+	}
+	if strings.Contains(regOut, "no vault_id") {
+		t.Fatalf("nudge leaked to stdout: %q", regOut)
+	}
+
+	stdout, stderr, err := runCLIStreams(consumer, "warren", "status", "--dir", ".marmot", "--warren", "wsp", "--json")
+	if err != nil {
+		t.Fatalf("status --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var statuses []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &statuses); err != nil {
+		t.Fatalf("status --json stdout is not one JSON document: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	if len(statuses) != 1 {
+		t.Fatalf("status --json = %d project(s), want 1: %v", len(statuses), statuses)
+	}
+
+	// warren list --json obeys the same contract.
+	stdout, stderr, err = runCLIStreams(consumer, "warren", "list", "--dir", ".marmot", "--json")
+	if err != nil {
+		t.Fatalf("list --json: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+	var listed map[string]any
+	if err := json.Unmarshal([]byte(stdout), &listed); err != nil {
+		t.Fatalf("list --json stdout is not one JSON document: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+	}
+}
+
 // TestWarrenRegisterMountQueryServe is scenario E1: register → mount → query
 // through a real serve — the baseline flow. One project is mounted plain,
 // the other via `burrow --materialize` (the explicit flag; C2's implied
@@ -261,21 +323,18 @@ func TestWarrenConcurrentMounts(t *testing.T) {
 		t.Errorf("mount %s failed: %v", projB, err)
 	}
 
-	out, err := runCLI(consumer, "warren", "status", "--dir", ".marmot", "--warren", warrenID, "--json")
+	stdout, stderrOut, err := runCLIStreams(consumer, "warren", "status", "--dir", ".marmot", "--warren", warrenID, "--json")
 	if err != nil {
-		t.Fatalf("warren status: %v\n%s", err, out)
+		t.Fatalf("warren status: %v\n%s%s", err, stdout, stderrOut)
 	}
-	// The JSON array may be preceded by stderr warnings in CombinedOutput.
-	start, end := strings.Index(out, "["), strings.LastIndex(out, "]")
-	if start < 0 || end < start {
-		t.Fatalf("no JSON array in status output:\n%s", out)
-	}
+	// --json contract (U3.2): stdout is exactly one JSON document,
+	// diagnostics go to stderr — no scraping.
 	var statuses []struct {
 		ProjectID string `json:"project_id"`
 		Active    bool   `json:"active"`
 	}
-	if err := json.Unmarshal([]byte(out[start:end+1]), &statuses); err != nil {
-		t.Fatalf("parse status JSON: %v\n%s", err, out)
+	if err := json.Unmarshal([]byte(stdout), &statuses); err != nil {
+		t.Fatalf("parse status JSON: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderrOut)
 	}
 	active := map[string]bool{}
 	for _, st := range statuses {

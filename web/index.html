@@ -17,6 +17,7 @@
         </h1>
         <select id="namespace-select"></select>
         <button id="refresh-btn" title="Refresh graph">&#x21BB;</button>
+        <button id="warren-toggle" class="hidden" title="Warren management">Warrens <span id="warren-badge" class="curator-badge" hidden>0</span></button>
       </div>
       <div class="toolbar-center">
         <input type="text" id="search-input" placeholder="Search nodes… (press /)" />
@@ -52,6 +53,14 @@
         <div id="minimap"></div>
         <div id="legend"></div>
       </div>
+      <aside id="warren-panel" class="hidden" aria-label="Warren management">
+        <div class="warren-panel-header">
+          <h3>Warrens</h3>
+          <button id="warren-panel-close" title="Close">&#x2715;</button>
+        </div>
+        <div id="warren-panel-error" class="warren-panel-error" hidden></div>
+        <div id="warren-panel-body"></div>
+      </aside>
       <aside id="detail-panel" class="hidden">
         <button id="detail-close">&#x2715;</button>
         <div id="detail-content"></div>

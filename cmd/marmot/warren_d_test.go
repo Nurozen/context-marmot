@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -468,5 +469,40 @@ func TestWarrenStatusBurrowCacheLine(t *testing.T) {
 	stdout, _, code = captureRunBoth(t, []string{"warren", "status", "--dir", marmotDir, "--warren", "wp"})
 	if code != 0 || !strings.Contains(stdout, "no provenance recorded") {
 		t.Fatalf("status without provenance = code %d stdout %q", code, stdout)
+	}
+}
+
+// TestWarrenDoctorSummaryLine (U3): the text doctor report ends with a
+// severity summary tail so multi-issue reports are scannable.
+func TestWarrenDoctorSummaryLine(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenA := testWarrenRoot(t, "warren-a", "project-x")
+	warrenB := testWarrenRoot(t, "warren-b", "project-y")
+	for _, fix := range []struct{ root, project string }{{warrenA, "project-x"}, {warrenB, "project-y"}} {
+		dir := filepath.Join(fix.root, "projects", fix.project, ".marmot")
+		meta, body, err := warrenpkg.LoadProjectMetadata(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		meta.VaultID = "shared-vault"
+		if err := warrenpkg.SaveProjectMetadata(dir, meta, body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := &warrenpkg.WorkspaceState{Warrens: map[string]warrenpkg.WorkspaceWarren{
+		"warren-a": {Path: warrenA, ActiveProjects: []string{"project-x"}},
+		"warren-b": {Path: warrenB, ActiveProjects: []string{"project-y"}},
+	}}
+	if err := warrenpkg.SaveWorkspaceState(workspace, state, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := captureRunBoth(t, []string{"warren", "doctor", "--workspace", "--dir", marmotDir})
+	if code != 1 {
+		t.Fatalf("doctor --workspace exit code = %d stderr=%q", code, stderr)
+	}
+	if !regexp.MustCompile(`doctor: [1-9]\d* error\(s\), \d+ warning\(s\), \d+ info\n`).MatchString(stderr) {
+		t.Fatalf("doctor report missing severity summary tail: %q", stderr)
 	}
 }

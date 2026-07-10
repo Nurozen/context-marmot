@@ -166,6 +166,10 @@ workspace query selected upstream project graphs without copying every project
 graph into the local vault.
 
 ```bash
+# In your local project first: give the workspace a vault_id — the identity
+# key for warren bridges involving your own project
+marmot configure --vault-id my-project
+
 # From the Warren repository
 marmot warren init --id product-platform
 marmot warren project import project-a ../project-a/.marmot --vault-id project-a-vault
@@ -202,8 +206,11 @@ the machine. Set `MARMOT_ROUTES=off` (or `none`/`0`) to run without the global
 table — useful for hermetic tests and scratch vaults — or point
 `MARMOT_ROUTES=/path/to/routes.yml` at an alternate table.
 
-See [docs/warrens.md](docs/warrens.md) for Warren layout, read/write policy,
-authoring commands, bridge policy, materialization, and UI/API behavior.
+See the ["Quickstart: zero to first bridge"](docs/warrens.md#quickstart-zero-to-first-bridge)
+walkthrough in [docs/warrens.md](docs/warrens.md) for the full
+zero-to-first-bridge flow (including workspace identity), plus Warren layout,
+read/write policy, authoring commands, bridge policy, materialization, and
+UI/API behavior.
 
 ## MCP Tools
 
@@ -280,7 +287,7 @@ path all join the same election.
 | `marmot summarize [--namespace ...]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
 | `marmot sdk [--out ./marmot-sdk.ts]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
-| `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start the embedded graph visualization UI |
+| `marmot ui [--dir .marmot] [--host 127.0.0.1] [--port 3274] [--no-open]` | Start the embedded graph visualization UI (binds loopback only by default; `--host 0.0.0.0` exposes it) |
 
 ## Architecture
 

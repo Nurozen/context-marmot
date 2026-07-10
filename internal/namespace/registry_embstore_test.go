@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/embedding"
@@ -187,5 +188,16 @@ func TestResolveEmbeddingStoreDoesNotMutateRemote(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(emptyVault, ".marmot-data", "embeddings.db")); !os.IsNotExist(err) {
 		t.Fatalf("resolve created a remote embeddings.db (stat err=%v)", err)
+	}
+}
+
+// TestResolveEmbeddingStoreUnknownVaultHint (U4.3): the unknown-vault error
+// matches ResolveGraph's wording so both resolvers explain where vault IDs
+// come from.
+func TestResolveEmbeddingStoreUnknownVaultHint(t *testing.T) {
+	r := NewVaultRegistry("local", "/tmp/local", nil, nil)
+	_, err := r.ResolveEmbeddingStore("nope")
+	if err == nil || !strings.Contains(err.Error(), `unknown vault "nope": not in routing table or bridge manifests`) {
+		t.Fatalf("err = %v, want routing-table hint", err)
 	}
 }

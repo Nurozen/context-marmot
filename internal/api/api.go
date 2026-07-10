@@ -80,10 +80,22 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/bridges", s.handleBridges)
 	s.mux.HandleFunc("GET /api/summary/{namespace}", s.handleSummary)
 	s.mux.HandleFunc("GET /api/warrens", s.handleWarrens)
+	// GET /api/warren/{id}/status is the canonical status route; the bare
+	// GET /api/warren/{id} spelling is kept as a legacy alias (removing a
+	// route breaks deployed clients under the auto-release train).
 	s.mux.HandleFunc("GET /api/warren/{id}", s.handleWarrenStatus)
 	s.mux.HandleFunc("GET /api/warren/{id}/graph", s.handleWarrenGraph)
 	s.mux.HandleFunc("GET /api/warren/{id}/status", s.handleWarrenStatus)
 	s.mux.HandleFunc("POST /api/warren/{id}/refresh", s.handleWarrenRefresh)
+	// Warren workspace management (U5a): mount/unmount reuse the warren
+	// layer's flock'd state writes and refusal messages; doctor returns the
+	// workspace report verbatim. Deliberately NOT over HTTP:
+	// register/unregister (filesystem paths from a browser), burrow
+	// --materialize/--drop (heavy IO + cache lifecycle), edit toggle
+	// (write-policy change), propose and refresh --pull (git operations).
+	s.mux.HandleFunc("POST /api/warren/{id}/mount", s.handleWarrenMount)
+	s.mux.HandleFunc("POST /api/warren/{id}/unmount", s.handleWarrenUnmount)
+	s.mux.HandleFunc("GET /api/doctor/workspace", s.handleDoctorWorkspace)
 	s.mux.HandleFunc("GET /api/events", s.handleSSE)
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)
 	s.mux.HandleFunc("GET /sdk.ts", s.handleSDKTS)

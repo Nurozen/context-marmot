@@ -598,10 +598,10 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 	}
 
 	if localCfg.VaultID == "" {
-		return nil, fmt.Errorf("local vault at %s has no vault_id set; run 'marmot configure' first", localVaultDir)
+		return nil, fmt.Errorf("local vault at %s has no vault_id set; run 'marmot configure --vault-id <id>' first", localVaultDir)
 	}
 	if remoteCfg.VaultID == "" {
-		return nil, fmt.Errorf("remote vault at %s has no vault_id set; run 'marmot configure' in that project first", remoteVaultDir)
+		return nil, fmt.Errorf("remote vault at %s has no vault_id set; run 'marmot configure --vault-id <id>' in that project first", remoteVaultDir)
 	}
 	// Bridging a vault to a copy of itself would write a degenerate
 	// @X--@X.md manifest and double-register X in the routing table (the

@@ -22,6 +22,57 @@ func writeIdentityConfig(t *testing.T, marmotDir, vaultID string) {
 	}
 }
 
+// TestWarrenRegisterNudgesMissingVaultID (U1.2): registering (or first
+// touching) a workspace without a vault_id prints the onboarding nudge —
+// without one, warren bridges can never identify this workspace's own
+// project. A workspace with a vault_id is never nudged.
+func TestWarrenRegisterNudgesMissingVaultID(t *testing.T) {
+	const nudge = "no vault_id in _config.md"
+
+	// Pre-existing config without vault_id.
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if err := os.MkdirAll(marmotDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	_, stderr, code := captureRunBoth(t, []string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot})
+	if code != 0 {
+		t.Fatalf("register exit code = %d stderr=%q", code, stderr)
+	}
+	if strings.Count(stderr, nudge) != 1 || !strings.Contains(stderr, "marmot configure --vault-id") {
+		t.Fatalf("want exactly one nudge naming the remediation, got stderr %q", stderr)
+	}
+
+	// Fabrication path: a fresh workspace gets the nudge exactly once too
+	// (from ensureWorkspace, not doubled by register).
+	workspace2 := t.TempDir()
+	marmotDir2 := filepath.Join(workspace2, ".marmot")
+	_, stderr, code = captureRunBoth(t, []string{"warren", "register", "--dir", marmotDir2, "wp", warrenRoot})
+	if code != 0 {
+		t.Fatalf("register (fresh) exit code = %d stderr=%q", code, stderr)
+	}
+	if strings.Count(stderr, nudge) != 1 {
+		t.Fatalf("fabrication path: want exactly one nudge, got stderr %q", stderr)
+	}
+
+	// A workspace with a vault_id is never nudged.
+	workspace3 := t.TempDir()
+	marmotDir3 := filepath.Join(workspace3, ".marmot")
+	writeIdentityConfig(t, marmotDir3, "some-vault")
+	_, stderr, code = captureRunBoth(t, []string{"warren", "register", "--dir", marmotDir3, "wp", warrenRoot})
+	if code != 0 {
+		t.Fatalf("register (with vault_id) exit code = %d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stderr, nudge) {
+		t.Fatalf("nudge fired despite vault_id: %q", stderr)
+	}
+}
+
 // TestWarrenRegisterAnnouncesIdentity (R2.4): registering a warren that
 // contains this workspace's own project announces the identity match —
 // identity is automatic, register is when it becomes discoverable. A warren

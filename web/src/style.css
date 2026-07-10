@@ -2767,3 +2767,323 @@ textarea:focus-visible {
     border-top: none;
   }
 }
+
+/* ── Warren management panel (U5b) ───────────────────────────── */
+
+#warren-toggle {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+#warren-toggle:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+#warren-toggle.hidden {
+  display: none;
+}
+
+#warren-badge.warren-badge-error {
+  background: var(--color-danger, #c45d4b);
+  color: #fff;
+}
+
+#warren-panel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 380px;
+  max-width: 90vw;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-subtle);
+  box-shadow: 8px 0 24px rgba(0, 0, 0, 0.35);
+  overflow-y: auto;
+  padding: 18px 16px;
+  z-index: 40;
+  transition: transform var(--transition-med), opacity var(--transition-med);
+}
+
+#warren-panel.hidden {
+  transform: translateX(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+#main-area {
+  position: relative; /* anchor for the absolutely-positioned warren panel */
+}
+
+.warren-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.warren-panel-header h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+}
+
+#warren-panel-close {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+#warren-panel-close:hover {
+  color: var(--color-danger, #c45d4b);
+  background: rgba(196, 93, 75, 0.1);
+}
+
+.warren-panel-error {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-danger, #c45d4b);
+  background: rgba(196, 93, 75, 0.1);
+  border: 1px solid rgba(196, 93, 75, 0.25);
+  border-radius: var(--radius-sm);
+}
+
+.warren-loading,
+.warren-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.warren-block {
+  margin-bottom: 18px;
+}
+
+.warren-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.warren-block-title .warren-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.warren-refresh {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.warren-refresh:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+table.warren-projects {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+table.warren-projects th {
+  text-align: left;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+table.warren-projects td {
+  padding: 5px 6px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+table.warren-projects .warren-project-id {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.warren-row-skipped td {
+  opacity: 0.65;
+}
+
+.warren-state {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.warren-state-identity {
+  color: var(--bg-primary);
+  background: var(--accent);
+}
+
+.warren-state-mounted {
+  color: var(--bg-primary);
+  background: #54a24b;
+}
+
+.warren-state-dormant {
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-medium);
+}
+
+.warren-unavailable {
+  color: var(--color-danger, #c45d4b);
+}
+
+.warren-actions {
+  text-align: right;
+}
+
+.warren-action-btn {
+  padding: 3px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.warren-action-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-dim);
+}
+
+.warren-action-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.warren-doctor,
+.warren-bridges {
+  margin-top: 18px;
+}
+
+.warren-doctor h4,
+.warren-bridges h4 {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.warren-doctor-ok {
+  font-size: 11px;
+  color: #54a24b;
+}
+
+.warren-doctor-list,
+.warren-bridge-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.warren-doctor-issue {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.warren-doctor-sev {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.warren-doctor-error .warren-doctor-sev {
+  color: var(--color-danger, #c45d4b);
+}
+
+.warren-doctor-warning .warren-doctor-sev {
+  color: var(--color-warning);
+}
+
+.warren-doctor-info .warren-doctor-sev {
+  color: var(--text-muted);
+}
+
+.warren-doctor-code {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--accent);
+}
+
+.warren-bridge-list li {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  word-break: break-all;
+}
+
+/* Read-only warren node hint under the disabled save button. */
+#detail-content .readonly-hint {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  word-break: break-word;
+}

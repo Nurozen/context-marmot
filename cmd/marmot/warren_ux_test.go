@@ -396,3 +396,38 @@ func TestBurrowMidLoopFailureRollsBack(t *testing.T) {
 		t.Fatal("project-a cache missing despite staying mounted")
 	}
 }
+
+// TestWarrenProjectRenameOutput (U6): rename reports what happened to the
+// project directory and states that vault_id (the identity key) is stable.
+func TestWarrenProjectRenameOutput(t *testing.T) {
+	root := testWarrenRoot(t, "wp", "api")
+
+	stdout, _, code := captureRunBoth(t, []string{"warren", "project", "rename", "api", "api-service", "--warren-dir", root})
+	if code != 0 {
+		t.Fatalf("rename exit code = %d stdout=%q", code, stdout)
+	}
+	if !strings.Contains(stdout, `Renamed project "api" -> "api-service" (moved projects/api -> projects/api-service)`) {
+		t.Fatalf("rename output missing move line: %q", stdout)
+	}
+	if !strings.Contains(stdout, `note: vault_id "api" unchanged — vault identity is stable across renames; re-import with --vault-id to change it`) {
+		t.Fatalf("rename output missing vault_id note: %q", stdout)
+	}
+	if !dirExistsCLI(filepath.Join(root, "projects", "api-service", ".marmot")) {
+		t.Fatal("moved project dir missing")
+	}
+	if dirExistsCLI(filepath.Join(root, "projects", "api")) {
+		t.Fatal("old project dir still present")
+	}
+
+	// --keep-path leaves the directory alone and says so.
+	stdout, _, code = captureRunBoth(t, []string{"warren", "project", "rename", "api-service", "api-two", "--keep-path", "--warren-dir", root})
+	if code != 0 {
+		t.Fatalf("rename --keep-path exit code = %d stdout=%q", code, stdout)
+	}
+	if !strings.Contains(stdout, `Renamed project "api-service" -> "api-two" (path projects/api-service/.marmot kept)`) {
+		t.Fatalf("rename --keep-path output wrong: %q", stdout)
+	}
+	if !dirExistsCLI(filepath.Join(root, "projects", "api-service", ".marmot")) {
+		t.Fatal("--keep-path moved the directory anyway")
+	}
+}

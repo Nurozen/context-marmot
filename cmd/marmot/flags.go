@@ -1,6 +1,26 @@
 package main
 
-import "strings"
+import (
+	"fmt"
+	"os"
+	"strings"
+)
+
+// warnDeprecatedFlag prints a one-line stderr notice when a legacy flag
+// spelling was actually used. Legacy flags keep working; nothing in this
+// pass schedules their removal (auto-release means every merge ships — a
+// silent break is never acceptable).
+func warnDeprecatedFlag(used bool, old, canonical string) {
+	warnDeprecatedSpelling(used, old, "--"+canonical)
+}
+
+// warnDeprecatedSpelling is warnDeprecatedFlag for replacements that are not
+// themselves flags (e.g. --id's replacement is the positional argument).
+func warnDeprecatedSpelling(used bool, old, replacement string) {
+	if used {
+		fmt.Fprintf(os.Stderr, "warning: --%s is deprecated; use %s\n", old, replacement)
+	}
+}
 
 // reorderInterspersedFlags moves flag arguments ahead of positional arguments
 // so subcommands accept flags before or after positionals, even though Go's

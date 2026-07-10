@@ -54,6 +54,10 @@ type GraphResponse struct {
 	// Skipped lists Warren project IDs whose mounts were unavailable or
 	// whose graphs failed to load (Warren graph view only; additive field).
 	Skipped []string `json:"skipped,omitempty"`
+	// SkippedReasons maps each skipped project ID to why it was skipped —
+	// the same reason the server logs to stderr, made visible over HTTP so
+	// UIs can render it (U4.4; additive field).
+	SkippedReasons map[string]string `json:"skipped_reasons,omitempty"`
 }
 
 // APIHeatPair represents a co-access frequency pair.
@@ -99,6 +103,25 @@ type WarrenStatusResponse struct {
 	WarrenID string                 `json:"warren_id"`
 	Path     string                 `json:"path"`
 	Projects []warren.ProjectStatus `json:"projects"`
+}
+
+// WarrenMountRequest is the JSON body for POST /api/warren/{id}/mount and
+// POST /api/warren/{id}/unmount. When All is true the project list is
+// expanded server-side: every manifest project for mount, every currently
+// active project for unmount.
+type WarrenMountRequest struct {
+	Projects []string `json:"projects,omitempty"`
+	All      bool     `json:"all,omitempty"`
+}
+
+// WarrenMountResponse is returned by POST /api/warren/{id}/mount and
+// POST /api/warren/{id}/unmount after the workspace state change and the
+// engine-wide warren reload both succeed.
+type WarrenMountResponse struct {
+	WarrenID string   `json:"warren_id"`
+	Action   string   `json:"action"` // "mounted" or "unmounted"
+	Projects []string `json:"projects"`
+	Status   string   `json:"status"` // "reloaded"
 }
 
 // NamespacesResponse is returned by the GET /api/namespaces endpoint.

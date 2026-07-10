@@ -1,4 +1,11 @@
-import { fetchGraph, fetchGraphAll, fetchNamespaces, fetchWarrenGraph, fetchWarrens } from './api';
+import {
+  fetchGraph,
+  fetchGraphAll,
+  fetchNamespaces,
+  fetchWarrenGraph,
+  fetchWarrens,
+  refreshWarrenState,
+} from './api';
 import { GraphView } from './graph-view';
 import { renderLegend } from './legend';
 import { DetailPanel } from './detail-panel';
@@ -7,6 +14,7 @@ import { Search } from './search';
 import { initKeyboard } from './keyboard';
 import { IssuesPanel } from './issues';
 import { Curator } from './curator';
+import { WarrenPanel } from './warren-panel';
 import type { GraphResponse } from './types';
 
 let currentNamespace = 'default';
@@ -19,6 +27,7 @@ let filters: Filters;
 let search: Search;
 let issuesPanel: IssuesPanel;
 let curator: Curator;
+let warrenPanel: WarrenPanel;
 
 async function init(): Promise<void> {
   const select = document.getElementById('namespace-select') as HTMLSelectElement;
@@ -178,7 +187,11 @@ async function init(): Promise<void> {
       const opt = document.createElement('option');
       opt.value = `_warren/${warrenId}`;
       const count = warren.active_projects?.length ?? 0;
-      opt.textContent = `Warren ${warrenId} (${count} active)`;
+      const identified = warren.identified_projects?.length ?? 0;
+      let label = `Warren ${warrenId} (${count} active`;
+      if (identified > 0) label += `, ${identified} identity`;
+      label += ')';
+      opt.textContent = label;
       select.appendChild(opt);
     }
   } catch {
@@ -194,6 +207,10 @@ async function init(): Promise<void> {
     void loadGraph();
   });
 
+  /* ── Warren management panel ──────────────────────────────────── */
+  warrenPanel = new WarrenPanel(() => loadGraph());
+  void warrenPanel.init();
+
   document.getElementById('refresh-btn')?.addEventListener('click', () => {
     void (async () => {
       // For a warren view, ask the server to reload its warren state
@@ -201,9 +218,13 @@ async function init(): Promise<void> {
       if (currentNamespace.startsWith('_warren/')) {
         const warrenId = currentNamespace.slice('_warren/'.length);
         try {
-          await fetch(`/api/warren/${encodeURIComponent(warrenId)}/refresh`, { method: 'POST' });
-        } catch {
-          // Best-effort: the graph reload below still runs.
+          await refreshWarrenState(warrenId);
+        } catch (err) {
+          // Surface the failure in the warren panel (the graph reload below
+          // still runs) instead of the old silent swallow.
+          warrenPanel.reportError(
+            `Warren refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       await loadGraph();
@@ -258,7 +279,10 @@ async function loadGraph(): Promise<void> {
     if (currentNamespace === '_all') {
       currentData = await fetchGraphAll(includeSuperseded);
     } else if (currentNamespace.startsWith('_warren/')) {
-      currentData = await fetchWarrenGraph(currentNamespace.slice('_warren/'.length));
+      const warrenId = currentNamespace.slice('_warren/'.length);
+      currentData = await fetchWarrenGraph(warrenId);
+      // Feed skip reasons to the warren panel so its rows carry tooltips.
+      warrenPanel?.setSkippedReasons(warrenId, currentData.skipped_reasons ?? {});
     } else {
       currentData = await fetchGraph(currentNamespace, includeSuperseded);
     }

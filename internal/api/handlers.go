@@ -415,7 +415,7 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		return
 	}
 	if !mount.Editable {
-		writeError(w, http.StatusForbidden, "Warren project is read-only in this workspace: "+mount.ProjectID)
+		writeError(w, http.StatusForbidden, fmt.Sprintf("Warren project is read-only in this workspace: %s — enable writes with 'marmot warren edit %s --warren %s' (unless the warren author marked it read-only)", mount.ProjectID, mount.ProjectID, mount.WarrenID))
 		return
 	}
 
@@ -938,14 +938,22 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 		Edges:     []APIEdge{},
 	}
 	nsSet := make(map[string]bool)
+	renderedVaults := make(map[string]bool)
 
 	for _, mount := range mounts {
 		if mount.WarrenID != id {
 			continue
 		}
+		// Node IDs are keyed by vault (@<vault_id>/<node>), so each vault
+		// renders once. Two identified projects sharing the workspace
+		// vault_id are coherent per the alias contract — a second pass over
+		// the live vault would duplicate every node and edge.
+		if mount.VaultID != "" && renderedVaults[mount.VaultID] {
+			continue
+		}
 		if !mount.Available {
 			fmt.Fprintf(os.Stderr, "warning: warren %q project %q unavailable at %s, skipped from graph\n", id, mount.ProjectID, mount.Path)
-			resp.Skipped = append(resp.Skipped, mount.ProjectID)
+			markSkipped(&resp, mount.ProjectID, fmt.Sprintf("project unavailable at %s", mount.Path))
 			continue
 		}
 		// A self-alias serves from the live workspace vault, never the warren
@@ -959,9 +967,10 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 		g, err := graph.LoadGraph(store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: warren %q project %q graph unreadable: %v (skipped from graph)\n", id, mount.ProjectID, err)
-			resp.Skipped = append(resp.Skipped, mount.ProjectID)
+			markSkipped(&resp, mount.ProjectID, fmt.Sprintf("graph unreadable: %v", err))
 			continue
 		}
+		renderedVaults[mount.VaultID] = true
 		nodes := g.AllActiveNodes()
 		for _, n := range nodes {
 			outEdges := g.GetEdges(n.ID, graph.Outbound)
@@ -1039,6 +1048,120 @@ func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 		"warren_id": id,
 		"status":    "reloaded",
 	})
+}
+
+// markSkipped records a Warren graph skip with its reason (the same reason
+// the stderr warning carries, U4.4) so UIs can render it as a tooltip.
+func markSkipped(resp *GraphResponse, projectID, reason string) {
+	resp.Skipped = append(resp.Skipped, projectID)
+	if resp.SkippedReasons == nil {
+		resp.SkippedReasons = make(map[string]string)
+	}
+	resp.SkippedReasons[projectID] = reason
+}
+
+// handleWarrenMount mounts warren projects into the workspace over HTTP.
+// The handler is thin: warren.Mount owns validation and refusal messages
+// (collisions, unknown projects, identity no-ops), which pass through as
+// 400s so the UI gets the same message quality as the CLI. Materialized
+// mounts are never offered over HTTP (heavy IO + cache lifecycle).
+func (s *Server) handleWarrenMount(w http.ResponseWriter, r *http.Request) {
+	s.handleWarrenMountChange(w, r, true)
+}
+
+// handleWarrenUnmount unmounts warren projects from the workspace over HTTP.
+func (s *Server) handleWarrenUnmount(w http.ResponseWriter, r *http.Request) {
+	s.handleWarrenMountChange(w, r, false)
+}
+
+func (s *Server) handleWarrenMountChange(w http.ResponseWriter, r *http.Request, mount bool) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "warren id is required")
+		return
+	}
+	var req WarrenMountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
+		return
+	}
+	entry, ok := state.Warrens[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
+		return
+	}
+	action := "unmounted"
+	if mount {
+		action = "mounted"
+	}
+	projects := req.Projects
+	if req.All {
+		if mount {
+			manifest, _, manifestErr := warren.LoadManifest(entry.Path)
+			if manifestErr != nil {
+				writeError(w, http.StatusInternalServerError, "load Warren manifest: "+manifestErr.Error())
+				return
+			}
+			projects = make([]string, 0, len(manifest.Projects))
+			for _, project := range manifest.Projects {
+				projects = append(projects, project.ProjectID)
+			}
+		} else {
+			projects = append([]string(nil), entry.ActiveProjects...)
+		}
+	}
+	if len(projects) == 0 {
+		if req.All {
+			// Nothing to do (e.g. unmount --all with nothing mounted): a
+			// no-op, not an error.
+			writeJSON(w, http.StatusOK, WarrenMountResponse{
+				WarrenID: id, Action: action, Projects: []string{}, Status: "reloaded",
+			})
+			return
+		}
+		writeError(w, http.StatusBadRequest, `no projects specified: provide "projects" or set "all": true`)
+		return
+	}
+	workspaceRoot := filepath.Dir(s.engine.MarmotDir)
+	if mount {
+		_, err = warren.Mount(workspaceRoot, id, projects, false) // never --materialize over HTTP
+	} else {
+		_, err = warren.Unmount(workspaceRoot, id, projects)
+	}
+	if err != nil {
+		// Warren-layer refusals (vault-ID collisions, unknown projects,
+		// not-mounted, editable self-alias) pass through verbatim.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.engine.ReloadWarrenState(); err != nil {
+		writeError(w, http.StatusInternalServerError, "warren reload after "+action+": "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, WarrenMountResponse{
+		WarrenID: id,
+		Action:   action,
+		Projects: projects,
+		Status:   "reloaded",
+	})
+}
+
+// handleDoctorWorkspace returns the workspace-level warren doctor report
+// verbatim — the same JSON shape as `marmot warren doctor --workspace`
+// (severity/code/message issues incl. self_identity, self_alias_* and
+// vault_id_collision_workspace).
+func (s *Server) handleDoctorWorkspace(w http.ResponseWriter, r *http.Request) {
+	report, err := warren.DoctorWorkspace(s.engine.MarmotDir, filepath.Dir(s.engine.MarmotDir))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "warren doctor: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) findWarrenMountByVault(vaultID string) (warren.ProjectStatus, bool) {

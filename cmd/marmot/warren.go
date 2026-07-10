@@ -126,6 +126,7 @@ func warrenInit(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -220,6 +221,7 @@ func warrenProjectSetReadonly(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -258,6 +260,7 @@ func warrenProjectAdd(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -266,16 +269,21 @@ func warrenProjectAdd(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren project add <project-id> --path <project-.marmot> [--warren-dir .] [--vault-id <id>] [--alias <name>]...")
 		return 1
 	}
+	warnDeprecatedFlag(*aliasesCompat != "", "aliases", "alias")
 	aliases = append(aliases, splitCSV(*aliasesCompat)...)
 	projectID := ""
 	if fs.NArg() == 1 {
 		projectID = fs.Arg(0)
 	}
+	warnDeprecatedSpelling(*idCompat != "", "id", "the positional <project-id> argument")
 	if *idCompat != "" {
-		projectID = *idCompat
-		if *path == "" && fs.NArg() == 1 {
-			*path = fs.Arg(0)
+		// Refuse the ambiguity trap instead of silently reinterpreting the
+		// positional as --path (the old compat behavior).
+		if fs.NArg() == 1 {
+			fmt.Fprintf(os.Stderr, "warren project add: both --id %q and a positional argument %q given; write 'marmot warren project add %s --path %s'\n", *idCompat, fs.Arg(0), *idCompat, fs.Arg(0))
+			return 1
 		}
+		projectID = *idCompat
 	}
 	if *generateID {
 		projectID = ""
@@ -360,10 +368,12 @@ func warrenProjectImport(args []string) int {
 		}
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
+	warnDeprecatedFlag(*aliasesCompat != "", "aliases", "alias")
 	aliases = append(aliases, splitCSV(*aliasesCompat)...)
 
 	var projectID, source string
@@ -377,6 +387,7 @@ func warrenProjectImport(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren project import <project-id> <source-.marmot> [--warren-dir .] [--path projects/<project-id>/.marmot] [--vault-id <id>] [--alias <name>]...")
 		return 1
 	}
+	warnDeprecatedSpelling(*idCompat != "", "id", "the positional <project-id> argument")
 	if *idCompat != "" {
 		projectID = *idCompat
 	}
@@ -430,6 +441,7 @@ func warrenProjectList(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -467,6 +479,7 @@ func warrenProjectRemove(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -484,26 +497,41 @@ func warrenProjectRemove(args []string) int {
 }
 
 func warrenProjectRename(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true}, nil)
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true}, map[string]bool{"keep-path": true})
 	fs := flag.NewFlagSet("warren project rename", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
 	rootCompat := fs.String("root", "", "Warren repository root")
+	keepPath := fs.Bool("keep-path", false, "rename the project ID only; do not move projects/<old-id>/ to projects/<new-id>/")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 2 {
-		fmt.Fprintln(os.Stderr, "usage: marmot warren project rename [--warren-dir .] <old-project-id> <new-project-id>")
+		fmt.Fprintln(os.Stderr, "usage: marmot warren project rename [--warren-dir .] [--keep-path] <old-project-id> <new-project-id>")
 		return 1
 	}
-	if _, err := warren.RenameProject(*root, fs.Arg(0), fs.Arg(1)); err != nil {
+	result, err := warren.RenameProject(*root, fs.Arg(0), fs.Arg(1), *keepPath)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren project rename: %v\n", err)
 		return 1
 	}
-	fmt.Printf("Renamed project %q -> %q\n", fs.Arg(0), fs.Arg(1))
+	if result.Moved {
+		fmt.Printf("Renamed project %q -> %q (moved %s -> %s)\n", fs.Arg(0), fs.Arg(1), result.OldDir, result.NewDir)
+		if len(result.Repointed) > 0 {
+			fmt.Printf("note: repointed nested project checkout paths moved with %s: %s\n", result.OldDir, strings.Join(result.Repointed, ", "))
+		}
+	} else {
+		fmt.Printf("Renamed project %q -> %q (path %s kept)\n", fs.Arg(0), fs.Arg(1), result.PathKept)
+	}
+	// Rename never rewrites vault_id — it is the identity key. Only say so
+	// when the old vault_id==project_id default now visibly diverges.
+	if result.VaultID != "" && result.VaultID != fs.Arg(1) {
+		fmt.Printf("note: vault_id %q unchanged — vault identity is stable across renames; re-import with --vault-id to change it\n", result.VaultID)
+	}
 	return 0
 }
 
@@ -541,6 +569,7 @@ func warrenBridgeAdd(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -570,6 +599,7 @@ func warrenBridgeList(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -607,6 +637,7 @@ func warrenBridgeRemove(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -634,6 +665,7 @@ func warrenDoctor(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -678,9 +710,19 @@ func printDoctorReport(report warren.DoctorReport, jsonOut bool, healthyMsg stri
 		return 0
 	}
 	if len(report.Issues) > 0 {
+		errs, warnings, infos := 0, 0, 0
 		for _, issue := range report.Issues {
 			fmt.Fprintf(os.Stderr, "%s\t%s\t%s\n", issue.Severity, issue.Code, issue.Message)
+			switch issue.Severity {
+			case "error":
+				errs++
+			case "warning":
+				warnings++
+			default:
+				infos++
+			}
 		}
+		fmt.Fprintf(os.Stderr, "doctor: %d error(s), %d warning(s), %d info\n", errs, warnings, infos)
 		if !report.OK() {
 			return 1
 		}
@@ -697,6 +739,7 @@ func warrenFormat(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
 	if *rootCompat != "" {
 		*root = *rootCompat
 	}
@@ -759,6 +802,15 @@ func warrenRegister(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren register [--dir .marmot] <warren-id> <path>")
 		return 1
 	}
+	if *dir == "" {
+		*dir = discoverVault()
+	}
+	// ensureWorkspace nudges when it fabricates a vault_id-less config; the
+	// pre-existing-config case is nudged below, so track which one this is.
+	configExisted := false
+	if _, statErr := os.Stat(filepath.Join(*dir, "_config.md")); statErr == nil {
+		configExisted = true
+	}
 	marmotDir, workspaceRoot, err := ensureWorkspace(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren register: %v\n", err)
@@ -770,11 +822,14 @@ func warrenRegister(args []string) int {
 	}
 	fmt.Printf("Registered Warren %q -> %s\n", fs.Arg(0), fs.Arg(1))
 	// Identity is automatic (derived from vault_id, never mounted); register
-	// is the moment it becomes discoverable, so announce every match.
+	// is the moment it becomes discoverable, so announce every match — and
+	// nudge when no identity can ever match because vault_id is unset.
 	if local := warren.LocalVaultID(marmotDir); local != "" {
 		for _, projectID := range identifiedProjectsByWarren(marmotDir)[fs.Arg(0)] {
 			fmt.Printf("note: project %q in warren %q matches this workspace's vault ID %q — served as your live vault; manifest bridges involving it activate once their other endpoint is mounted\n", projectID, fs.Arg(0), local)
 		}
+	} else if configExisted {
+		nudgeMissingVaultID()
 	}
 	return 0
 }
@@ -1612,8 +1667,18 @@ func ensureWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error
 		if writeErr := os.WriteFile(configPath, []byte(content), 0o644); writeErr != nil {
 			return "", "", writeErr
 		}
+		// The fabricated config carries no vault_id, which silently opts the
+		// workspace out of warren identity — say so once, at fabrication time.
+		nudgeMissingVaultID()
 	}
 	return marmotDir, workspaceRoot, nil
+}
+
+// nudgeMissingVaultID prints the no-vault_id onboarding nudge: without a
+// vault_id in _config.md, warren bridges can never identify this workspace's
+// own project (identity is derived by vault_id comparison).
+func nudgeMissingVaultID() {
+	fmt.Fprintln(os.Stderr, "note: this workspace has no vault_id in _config.md; warren bridges involving this project cannot identify it — set one with 'marmot configure --vault-id <id>'")
 }
 
 // resolveWarrenEntry resolves the requested (or sole registered) Warren ID
