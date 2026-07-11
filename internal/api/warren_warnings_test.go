@@ -142,6 +142,40 @@ func TestWarrenGraphReportsSkippedMounts(t *testing.T) {
 	}
 }
 
+// TestWarrenGraphUnreachableWarrenReportsSkipped (C2): a warren whose
+// checkout has vanished (manifest unreadable, no burrow cache) must not
+// render as a clean empty 200 graph — every active project is reported in
+// "skipped" with an unreachable reason so the UI can toast and the panel
+// rows carry skip tooltips.
+func TestWarrenGraphUnreachableWarrenReportsSkipped(t *testing.T) {
+	server, engine := newTestServer(t)
+	handler := server.Handler()
+	workspaceRoot := filepath.Dir(engine.MarmotDir)
+	warrenRoot := setupAPIWarren(t, workspaceRoot, "product-platform", "project-a", "project-a-vault")
+
+	// Move the whole warren checkout away (the real-world repro: the
+	// registered path no longer holds a readable manifest).
+	if err := os.Rename(warrenRoot, warrenRoot+"-moved"); err != nil {
+		t.Fatalf("move warren checkout: %v", err)
+	}
+
+	rec := doRequest(t, handler, "GET", "/api/warren/product-platform/graph", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp GraphResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Skipped) != 1 || resp.Skipped[0] != "project-a" {
+		t.Fatalf("skipped = %+v, want [project-a]", resp.Skipped)
+	}
+	reason := resp.SkippedReasons["project-a"]
+	if !strings.Contains(reason, "warren unreachable") {
+		t.Fatalf("skip reason = %q, want a warren-unreachable mention", reason)
+	}
+}
+
 // TestWarrenNodeUpdateRefreshFailureWarns (A6 #4, refined by B1): a genuine
 // registry refresh failure after an editable write is announced on stderr
 // (response unaffected), while a never-loaded vault (ErrNotLoaded — nothing

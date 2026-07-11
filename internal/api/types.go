@@ -95,6 +95,11 @@ type WarrensResponse struct {
 // response type — additive over the raw WorkspaceWarren shape.
 type WarrenEntry struct {
 	warren.WorkspaceWarren
+	// ActiveProjects shadows the embedded field's omitempty JSON tag so the
+	// API always emits an array (`"active_projects": []` when nothing is
+	// mounted) — clients must not have to null-check a key that vanishes.
+	// The on-disk workspace-state YAML shape is unaffected.
+	ActiveProjects     []string `json:"active_projects"`
 	IdentifiedProjects []string `json:"identified_projects,omitempty"`
 }
 

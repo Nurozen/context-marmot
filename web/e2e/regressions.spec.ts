@@ -170,12 +170,26 @@ test('/verify refreshes the Issues tab without dead API calls', async ({ page })
   await page.goto('/');
   await expect(page.locator('#graph-svg g.node')).toHaveCount(4, { timeout: 15_000 });
 
+  // C6: /verify must invoke the real backend curator verify command (via
+  // the slash-command route of POST /api/chat) instead of printing a
+  // hardcoded string.
+  const chatResponse = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === '/api/chat' && r.request().method() === 'POST',
+  );
+
   const input = page.locator('#chat-input');
   await input.fill('/verify');
   await input.press('Enter');
 
+  expect((await chatResponse).status()).toBe(200);
+
   const result = page.locator('.chat-message-command').last();
   await expect(result).toContainText('Health check complete');
+  // Real backend counts reach the chat (e.g. "verified 4 node(s) with no
+  // issues" or "found N issue(s) across 4 node(s)"; the message carries the
+  // "(X active, Y superseded)" breakdown when superseded nodes exist).
+  await expect(result).toContainText(/\d+ node\(s\)/);
+  await expect(result).toContainText('See Issues tab');
 
   // The Issues tab is activated and rendered by the Issues panel
   // (via /api/curator/suggestions).

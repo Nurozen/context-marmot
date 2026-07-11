@@ -122,19 +122,26 @@ export class DetailPanel {
       this.content.appendChild(provenanceSection);
     }
 
-    // ── Summary (editable) ──
+    // Read-only warren nodes (@foreign warren_mount and local_alias views)
+    // must not accept typing: the save path is blocked, so an editable
+    // textarea would be a silent dead-end.
+    const isReadOnlyWarrenNode = Boolean(node.provenance && !node.provenance.editable);
+
+    // ── Summary (editable unless read-only warren node) ──
     const summarySection = this.createSection('Summary');
     const summaryArea = document.createElement('textarea');
     this.styleTextarea(summaryArea, 3);
     summaryArea.value = node.summary;
+    if (isReadOnlyWarrenNode) this.markReadOnly(summaryArea);
     summarySection.appendChild(summaryArea);
     this.content.appendChild(summarySection);
 
-    // ── Context (editable) ──
+    // ── Context (editable unless read-only warren node) ──
     const contextSection = this.createSection('Context');
     const contextArea = document.createElement('textarea');
     this.styleTextarea(contextArea, 6);
     contextArea.value = node.context;
+    if (isReadOnlyWarrenNode) this.markReadOnly(contextArea);
     contextSection.appendChild(contextArea);
     this.content.appendChild(contextSection);
 
@@ -218,7 +225,6 @@ export class DetailPanel {
     // ── Save button ──
     const saveBtn = document.createElement('button');
     saveBtn.textContent = 'Save Changes';
-    const isReadOnlyWarrenNode = Boolean(node.provenance && !node.provenance.editable);
     saveBtn.disabled = true;
     Object.assign(saveBtn.style, {
       marginTop: '12px',
@@ -310,6 +316,15 @@ export class DetailPanel {
     h4.textContent = title;
     section.appendChild(h4);
     return section;
+  }
+
+  /** Read-only affordance for warren-node textareas: blocks typing and
+   *  makes the blocked state visible (styling lives in style.css via the
+   *  [readonly] attribute selector). */
+  private markReadOnly(el: HTMLTextAreaElement): void {
+    el.readOnly = true;
+    el.setAttribute('aria-readonly', 'true');
+    el.title = 'Read-only warren node — edits are not accepted here.';
   }
 
   private styleTextarea(el: HTMLTextAreaElement, rows: number): void {

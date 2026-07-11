@@ -1238,6 +1238,24 @@ html, body {
     max-width: none;
   }
 
+  /* The left control group must shrink and wrap too, or the ↻ / Warrens
+     buttons fall off the right edge on phones (the warren panel was
+     unreachable at 390px). The namespace select is the flexible member:
+     it may carry long "Warren <id> (N active, M identity)" labels, so it
+     yields width instead of pushing its siblings offscreen. */
+  .toolbar-left {
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+
+  #namespace-select {
+    flex: 1 1 120px;
+    width: auto;
+    min-width: 0;
+    max-width: 100%;
+  }
+
   .toolbar-right {
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -2862,18 +2880,6 @@ textarea:focus-visible {
   background: rgba(196, 93, 75, 0.1);
 }
 
-.warren-panel-error {
-  margin-bottom: 12px;
-  padding: 8px 10px;
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--color-danger, #c45d4b);
-  background: rgba(196, 93, 75, 0.1);
-  border: 1px solid rgba(196, 93, 75, 0.25);
-  border-radius: var(--radius-sm);
-}
-
 .warren-loading,
 .warren-empty {
   font-size: 11px;
@@ -3086,4 +3092,68 @@ table.warren-projects .warren-project-id {
   font-size: 10px;
   color: var(--text-muted);
   word-break: break-word;
+}
+
+/* Read-only warren node textareas: typing is disabled (readOnly), and the
+   muted styling makes the dead-end visible instead of silent. */
+#detail-content textarea[readonly] {
+  opacity: 0.65;
+  cursor: not-allowed;
+  background: var(--bg-secondary);
+}
+
+/* Identity rows: "editable" is not a warren concern for your own workspace —
+   edits happen normally through the live vault. */
+.warren-editable-local {
+  color: var(--text-muted);
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* ── Toasts — transient operation feedback ───────────────────── */
+#toast-container {
+  position: fixed;
+  top: calc(var(--toolbar-h) + 10px);
+  right: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 500;
+  max-width: min(360px, calc(100vw - 28px));
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  padding: 10px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-medium);
+  border-left: 3px solid var(--text-muted);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+  word-break: break-word;
+  animation: fadeSlideIn 200ms var(--ease-out) both;
+  transition: opacity 250ms ease, transform 250ms ease;
+}
+
+.toast-error {
+  border-left-color: var(--color-danger, #c45d4b);
+}
+
+.toast-success {
+  border-left-color: var(--color-success, #54a24b);
+}
+
+.toast-info {
+  border-left-color: var(--accent);
+}
+
+.toast-hide {
+  opacity: 0;
+  transform: translateY(-6px);
 }

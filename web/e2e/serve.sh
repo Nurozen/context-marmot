@@ -89,6 +89,18 @@ printf '\nLIVE-MARKER: served from the live workspace vault.\n' >> "$WORK/.marmo
 (cd "$WORK" && "$BIN" warren register --dir .marmot wui "$WARREN")
 (cd "$WORK" && "$BIN" warren mount --dir .marmot --warren wui other)
 
+# ── Unreachable-warren leg (C2) ─────────────────────────────────────
+# Author a second warren, register + mount it, then move its checkout away
+# so its manifest is unreadable: the graph view must surface the skipped
+# project instead of rendering a silently empty graph.
+WGONE="$WORK/warren-gone"
+mkdir -p "$WGONE"
+"$BIN" warren init --id wgone --warren-dir "$WGONE"
+"$BIN" warren project import ghost "$OTHER/.marmot" --warren-dir "$WGONE" --vault-id ghost-vault
+(cd "$WORK" && "$BIN" warren register --dir .marmot wgone "$WGONE")
+(cd "$WORK" && "$BIN" warren mount --dir .marmot --warren wgone ghost)
+mv "$WGONE" "$WGONE-moved"
+
 # Run the server as a child (not exec) so the EXIT trap still fires to remove
 # the temp vault when Playwright terminates this script.
 cd "$WORK"

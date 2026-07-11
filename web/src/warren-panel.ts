@@ -7,6 +7,7 @@ import {
   refreshWarrenState,
   unmountWarrenProjects,
 } from './api';
+import { showToast } from './toast';
 import type { BridgeInfo, DoctorReport, ProjectStatus } from './types';
 
 /**
@@ -22,7 +23,6 @@ import type { BridgeInfo, DoctorReport, ProjectStatus } from './types';
 export class WarrenPanel {
   private panel: HTMLElement;
   private body: HTMLElement;
-  private errorEl: HTMLElement;
   private toggleBtn: HTMLButtonElement;
   private badge: HTMLElement;
   private onStateChange: () => Promise<void>;
@@ -34,7 +34,6 @@ export class WarrenPanel {
   constructor(onStateChange: () => Promise<void>) {
     this.panel = document.getElementById('warren-panel') as HTMLElement;
     this.body = document.getElementById('warren-panel-body') as HTMLElement;
-    this.errorEl = document.getElementById('warren-panel-error') as HTMLElement;
     this.toggleBtn = document.getElementById('warren-toggle') as HTMLButtonElement;
     this.badge = document.getElementById('warren-badge') as HTMLElement;
     this.onStateChange = onStateChange;
@@ -78,18 +77,12 @@ export class WarrenPanel {
   }
 
   /**
-   * Surfaces a warren operation failure in the panel (opening it if needed)
-   * — the replacement for the old best-effort silent swallow.
+   * Surfaces a warren operation failure as an error toast — the single
+   * error-surfacing mechanism shared with graph-load failures (main.ts),
+   * replacing the old best-effort silent swallow.
    */
   reportError(message: string): void {
-    this.panel.classList.remove('hidden');
-    this.errorEl.textContent = message;
-    this.errorEl.hidden = false;
-  }
-
-  private clearError(): void {
-    this.errorEl.textContent = '';
-    this.errorEl.hidden = true;
+    showToast(message, 'error');
   }
 
   /** Called by main.ts after a warren graph load so rows can carry skip tooltips. */
@@ -181,7 +174,11 @@ export class WarrenPanel {
     refreshBtn.title = 'Reload warren state from disk';
     refreshBtn.textContent = '↻';
     refreshBtn.addEventListener('click', () => {
-      void this.run(refreshBtn, () => refreshWarrenState(warrenId));
+      void this.run(
+        refreshBtn,
+        () => refreshWarrenState(warrenId),
+        `Warren "${warrenId}" reloaded from disk`,
+      );
     });
     title.appendChild(refreshBtn);
     block.appendChild(title);
@@ -253,7 +250,19 @@ export class WarrenPanel {
     tr.appendChild(stateTd);
 
     const editableTd = document.createElement('td');
-    editableTd.textContent = project.editable ? 'yes' : 'no';
+    if (project.self_alias) {
+      // Identity: "editable no" would wrongly read as "you can't edit your
+      // own project". Edits happen normally in this workspace via the live
+      // vault; warren edit/propose only applies to foreign mounted projects.
+      // Display-only — the underlying editable JSON field is unchanged.
+      editableTd.textContent = 'local';
+      editableTd.className = 'warren-editable-local';
+      editableTd.title =
+        'Edits happen normally in this workspace (live vault). ' +
+        'Warren edit/propose applies only to foreign mounted projects.';
+    } else {
+      editableTd.textContent = project.editable ? 'yes' : 'no';
+    }
     tr.appendChild(editableTd);
 
     const availableTd = document.createElement('td');
@@ -343,18 +352,31 @@ export class WarrenPanel {
   }
 
   /**
-   * Runs a warren mutation: disables the button, calls the API, surfaces
-   * failures in the panel, then re-renders the panel and reloads the graph.
+   * Runs a warren mutation: disables the button (with an in-flight spinner
+   * glyph), calls the API, surfaces failures as error toasts, then
+   * re-renders the panel and reloads the graph. When `successMessage` is
+   * given, success shows a brief check on the button plus a success toast —
+   * per-warren refresh used to complete with zero visible feedback.
    */
-  private async run(btn: HTMLButtonElement, op: () => Promise<unknown>): Promise<void> {
-    this.clearError();
+  private async run(
+    btn: HTMLButtonElement,
+    op: () => Promise<unknown>,
+    successMessage?: string,
+  ): Promise<void> {
+    const originalText = btn.textContent;
     btn.disabled = true;
+    btn.textContent = '…';
     try {
       await op();
     } catch (err) {
       this.reportError(err instanceof Error ? err.message : String(err));
       btn.disabled = false;
+      btn.textContent = originalText;
       return;
+    }
+    btn.textContent = '✓';
+    if (successMessage) {
+      showToast(successMessage, 'success');
     }
     await this.render();
     await this.onStateChange();

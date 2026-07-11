@@ -284,6 +284,34 @@ func TestWarrensResponseIdentifiedProjects(t *testing.T) {
 	}
 }
 
+// TestWarrensResponseEmptyActiveProjectsShape (C8): with zero mounted
+// projects, GET /api/warrens must still emit "active_projects": [] — the
+// key must never vanish via omitempty, so clients don't have to null-check.
+func TestWarrensResponseEmptyActiveProjectsShape(t *testing.T) {
+	server, engine := newTestServer(t)
+	setupSelfAliasWarren(t, engine)
+
+	rec := doRequest(t, server.Handler(), "GET", "/api/warrens", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/warrens = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"active_projects":[]`) {
+		t.Fatalf(`response must carry "active_projects":[] when nothing is mounted, got %s`, body)
+	}
+	var resp WarrensResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode warrens response: %v", err)
+	}
+	entry, ok := resp.Warrens["wp"]
+	if !ok {
+		t.Fatalf("warren wp missing from response: %+v", resp.Warrens)
+	}
+	if entry.ActiveProjects == nil || len(entry.ActiveProjects) != 0 {
+		t.Fatalf("active_projects = %#v, want non-nil empty slice", entry.ActiveProjects)
+	}
+}
+
 // TestWarrenWriteSelfAliasRefusalEquivalence: the third refusal case of the
 // write-equivalence matrix — both the HTTP API and MCP @-write paths refuse a
 // self-alias vault ID with the write-locally remediation, even when legacy

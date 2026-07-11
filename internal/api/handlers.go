@@ -875,7 +875,16 @@ func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
 	}
 	warrens := make(map[string]WarrenEntry, len(state.Warrens))
 	for id, entry := range state.Warrens {
-		warrens[id] = WarrenEntry{WorkspaceWarren: entry, IdentifiedProjects: identified[id]}
+		active := entry.ActiveProjects
+		if active == nil {
+			// JSON shape stability: emit [] instead of dropping the key.
+			active = []string{}
+		}
+		warrens[id] = WarrenEntry{
+			WorkspaceWarren:    entry,
+			ActiveProjects:     active,
+			IdentifiedProjects: identified[id],
+		}
 	}
 	writeJSON(w, http.StatusOK, WarrensResponse{Warrens: warrens})
 }
@@ -922,7 +931,8 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
 		return
 	}
-	if _, ok := state.Warrens[id]; !ok {
+	entry, ok := state.Warrens[id]
+	if !ok {
 		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
 		return
 	}
@@ -936,6 +946,19 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 		Namespace: "_warren/" + id,
 		Nodes:     []APINode{},
 		Edges:     []APIEdge{},
+	}
+
+	// An unreachable warren (checkout moved/deleted, no burrow cache) yields
+	// zero mounts from ActiveMounts, which used to render as a clean empty
+	// 200 graph — silent exactly when the user most needs a signal (C2).
+	// Surface every active project as skipped with the manifest error so the
+	// UI can toast and the panel rows carry skip tooltips.
+	if !entry.Materialized {
+		if _, _, merr := warren.LoadManifest(entry.Path); merr != nil {
+			for _, projectID := range entry.ActiveProjects {
+				markSkipped(&resp, projectID, fmt.Sprintf("warren unreachable: manifest unreadable at %s: %v", entry.Path, merr))
+			}
+		}
 	}
 	nsSet := make(map[string]bool)
 	renderedVaults := make(map[string]bool)

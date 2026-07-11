@@ -551,11 +551,7 @@ export class Curator {
           await this.cmdUnlink(args);
           break;
         case 'verify':
-          // The Issues panel (issues.ts) owns loading and rendering
-          // suggestions via /api/curator/suggestions; ask it to refresh.
-          document.dispatchEvent(new CustomEvent('curator-refresh-issues'));
-          this.addCommandResult('Health check complete. See Issues tab.', true);
-          this.switchTab('issues');
+          await this.cmdVerify();
           break;
         default:
           this.addCommandResult(
@@ -571,6 +567,32 @@ export class Curator {
   private cmdHelp(): void {
     const lines = SLASH_COMMANDS.map((c) => `- /${c.name} ${c.hint}`);
     this.addCommandResult(['Available commands:', ...lines].join('\n'), true);
+  }
+
+  /**
+   * /verify runs the real backend curator verify command (via the slash
+   * command route of POST /api/chat) so the chat shows the actual result —
+   * including the active/superseded breakdown — instead of the old
+   * hardcoded string. The Issues panel (issues.ts) still owns rendering
+   * suggestions via /api/curator/suggestions, so it is asked to refresh
+   * and the Issues tab keeps its pointer role.
+   */
+  private async cmdVerify(): Promise<void> {
+    const data = (await this.apiPost('/api/chat', {
+      message: '/verify',
+      session_id: this.sessionId,
+      selected_nodes: this.selectedNodes,
+      namespace: this.currentNamespace,
+    })) as ChatResponse;
+    const detail = data?.message?.content?.trim();
+    this.addCommandResult(
+      detail
+        ? `Health check complete: ${detail}. See Issues tab.`
+        : 'Health check complete. See Issues tab.',
+      true,
+    );
+    document.dispatchEvent(new CustomEvent('curator-refresh-issues'));
+    this.switchTab('issues');
   }
 
   private async cmdTag(args: string[]): Promise<void> {

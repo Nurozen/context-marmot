@@ -15,7 +15,8 @@ import { initKeyboard } from './keyboard';
 import { IssuesPanel } from './issues';
 import { Curator } from './curator';
 import { WarrenPanel } from './warren-panel';
-import type { GraphResponse } from './types';
+import { showToast } from './toast';
+import type { GraphResponse, WorkspaceWarren } from './types';
 
 let currentNamespace = 'default';
 let currentData: GraphResponse | null = null;
@@ -186,12 +187,7 @@ async function init(): Promise<void> {
     for (const [warrenId, warren] of warrenEntries) {
       const opt = document.createElement('option');
       opt.value = `_warren/${warrenId}`;
-      const count = warren.active_projects?.length ?? 0;
-      const identified = warren.identified_projects?.length ?? 0;
-      let label = `Warren ${warrenId} (${count} active`;
-      if (identified > 0) label += `, ${identified} identity`;
-      label += ')';
-      opt.textContent = label;
+      opt.textContent = warrenOptionLabel(warrenId, warren);
       select.appendChild(opt);
     }
   } catch {
@@ -208,7 +204,13 @@ async function init(): Promise<void> {
   });
 
   /* ── Warren management panel ──────────────────────────────────── */
-  warrenPanel = new WarrenPanel(() => loadGraph());
+  // After any panel-driven state change (mount/unmount/refresh) reload the
+  // graph AND re-label the warren selector options, whose "(N active,
+  // M identity)" counts would otherwise go stale.
+  warrenPanel = new WarrenPanel(async () => {
+    await loadGraph();
+    await refreshWarrenSelectorLabels();
+  });
   void warrenPanel.init();
 
   document.getElementById('refresh-btn')?.addEventListener('click', () => {
@@ -220,14 +222,15 @@ async function init(): Promise<void> {
         try {
           await refreshWarrenState(warrenId);
         } catch (err) {
-          // Surface the failure in the warren panel (the graph reload below
-          // still runs) instead of the old silent swallow.
+          // Surface the failure (the graph reload below still runs)
+          // instead of the old silent swallow.
           warrenPanel.reportError(
             `Warren refresh failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
       await loadGraph();
+      await refreshWarrenSelectorLabels();
     })();
   });
 
@@ -263,7 +266,19 @@ async function init(): Promise<void> {
     // On reconnect, reload graph in case changes were missed
     void loadGraph();
   });
+  // Deliberate page teardown (reload/navigation) aborts the EventSource,
+  // which used to log a scary "connection lost" warning plus an
+  // ERR_ABORTED /api/events entry on every reload. Close the stream
+  // cleanly and skip the warning when the page is going away.
+  let pageUnloading = false;
+  const closeEventsOnUnload = (): void => {
+    pageUnloading = true;
+    evtSource.close();
+  };
+  window.addEventListener('pagehide', closeEventsOnUnload);
+  window.addEventListener('beforeunload', closeEventsOnUnload);
   evtSource.onerror = () => {
+    if (pageUnloading) return;
     console.warn('[live-reload] SSE connection lost, will auto-reconnect');
   };
 }
@@ -283,6 +298,18 @@ async function loadGraph(): Promise<void> {
       currentData = await fetchWarrenGraph(warrenId);
       // Feed skip reasons to the warren panel so its rows carry tooltips.
       warrenPanel?.setSkippedReasons(warrenId, currentData.skipped_reasons ?? {});
+      // Skipped projects (unreachable warren checkout, unreadable project
+      // graph) come back as a 200 with skip reasons — without a toast an
+      // unreachable warren renders as a silently empty graph (C2).
+      const skipped = currentData.skipped ?? [];
+      if (skipped.length > 0) {
+        const reasons = currentData.skipped_reasons ?? {};
+        const detail = skipped.map((p) => `${p}: ${reasons[p] ?? 'skipped'}`).join('; ');
+        showToast(
+          `Warren "${warrenId}": ${skipped.length} project(s) skipped from graph — ${detail}`,
+          'error',
+        );
+      }
     } else {
       currentData = await fetchGraph(currentNamespace, includeSuperseded);
     }
@@ -317,7 +344,46 @@ async function loadGraph(): Promise<void> {
     /* Load curation suggestions after graph data is available */
     issuesPanel.load(issuesNamespaceFilter());
   } catch (err) {
+    // Surface the failure to the user (the previous graph stays rendered,
+    // which used to make failed loads invisible outside the console).
+    const detail = err instanceof Error ? err.message : String(err);
+    showToast(`Failed to load graph for "${currentNamespace}": ${detail}`, 'error');
     console.error('Failed to load graph:', err);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Warren selector labels                                             */
+/* ------------------------------------------------------------------ */
+
+/** Builds the "(N active, M identity)" selector label for one warren. */
+function warrenOptionLabel(warrenId: string, warren: WorkspaceWarren): string {
+  const count = warren.active_projects?.length ?? 0;
+  const identified = warren.identified_projects?.length ?? 0;
+  let label = `Warren ${warrenId} (${count} active`;
+  if (identified > 0) label += `, ${identified} identity`;
+  label += ')';
+  return label;
+}
+
+/**
+ * Re-fetches /api/warrens and rewrites the selector's warren option labels
+ * so their active/identity counts track panel mounts and unmounts.
+ */
+async function refreshWarrenSelectorLabels(): Promise<void> {
+  const select = document.getElementById('namespace-select') as HTMLSelectElement | null;
+  if (!select) return;
+  let warrens: Record<string, WorkspaceWarren>;
+  try {
+    warrens = (await fetchWarrens()).warrens ?? {};
+  } catch {
+    return; // Selector labels are best-effort; the panel surfaces failures.
+  }
+  for (const opt of Array.from(select.options)) {
+    if (!opt.value.startsWith('_warren/')) continue;
+    const warrenId = opt.value.slice('_warren/'.length);
+    const warren = warrens[warrenId];
+    if (warren) opt.textContent = warrenOptionLabel(warrenId, warren);
   }
 }
 
