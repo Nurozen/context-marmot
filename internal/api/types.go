@@ -87,6 +87,11 @@ type SearchResult struct {
 // WarrensResponse lists local workspace Warren registrations.
 type WarrensResponse struct {
 	Warrens map[string]WarrenEntry `json:"warrens"`
+	// LocalVaultID is this workspace's configured vault_id (empty when the
+	// vault has none). The UI uses it to label the local project group and
+	// to fold @<local-vault>/… identity nodes back onto their live local
+	// counterparts in aggregate views.
+	LocalVaultID string `json:"local_vault_id,omitempty"`
 }
 
 // WarrenEntry is a registered warren's workspace state plus its computed
@@ -198,6 +203,22 @@ type ChatUndoResponse struct {
 type SuggestionsResponse struct {
 	Suggestions []curator.Suggestion `json:"suggestions"`
 	NodeCount   int                  `json:"node_count"`
+	// IntegrityIssues are the scoped integrity-check results the /verify
+	// slash command counts, so the Issues panel can show the same set the
+	// chat message reports. Always an array (empty when the graph is clean).
+	IntegrityIssues []IntegrityIssueAPI `json:"integrity_issues"`
+	// IntegrityNodeCount is how many nodes (superseded included) the
+	// integrity checks covered — matches the "across N node(s)" figure in
+	// the /verify chat message.
+	IntegrityNodeCount int `json:"integrity_node_count"`
+}
+
+// IntegrityIssueAPI is the JSON projection of a verify.IntegrityIssue.
+type IntegrityIssueAPI struct {
+	NodeID   string `json:"node_id"`
+	Type     string `json:"type"` // dangling_edge, hash_mismatch, structural_cycle, missing_source
+	Message  string `json:"message"`
+	Severity string `json:"severity"` // error, warning, info
 }
 
 // VersionResponse is returned by GET /api/version. Version is the live-reload

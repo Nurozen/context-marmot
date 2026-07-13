@@ -87,6 +87,12 @@ type runScope struct {
 	ctx          context.Context
 	mutations    []curator.MutationRecord
 	mutationsCap int
+	// allowBulk is set when the generated program calls client.allowBulk(),
+	// lifting the bulk-mutation guard for this execution only.
+	allowBulk bool
+	// mutatedIDs tracks the distinct node IDs successfully mutated during
+	// this execution; the bulk-mutation guard counts against it.
+	mutatedIDs map[string]struct{}
 }
 
 // NewExecutor builds an Executor backed by the given engine. Engine must be

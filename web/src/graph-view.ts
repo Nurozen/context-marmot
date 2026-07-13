@@ -47,6 +47,9 @@ function nodeRadius(edgeCount: number): number {
   return Math.min(6 + Math.sqrt(edgeCount) * 2.5, 30);
 }
 
+/** Grouping modes for the group-by selector. */
+export type GroupMode = 'none' | 'type' | 'namespace' | 'tag' | 'folder' | 'project';
+
 /* ------------------------------------------------------------------ */
 /*  GraphView                                                          */
 /* ------------------------------------------------------------------ */
@@ -80,7 +83,10 @@ export class GraphView {
   private normalLinks: SimLink[] = [];
   private heatEnabled = false;
   private heatPairs: APIHeatPair[] = [];
-  private groupBy: 'none' | 'type' | 'namespace' | 'tag' | 'folder' = 'type';
+  private groupBy: GroupMode = 'type';
+  /** The workspace's configured vault_id ('' when none) — labels the local
+      project group and recognizes @<local-vault>/… nodes as local. */
+  private localVaultId = '';
 
   /* Multi-selection for curator integration */
   private multiSelectedIds: Set<string> = new Set();
@@ -1060,26 +1066,26 @@ export class GraphView {
       return;
     }
 
-    /* Folder-based grouping: cluster by directory prefix.
-       Uses a wider centroid radius than other modes to give the contour
-       hulls breathing room between islands. */
-    if (this.groupBy === 'folder') {
-      const folders = [...new Set(this.nodes.map((n) => this.nodeFolder(n)))].sort();
+    /* Folder/project-based grouping: cluster by directory prefix or by
+       owning vault. Uses a wider centroid radius than other modes to give
+       the contour hulls breathing room between islands. */
+    if (this.groupBy === 'folder' || this.groupBy === 'project') {
+      const groups = [...new Set(this.nodes.map((n) => this.clusterKey(n)))].sort();
       const r = Math.min(width, height) * 0.38;
       const centroids = new Map<string, { x: number; y: number }>();
-      folders.forEach((key, i) => {
-        if (folders.length === 1) {
+      groups.forEach((key, i) => {
+        if (groups.length === 1) {
           centroids.set(key, { x: cx, y: cy });
         } else {
-          const angle = (2 * Math.PI * i) / folders.length - Math.PI / 2;
+          const angle = (2 * Math.PI * i) / groups.length - Math.PI / 2;
           centroids.set(key, { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
         }
       });
       const strength = 0.22;
 
       this.simulation
-        .force('x', d3.forceX<SimNode>((d) => centroids.get(this.nodeFolder(d))?.x ?? cx).strength(strength))
-        .force('y', d3.forceY<SimNode>((d) => centroids.get(this.nodeFolder(d))?.y ?? cy).strength(strength));
+        .force('x', d3.forceX<SimNode>((d) => centroids.get(this.clusterKey(d))?.x ?? cx).strength(strength))
+        .force('y', d3.forceY<SimNode>((d) => centroids.get(this.clusterKey(d))?.y ?? cy).strength(strength));
       return;
     }
 
@@ -1096,24 +1102,58 @@ export class GraphView {
       .force('y', d3.forceY<SimNode>((d) => centroids.get(keyFn(d))?.y ?? cy).strength(strength));
   }
 
-  /** Extract the folder prefix from a node ID (e.g. "packages/node" → "packages"). */
-  private nodeFolder(d: SimNode): string {
-    const slash = d.id.indexOf('/');
-    return slash > 0 ? d.id.substring(0, slash) : '_root';
+  /** Sets the workspace vault_id used to label the local project group. */
+  setLocalVaultId(vaultId: string): void {
+    this.localVaultId = vaultId;
   }
 
-  /** Render topographic contour hulls around folder groups. */
+  /** Extract the vault prefix from a qualified node ID
+      ("@pb-vault/src/calc" → "pb-vault"), '' for unqualified local IDs. */
+  private nodeVault(d: SimNode): string {
+    if (!d.id.startsWith('@')) return '';
+    const slash = d.id.indexOf('/');
+    return slash > 1 ? d.id.substring(1, slash) : '';
+  }
+
+  /** Project group key: local nodes (including @<local-vault>/… identity
+      aliases) form one workspace group; every other @vault-id is its own. */
+  private nodeProject(d: SimNode): string {
+    const vault = this.nodeVault(d);
+    if (vault === '' || vault === this.localVaultId) {
+      return this.localVaultId ? `local (${this.localVaultId})` : 'local';
+    }
+    return vault;
+  }
+
+  /** Extract the folder prefix from a node ID (e.g. "packages/node" →
+      "packages"). Vault-qualified IDs ("@pb-vault/src/calc") group by the
+      genuine directory, qualified as "pb-vault › src" so same-named folders
+      from different vaults never collide. */
+  private nodeFolder(d: SimNode): string {
+    const vault = this.nodeVault(d);
+    const path = vault ? d.id.substring(vault.length + 2) : d.id;
+    const slash = path.indexOf('/');
+    const folder = slash > 0 ? path.substring(0, slash) : '_root';
+    return vault ? `${vault} › ${folder}` : folder;
+  }
+
+  /** Group key for the hull-clustered modes (folder and project). */
+  private clusterKey(d: SimNode): string {
+    return this.groupBy === 'project' ? this.nodeProject(d) : this.nodeFolder(d);
+  }
+
+  /** Render topographic contour hulls around folder/project groups. */
   private renderFolderHulls(): void {
-    if (this.groupBy !== 'folder') {
+    if (this.groupBy !== 'folder' && this.groupBy !== 'project') {
       this.folderHullGroup.selectAll('*').remove();
       return;
     }
 
-    /* Group visible nodes by folder */
+    /* Group visible nodes by cluster key (folder or project) */
     const folderNodes = new Map<string, SimNode[]>();
     for (const n of this.nodes) {
       if (!this.isNodeVisible(n) || n.x == null || n.y == null) continue;
-      const folder = this.nodeFolder(n);
+      const folder = this.clusterKey(n);
       let arr = folderNodes.get(folder);
       if (!arr) { arr = []; folderNodes.set(folder, arr); }
       arr.push(n);
@@ -1263,7 +1303,7 @@ export class GraphView {
   }
 
   /** Change the grouping mode and reheat the simulation. */
-  setGroupBy(mode: 'none' | 'type' | 'namespace' | 'tag' | 'folder'): void {
+  setGroupBy(mode: GroupMode): void {
     this.groupBy = mode;
     const { width, height } = this.dimensions();
     this.applyGroupForces(width, height);

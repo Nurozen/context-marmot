@@ -37,6 +37,10 @@ type ClientNode struct {
 	Tags      []string      `json:"tags"`
 	Edges     []ClientEdge  `json:"edges"`
 	EdgeCount int           `json:"edge_count"`
+	// Score is the semantic-similarity score of a search hit (higher is more
+	// relevant). Populated only by client.search / client.query results; zero
+	// for nodes fetched any other way.
+	Score float64 `json:"score,omitempty"`
 }
 
 // ClientSource is the JS-friendly projection of a node's source reference.
@@ -437,7 +441,9 @@ func searchEntryNodes(ctx context.Context, engine *mcpserver.Engine, query strin
 	out := make([]ClientNode, 0, len(results))
 	for _, r := range results {
 		if n, ok := g.GetNode(r.NodeID); ok {
-			out = append(out, toClientNode(g, n))
+			cn := toClientNode(g, n)
+			cn.Score = r.Score
+			out = append(out, cn)
 		}
 	}
 	return out

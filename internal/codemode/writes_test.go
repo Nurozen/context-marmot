@@ -92,7 +92,10 @@ func TestExecute_Writes_MutationCap(t *testing.T) {
 		UndoStack: curator.NewUndoStack(),
 	}
 
+	// allowBulk() lifts the bulk-mutation guard (this is an explicitly
+	// bulk spam run) — the hard per-turn cap must still throw at 50.
 	r := ex.ExecuteWithWrites(context.Background(), `
+        client.allowBulk();
         const targets = client.listByType("bulktype").map(n => n.id);
         let applied = 0, threw = false;
         try {

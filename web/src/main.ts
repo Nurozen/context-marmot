@@ -7,6 +7,7 @@ import {
   refreshWarrenState,
 } from './api';
 import { GraphView } from './graph-view';
+import type { GroupMode } from './graph-view';
 import { renderLegend } from './legend';
 import { DetailPanel } from './detail-panel';
 import { Filters } from './filters';
@@ -16,7 +17,7 @@ import { IssuesPanel } from './issues';
 import { Curator } from './curator';
 import { WarrenPanel } from './warren-panel';
 import { showToast } from './toast';
-import type { GraphResponse, WorkspaceWarren } from './types';
+import type { APIEdge, APINode, GraphResponse, WorkspaceWarren } from './types';
 
 let currentNamespace = 'default';
 let currentData: GraphResponse | null = null;
@@ -60,7 +61,10 @@ async function init(): Promise<void> {
     (nodeId: string) => {
       highlightNode(nodeId);
     },
-    () => (currentNamespace === '_all' ? undefined : currentNamespace),
+    () =>
+      currentNamespace === '_all' || currentNamespace === '_warrens'
+        ? undefined
+        : currentNamespace,
   );
 
   /* ── Issues panel ────────────────────────────────────────────── */
@@ -147,7 +151,7 @@ async function init(): Promise<void> {
   /* ── Group-by selector ────────────────────────────────────────── */
   const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
   groupBySelect.addEventListener('change', () => {
-    graphView?.setGroupBy(groupBySelect.value as 'none' | 'type' | 'namespace' | 'tag' | 'folder');
+    graphView?.setGroupBy(groupBySelect.value as GroupMode);
   });
 
   /* ── Superseded toggle reloads graph ──────────────────────────── */
@@ -175,6 +179,7 @@ async function init(): Promise<void> {
       select.value = currentNamespace;
     }
     const warrenData = await fetchWarrens();
+    graphView?.setLocalVaultId(warrenData.local_vault_id ?? '');
     const warrenEntries = Object.entries(warrenData.warrens ?? {}).sort(([a], [b]) =>
       a.localeCompare(b),
     );
@@ -189,6 +194,13 @@ async function init(): Promise<void> {
       opt.value = `_warren/${warrenId}`;
       opt.textContent = warrenOptionLabel(warrenId, warren);
       select.appendChild(opt);
+    }
+    if (warrenEntries.length > 0) {
+      // Aggregate view: local graph + every active warren project.
+      const allWarrensOpt = document.createElement('option');
+      allWarrensOpt.value = '_warrens';
+      allWarrensOpt.textContent = allWarrensOptionLabel(warrenData.warrens ?? {});
+      select.appendChild(allWarrensOpt);
     }
   } catch {
     // API not available yet -- add a default option
@@ -293,6 +305,8 @@ async function loadGraph(): Promise<void> {
   try {
     if (currentNamespace === '_all') {
       currentData = await fetchGraphAll(includeSuperseded);
+    } else if (currentNamespace === '_warrens') {
+      currentData = await loadAllWarrensGraph(includeSuperseded);
     } else if (currentNamespace.startsWith('_warren/')) {
       const warrenId = currentNamespace.slice('_warren/'.length);
       currentData = await fetchWarrenGraph(warrenId);
@@ -332,10 +346,17 @@ async function loadGraph(): Promise<void> {
     /* Render graph (update() auto-sets groupBy='namespace' for multi-ns data) */
     graphView?.update(currentData);
 
-    /* Sync the group-by dropdown UI for the all-namespaces view */
+    /* Sync the group-by dropdown UI for the aggregate views */
     if (currentNamespace === '_all' || currentNamespace.startsWith('_warren/')) {
       const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
       groupBySelect.value = 'namespace';
+    } else if (currentNamespace === '_warrens') {
+      /* The all-warrens aggregate clusters by owning vault: namespaces are
+         near-uniform across projects, so project grouping is the readable
+         default (update() auto-picks namespace for multi-ns data). */
+      const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
+      groupBySelect.value = 'project';
+      graphView?.setGroupBy('project');
     }
 
     /* Update curator with fresh graph data */
@@ -353,6 +374,103 @@ async function loadGraph(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/*  All-warrens aggregate view                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Builds the "_warrens" aggregate: the local graph (all namespaces) plus
+ * every active warren project across all warrens. Each warren loads
+ * independently — a failed or skipped warren surfaces as an error toast
+ * (reusing the per-warren skip mechanism) and never blocks the view.
+ *
+ * Identity nodes (@<local-vault>/…) are folded back onto their unqualified
+ * live-vault counterparts so the workspace never renders twice; the same
+ * dedup keeps a vault mounted through several warrens to a single island.
+ */
+async function loadAllWarrensGraph(includeSuperseded: boolean): Promise<GraphResponse> {
+  const warrenData = await fetchWarrens();
+  const localVault = warrenData.local_vault_id ?? '';
+  const warrenIds = Object.keys(warrenData.warrens ?? {}).sort();
+  const local = await fetchGraphAll(includeSuperseded);
+
+  const normalizeId = (id: string): string =>
+    localVault !== '' && id.startsWith(`@${localVault}/`)
+      ? id.slice(localVault.length + 2)
+      : id;
+
+  const nodeIds = new Set<string>();
+  const edgeKeys = new Set<string>();
+  const merged: GraphResponse = {
+    namespace: '_warrens',
+    nodes: [],
+    edges: [],
+    node_count: 0,
+    edge_count: 0,
+    heat_pairs: local.heat_pairs,
+    namespaces: [],
+  };
+  const nsSet = new Set<string>(local.namespaces ?? local.nodes.map((n) => n.namespace));
+
+  const pushNode = (n: APINode): void => {
+    if (nodeIds.has(n.id)) return;
+    nodeIds.add(n.id);
+    merged.nodes.push(n);
+  };
+  const pushEdge = (e: APIEdge): void => {
+    const key = `${e.source} ${e.target} ${e.relation}`;
+    if (edgeKeys.has(key)) return;
+    edgeKeys.add(key);
+    merged.edges.push(e);
+  };
+
+  local.nodes.forEach(pushNode);
+  local.edges.forEach(pushEdge);
+
+  const results = await Promise.allSettled(warrenIds.map((id) => fetchWarrenGraph(id)));
+  results.forEach((res, i) => {
+    const warrenId = warrenIds[i];
+    if (res.status === 'rejected') {
+      const detail =
+        res.reason instanceof Error ? res.reason.message : String(res.reason);
+      showToast(`All warrens: failed to load warren "${warrenId}" — ${detail}`, 'error');
+      return;
+    }
+    const g = res.value;
+    // Same skip surfacing as the single-warren view: panel tooltips + toast.
+    warrenPanel?.setSkippedReasons(warrenId, g.skipped_reasons ?? {});
+    const skipped = g.skipped ?? [];
+    if (skipped.length > 0) {
+      const reasons = g.skipped_reasons ?? {};
+      const detail = skipped.map((p) => `${p}: ${reasons[p] ?? 'skipped'}`).join('; ');
+      showToast(
+        `Warren "${warrenId}": ${skipped.length} project(s) skipped from graph — ${detail}`,
+        'error',
+      );
+    }
+    for (const n of g.nodes) {
+      pushNode({
+        ...n,
+        id: normalizeId(n.id),
+        edges: (n.edges ?? []).map((e) => ({
+          ...e,
+          source: normalizeId(e.source),
+          target: normalizeId(e.target),
+        })),
+      });
+    }
+    for (const e of g.edges) {
+      pushEdge({ ...e, source: normalizeId(e.source), target: normalizeId(e.target) });
+    }
+    for (const ns of g.namespaces ?? []) nsSet.add(ns);
+  });
+
+  merged.node_count = merged.nodes.length;
+  merged.edge_count = merged.edges.length;
+  merged.namespaces = [...nsSet].sort();
+  return merged;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Warren selector labels                                             */
 /* ------------------------------------------------------------------ */
 
@@ -364,6 +482,15 @@ function warrenOptionLabel(warrenId: string, warren: WorkspaceWarren): string {
   if (identified > 0) label += `, ${identified} identity`;
   label += ')';
   return label;
+}
+
+/** Builds the "All warrens" aggregate option label with the total active count. */
+function allWarrensOptionLabel(warrens: Record<string, WorkspaceWarren>): string {
+  const totalActive = Object.values(warrens).reduce(
+    (s, w) => s + (w.active_projects?.length ?? 0),
+    0,
+  );
+  return `All warrens (${totalActive} active)`;
 }
 
 /**
@@ -380,6 +507,10 @@ async function refreshWarrenSelectorLabels(): Promise<void> {
     return; // Selector labels are best-effort; the panel surfaces failures.
   }
   for (const opt of Array.from(select.options)) {
+    if (opt.value === '_warrens') {
+      opt.textContent = allWarrensOptionLabel(warrens);
+      continue;
+    }
     if (!opt.value.startsWith('_warren/')) continue;
     const warrenId = opt.value.slice('_warren/'.length);
     const warren = warrens[warrenId];
@@ -389,7 +520,9 @@ async function refreshWarrenSelectorLabels(): Promise<void> {
 
 /** Namespace filter for the issues panel: aggregate views get no filter. */
 function issuesNamespaceFilter(): string | undefined {
-  return currentNamespace === '_all' || currentNamespace.startsWith('_warren/')
+  return currentNamespace === '_all' ||
+    currentNamespace === '_warrens' ||
+    currentNamespace.startsWith('_warren/')
     ? undefined
     : currentNamespace;
 }

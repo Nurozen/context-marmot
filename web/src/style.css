@@ -1637,6 +1637,38 @@ textarea:focus-visible {
   padding-right: 10px;
 }
 
+/* ── Issues panel sections (curator suggestions vs /verify integrity) ── */
+.issues-section-header {
+  margin: 14px 0 6px;
+  font: 11px/1.4 var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  padding-bottom: 4px;
+}
+
+.issues-section-empty {
+  padding: 6px 2px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Integrity cards: read-only diagnostics from /verify — dashed accent to
+   distinguish them from actionable curator suggestion cards. */
+.issue-card.integrity-card {
+  border-left-style: dashed;
+}
+
+.integrity-kind {
+  font: 10px/1.4 var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin-bottom: 2px;
+}
+
 /* ── Curator Badge ───────────────────────────────────────────── */
 .curator-badge {
   display: inline-flex;

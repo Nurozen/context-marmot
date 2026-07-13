@@ -78,6 +78,8 @@ export interface WorkspaceWarren {
 
 export interface WarrensResponse {
   warrens: Record<string, WorkspaceWarren>;
+  /** This workspace's configured vault_id (absent when the vault has none). */
+  local_vault_id?: string;
 }
 
 /** One warren project's workspace state (GET /api/warren/{id}/status). */

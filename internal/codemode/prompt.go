@@ -25,7 +25,10 @@ client.query(input: { query: string, depth?: number, budget?: number }):
     // Semantic + lexical search. 'nodes' is up to 10 entry-point matches.
 
 client.search(query: string): ClientNode[]
-    // Lighter version of query — returns up to 20 matching nodes.
+    // Lighter version of query — returns up to 20 matching nodes, best first.
+    // Each hit carries a 'score' (semantic similarity; higher = more
+    // relevant). Search is recall-oriented: low-score / unrelated nodes CAN
+    // appear, so filter hits by score and content before acting on them.
 
 client.getNode(idOrNamespace: string, idTail?: string): ClientNode
     // Fetch one node. Either client.getNode("auth/login") or
@@ -89,6 +92,14 @@ client.merge(into: string, from: string): WriteStatus
 client.delete(idOrIds: string | string[]): WriteStatus
     // Soft-delete node(s).
 
+client.allowBulk(): void
+    // Lifts the bulk-mutation guard for THIS program only. A single program
+    // may normally mutate at most max(5, 50% of the graph's nodes) distinct
+    // nodes; exceeding that throws a "bulk mutation guard" error. Call this
+    // FIRST — before any write — and ONLY when the user's request is
+    // explicitly global ("tag ALL nodes", "delete every node"). Never use it
+    // to force through a topical request that merely over-matched.
+
 client.verify(): { applied: boolean, message: string }
     // Read-only health check. Does NOT count against the mutation cap.
 
@@ -108,6 +119,8 @@ interface ClientNode {
   tags: string[];
   edges: { target: string, relation: string }[];
   edge_count: number;
+  score?: number;             // search/query hits only: semantic similarity,
+                              // higher = more relevant to the query
 }
 
 interface WriteStatus {
@@ -189,6 +202,26 @@ func BuildPhase1Prompt(stats curator.GraphStats, selectedNodes []curator.APINode
 	sb.WriteString("- \"which orphans would I delete?\" → READ (list, don't delete).\n")
 	sb.WriteString("- \"what would happen if I merged A into B?\" → READ (simulate via getNode/getNeighbors, don't merge).\n")
 	sb.WriteString("Only call write methods when the user issues an imperative: \"tag\", \"delete\", \"merge\", \"link\", \"rename to\", etc.\n\n")
+
+	sb.WriteString("## Mutation safety — relevance filtering is MANDATORY\n")
+	sb.WriteString("`client.search()` is recall-oriented: it can return loosely related or entirely ")
+	sb.WriteString("unrelated nodes (in small graphs it may return the whole graph). NEVER pipe raw ")
+	sb.WriteString("search results straight into a write method. Before ANY mutation driven by search ")
+	sb.WriteString("results you MUST:\n")
+	sb.WriteString("1. Filter the hits by relevance: keep a node ONLY if its `score` is high relative ")
+	sb.WriteString("to the other hits (drop the low-score tail; when scores are flat or missing, treat ")
+	sb.WriteString("them as unreliable) AND its `id`, `summary`, `tags`, or `context` actually mentions ")
+	sb.WriteString("the user's topic keywords.\n")
+	sb.WriteString("2. Guard the empty case: if NO hits survive the filter, DO NOT mutate anything — ")
+	sb.WriteString("return something like `{ matched: 0, candidates: hits.map(n => n.id) }` so you can ")
+	sb.WriteString("tell the user nothing matched instead of mutating unrelated nodes.\n")
+	sb.WriteString("3. Respect the bulk mutation guard: one program may mutate at most ")
+	sb.WriteString("max(5, 50% of the graph's nodes) distinct nodes. Exceeding it throws a ")
+	sb.WriteString("\"bulk mutation guard\" error and the write is rejected. Call `client.allowBulk()` ")
+	sb.WriteString("first ONLY when the user's request is explicitly global (\"tag ALL nodes\", ")
+	sb.WriteString("\"delete every node in the graph\"). A topical request (\"tag the auth-related ")
+	sb.WriteString("nodes\") is NEVER bulk — if it trips the guard, your filter is too loose.\n\n")
+
 	sb.WriteString("Other rules:\n")
 	sb.WriteString("- Do NOT ask the user for clarification before running a read. Make a reasonable guess and run it.\n")
 	sb.WriteString("- Answer directly without code ONLY when the user is asking a how-to question about ")
@@ -254,6 +287,18 @@ func BuildPhase1Prompt(stats curator.GraphStats, selectedNodes []curator.APINode
 	sb.WriteString("```js\n")
 	sb.WriteString("// \"Merge core/auth-old into core/auth\"\n")
 	sb.WriteString("return client.merge(\"core/auth\", \"core/auth-old\");\n")
+	sb.WriteString("```\n\n")
+	sb.WriteString("```js\n")
+	sb.WriteString("// \"Tag the auth-related nodes as security\" — topical ask: filter search\n")
+	sb.WriteString("// hits for relevance and guard the empty case BEFORE mutating.\n")
+	sb.WriteString("const keywords = [\"auth\", \"login\", \"session\", \"token\"];\n")
+	sb.WriteString("const hits = client.search(\"auth authentication login session token\");\n")
+	sb.WriteString("const top = hits.length ? hits[0].score : 0;\n")
+	sb.WriteString("const relevant = hits.filter(n =>\n")
+	sb.WriteString("  (!top || n.score >= top * 0.8) &&\n")
+	sb.WriteString("  keywords.some(k => (n.id + \" \" + n.summary + \" \" + n.tags.join(\" \")).toLowerCase().includes(k)));\n")
+	sb.WriteString("if (!relevant.length) return { matched: 0, candidates: hits.map(n => n.id) };\n")
+	sb.WriteString("return client.tag(relevant.map(n => n.id), \"security\");\n")
 	sb.WriteString("```\n\n")
 
 	sb.WriteString("## Graph context\n")

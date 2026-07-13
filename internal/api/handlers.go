@@ -886,7 +886,10 @@ func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
 			IdentifiedProjects: identified[id],
 		}
 	}
-	writeJSON(w, http.StatusOK, WarrensResponse{Warrens: warrens})
+	writeJSON(w, http.StatusOK, WarrensResponse{
+		Warrens:      warrens,
+		LocalVaultID: s.engine.LocalVaultID,
+	})
 }
 
 // handleWarrenStatus returns mounted/editable status for a single Warren.
@@ -1580,5 +1583,49 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 			nodeCount = len(g.AllActiveNodes())
 		}
 	}
-	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions, NodeCount: nodeCount})
+
+	integrity, integrityNodes := s.collectIntegrityIssues(ns)
+
+	writeJSON(w, http.StatusOK, SuggestionsResponse{
+		Suggestions:        suggestions,
+		NodeCount:          nodeCount,
+		IntegrityIssues:    integrity,
+		IntegrityNodeCount: integrityNodes,
+	})
+}
+
+// collectIntegrityIssues runs the same scoped integrity checks as the /verify
+// slash command (superseded nodes included) so the Issues tab shows exactly
+// the issues the /verify chat message counts. A non-empty ns restricts the
+// checks to that namespace's nodes.
+func (s *Server) collectIntegrityIssues(ns string) ([]IntegrityIssueAPI, int) {
+	var selected []string
+	if ns != "" {
+		g := s.engine.GetGraph()
+		if g == nil {
+			return []IntegrityIssueAPI{}, 0
+		}
+		for _, n := range g.AllNodes() {
+			if matchNamespace(n.Namespace, ns) {
+				selected = append(selected, n.ID)
+			}
+		}
+		// An empty selection would make CollectIntegrityIssues cover the
+		// whole graph — an unknown namespace must report nothing instead.
+		if len(selected) == 0 {
+			return []IntegrityIssueAPI{}, 0
+		}
+	}
+
+	issues, nodes := curator.CollectIntegrityIssues(s.engine, selected)
+	out := make([]IntegrityIssueAPI, 0, len(issues))
+	for _, issue := range issues {
+		out = append(out, IntegrityIssueAPI{
+			NodeID:   issue.NodeID,
+			Type:     string(issue.IssueType),
+			Message:  issue.Message,
+			Severity: string(issue.Severity),
+		})
+	}
+	return out, len(nodes)
 }

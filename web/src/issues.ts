@@ -49,15 +49,35 @@ const NODE_TYPES = [
   'summary',
 ];
 
+/** Scoped integrity-check result from the /verify pipeline, surfaced by
+ *  GET /api/curator/suggestions as `integrity_issues` so the Issues tab
+ *  shows the same set the /verify chat message counts. */
+export interface IntegrityIssue {
+  node_id: string;
+  type: 'dangling_edge' | 'hash_mismatch' | 'structural_cycle' | 'missing_source' | string;
+  message: string;
+  severity: 'error' | 'warning' | 'info';
+}
+
+/* Icon map per integrity issue type */
+const INTEGRITY_ICONS: Record<string, string> = {
+  dangling_edge: '⛓',    // chains
+  hash_mismatch: '≠',    // not equal
+  structural_cycle: '↻', // clockwise open-circle arrow
+  missing_source: '∅',   // empty set
+};
+
 export type CommandCallback = (cmd: string) => Promise<void>;
 
 export class IssuesPanel {
   private container: HTMLElement;
   private suggestions: Suggestion[] = [];
+  private integrityIssues: IntegrityIssue[] = [];
   private dismissed: Set<string> = new Set();
   private badgeEl: HTMLElement;
   private onExecuteCommand: CommandCallback;
   private nodeCount = 0;
+  private integrityNodeCount = 0;
 
   constructor(
     container: HTMLElement,
@@ -81,16 +101,20 @@ export class IssuesPanel {
       if (!res.ok) {
         console.warn('[issues] suggestions endpoint returned', res.status);
         this.suggestions = [];
+        this.integrityIssues = [];
         this.updateBadge();
         this.render();
         return;
       }
       const data = await res.json();
       this.suggestions = (data.suggestions ?? []) as Suggestion[];
+      this.integrityIssues = (data.integrity_issues ?? []) as IntegrityIssue[];
       this.nodeCount = data.node_count ?? 0;
+      this.integrityNodeCount = data.integrity_node_count ?? 0;
     } catch (err) {
       console.warn('[issues] failed to load suggestions:', err);
       this.suggestions = [];
+      this.integrityIssues = [];
     }
 
     this.dismissed.clear();
@@ -102,8 +126,13 @@ export class IssuesPanel {
     return this.activeSuggestions().length;
   }
 
+  getIntegrityCount(): number {
+    return this.integrityIssues.length;
+  }
+
   clear(): void {
     this.suggestions = [];
+    this.integrityIssues = [];
     this.dismissed.clear();
     this.updateBadge();
     this.container.innerHTML = '';
@@ -116,9 +145,14 @@ export class IssuesPanel {
   }
 
   private updateBadge(): void {
-    const count = this.getCount();
-    this.badgeEl.textContent = String(count);
-    if (count === 0) {
+    const suggestions = this.getCount();
+    const integrity = this.getIntegrityCount();
+    const total = suggestions + integrity;
+    /* The badge sums both kinds; hover shows the breakdown so "2 curator
+       suggestions + 8 integrity issues" is never mistaken for one set. */
+    this.badgeEl.textContent = String(total);
+    this.badgeEl.title = `${suggestions} curator suggestion${suggestions !== 1 ? 's' : ''} + ${integrity} integrity issue${integrity !== 1 ? 's' : ''}`;
+    if (total === 0) {
       this.badgeEl.hidden = true;
     } else {
       this.badgeEl.hidden = false;
@@ -134,21 +168,119 @@ export class IssuesPanel {
     this.container.appendChild(this.renderHealthSummary(this.nodeCount));
 
     const active = this.activeSuggestions();
-    if (active.length === 0) {
+    const integrity = this.integrityIssues;
+
+    if (active.length === 0 && integrity.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'issues-empty';
       empty.textContent = 'No issues found — your graph looks healthy.';
       this.container.appendChild(empty);
-      return;
+      // Fall through: the sections still render their explicit clean
+      // states so /verify results always have a visible home in this tab.
     }
 
-    for (const s of active) {
-      this.container.appendChild(this.renderCard(s));
+    // ── Curator suggestions ─────────────────────────────────────
+    this.container.appendChild(
+      this.sectionHeader(
+        `Curator suggestions (${active.length})`,
+        'issues-section-suggestions',
+      ),
+    );
+    if (active.length === 0) {
+      this.container.appendChild(
+        this.sectionEmptyNote('No curator suggestions.'),
+      );
+    } else {
+      for (const s of active) {
+        this.container.appendChild(this.renderCard(s));
+      }
     }
+
+    // ── Integrity issues (the set /verify counts) ───────────────
+    const scope =
+      this.integrityNodeCount > 0
+        ? ` across ${this.integrityNodeCount} node${this.integrityNodeCount !== 1 ? 's' : ''}`
+        : '';
+    this.container.appendChild(
+      this.sectionHeader(
+        `Integrity issues (${integrity.length})${scope}`,
+        'issues-section-integrity',
+      ),
+    );
+    if (integrity.length === 0) {
+      this.container.appendChild(
+        this.sectionEmptyNote('No integrity issues — /verify is clean.'),
+      );
+    } else {
+      for (const issue of integrity) {
+        this.container.appendChild(this.renderIntegrityCard(issue));
+      }
+    }
+  }
+
+  private sectionHeader(label: string, extraClass: string): HTMLElement {
+    const h = document.createElement('div');
+    h.className = `issues-section-header ${extraClass}`;
+    h.textContent = label;
+    return h;
+  }
+
+  private sectionEmptyNote(text: string): HTMLElement {
+    const note = document.createElement('div');
+    note.className = 'issues-section-empty';
+    note.textContent = text;
+    return note;
+  }
+
+  /** Integrity issues are diagnostics from the /verify pipeline (dangling
+   *  edges, hash mismatches, cycles, missing sources) — rendered read-only
+   *  with distinct styling, no fix buttons. */
+  private renderIntegrityCard(issue: IntegrityIssue): HTMLElement {
+    const card = document.createElement('div');
+    card.className = `issue-card integrity-card issue-${issue.severity}`;
+
+    const icon = document.createElement('div');
+    icon.className = 'issue-icon';
+    icon.textContent = INTEGRITY_ICONS[issue.type] ?? '⚠';
+    icon.title = issue.type;
+    card.appendChild(icon);
+
+    const body = document.createElement('div');
+    body.className = 'issue-body';
+
+    const kind = document.createElement('div');
+    kind.className = 'integrity-kind';
+    kind.textContent = `${issue.type.replace(/_/g, ' ')} · ${issue.severity}`;
+    body.appendChild(kind);
+
+    const msg = document.createElement('div');
+    msg.className = 'issue-message';
+    msg.textContent = issue.message;
+    body.appendChild(msg);
+
+    if (issue.node_id) {
+      const pills = document.createElement('div');
+      pills.className = 'issue-nodes';
+      const pill = document.createElement('span');
+      pill.className = 'node-ref';
+      pill.textContent = shortId(issue.node_id);
+      pill.title = issue.node_id;
+      pill.addEventListener('click', () => {
+        document.dispatchEvent(
+          new CustomEvent('curator-highlight-node', { detail: issue.node_id }),
+        );
+      });
+      pills.appendChild(pill);
+      body.appendChild(pills);
+    }
+
+    card.appendChild(body);
+    return card;
   }
 
   private renderHealthSummary(nodeCount: number): HTMLElement {
     const issueCount = this.getCount();
+    const integrityCount = this.getIntegrityCount();
     const pct =
       nodeCount > 0
         ? Math.round(((nodeCount - issueCount) / nodeCount) * 100)
@@ -157,13 +289,16 @@ export class IssuesPanel {
     const wrapper = document.createElement('div');
     wrapper.className = 'issues-health';
 
-    // Stats line
+    // Stats line \u2014 suggestions and integrity issues are separate sets, so
+    // both counts are spelled out instead of a single ambiguous total.
     const statsLine = document.createElement('div');
     statsLine.className = 'issues-health-stats';
     statsLine.innerHTML = `
       <span class="health-stat">${nodeCount} node${nodeCount !== 1 ? 's' : ''}</span>
       <span class="health-divider">\u00B7</span>
-      <span class="health-stat issues-count">${issueCount} issue${issueCount !== 1 ? 's' : ''}</span>
+      <span class="health-stat issues-count">${issueCount} suggestion${issueCount !== 1 ? 's' : ''}</span>
+      <span class="health-divider">\u00B7</span>
+      <span class="health-stat integrity-count">${integrityCount} integrity</span>
     `;
     wrapper.appendChild(statsLine);
 

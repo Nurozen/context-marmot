@@ -428,8 +428,9 @@ export class Curator {
 
     /* Still typing the command name */
     if (parts.length <= 1) {
+      /* No slice cap here: the registry is the menu. A previous cap of 8
+         silently dropped /verify (the 9th command) from the bare "/" menu. */
       return SLASH_COMMANDS.filter((c) => c.name.startsWith(cmdPart.toLowerCase()))
-        .slice(0, 8)
         .map((c) => ({
           label: `/${c.name}`,
           hint: c.hint,

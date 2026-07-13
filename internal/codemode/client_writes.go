@@ -40,7 +40,7 @@ func registerWrites(rt *goja.Runtime, client *goja.Object, scope *runScope) erro
 				panic(rt.NewGoError(fmt.Errorf("client.%s: vault is read-only; writes are disabled", name)))
 			}
 		}
-		for _, name := range []string{"tag", "untag", "setType", "link", "unlink", "merge", "delete"} {
+		for _, name := range []string{"tag", "untag", "setType", "link", "unlink", "merge", "delete", "allowBulk"} {
 			if err := client.Set(name, throwReadOnly(name)); err != nil {
 				return err
 			}
@@ -128,6 +128,15 @@ func registerWrites(rt *goja.Runtime, client *goja.Object, scope *runScope) erro
 		return rt.ToValue(scope.runWrite("delete", ids, func(cmd *curator.SlashCommand) {}))
 	})
 
+	// allowBulk() — per-execution opt-in that lifts the bulk-mutation guard.
+	// The phase-1 prompt only grants this when the user's request was
+	// explicitly global ("tag ALL nodes"), so a topical ask that happens to
+	// over-match search results still trips the guard.
+	mustSet("allowBulk", func(call goja.FunctionCall) goja.Value {
+		scope.allowBulk = true
+		return goja.Undefined()
+	})
+
 	// verify() — read-only diagnostic. Doesn't mutate but goes through the
 	// command path for consistency. Doesn't count against the mutation cap.
 	mustSet("verify", func(call goja.FunctionCall) goja.Value {
@@ -162,6 +171,16 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 	cmd := &curator.SlashCommand{Name: op}
 	configure(cmd)
 	affectedIDs = s.canonicalizeCommandIDs(op, affectedIDs, cmd)
+
+	// Bulk mutation guard: a single generated program may not mutate more
+	// than max(5, 50% of the graph's active nodes) distinct nodes unless it
+	// explicitly opted in via client.allowBulk(). This is the server-side
+	// safety net for over-broad NL curation ("tag the auth-related nodes"
+	// tagging the whole graph because search returned everything).
+	if err := s.checkBulkGuard(op, affectedIDs); err != nil {
+		s.recordFailure(op, affectedIDs, err.Error())
+		panic(s.rt.NewGoError(fmt.Errorf("client.%s: %w", op, err)))
+	}
 
 	// Snapshot every node the mutation might modify. For /merge, the
 	// underlying handler rewrites edges on third-party nodes that point at
@@ -241,12 +260,71 @@ func (s *runScope) runWrite(op string, affectedIDs []string, configure func(*cur
 		Success: true,
 	}
 	s.mutations = append(s.mutations, rec)
+	s.trackMutated(rec.Nodes)
 
 	return map[string]any{
 		"applied":  true,
 		"message":  result.Message,
 		"affected": rec.Nodes,
 		"undo_id":  undoID,
+	}
+}
+
+// checkBulkGuard rejects a write when the distinct set of nodes mutated by
+// this execution — including the nodes the pending write would touch — would
+// exceed max(5, 50% of the graph's active nodes). client.allowBulk() lifts
+// the guard for the current execution; the phase-1 prompt only grants it for
+// explicitly global requests ("tag ALL nodes").
+func (s *runScope) checkBulkGuard(op string, affectedIDs []string) error {
+	if s.allowBulk {
+		return nil
+	}
+	limit := s.bulkMutationLimit()
+	if limit <= 0 {
+		return nil
+	}
+	prospective := len(s.mutatedIDs)
+	seen := make(map[string]struct{}, len(affectedIDs))
+	for _, id := range affectedIDs {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if _, already := s.mutatedIDs[id]; !already {
+			prospective++
+		}
+	}
+	if prospective <= limit {
+		return nil
+	}
+	return fmt.Errorf("bulk mutation guard: this program would modify %d distinct node(s), more than the limit of %d (max of 5 and 50%% of the graph's nodes); no %s was applied for this call — narrow the selection to the nodes that are actually relevant, or call client.allowBulk() first ONLY if the user explicitly asked to modify ALL nodes", prospective, limit, op)
+}
+
+// bulkMutationLimit returns max(5, half the graph's active node count), or 0
+// when no graph is available (guard disabled).
+func (s *runScope) bulkMutationLimit() int {
+	if s.engine == nil {
+		return 0
+	}
+	g := s.engine.GetGraph()
+	if g == nil {
+		return 0
+	}
+	limit := len(g.AllActiveNodes()) / 2
+	if limit < 5 {
+		limit = 5
+	}
+	return limit
+}
+
+// trackMutated records the distinct node IDs a successful write touched so
+// the bulk-mutation guard can count them on subsequent calls.
+func (s *runScope) trackMutated(ids []string) {
+	if s.mutatedIDs == nil {
+		s.mutatedIDs = make(map[string]struct{}, len(ids))
+	}
+	for _, id := range ids {
+		s.mutatedIDs[id] = struct{}{}
 	}
 }
 

@@ -12,8 +12,8 @@ export default defineConfig({
   // quarantines without blocking the vault specs (and vice versa). Both
   // projects share the single hermetic fixture server below.
   projects: [
-    { name: 'vault', testMatch: /(ui|regressions)\.spec\.ts$/ },
-    { name: 'warren', testMatch: /warren\.spec\.ts$/ },
+    { name: 'vault', testMatch: /(ui|regressions|issues)\.spec\.ts$/ },
+    { name: 'warren', testMatch: /(warren|grouping)\.spec\.ts$/ },
   ],
   webServer: {
     command: 'bash e2e/serve.sh 3299',

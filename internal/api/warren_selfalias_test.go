@@ -284,6 +284,27 @@ func TestWarrensResponseIdentifiedProjects(t *testing.T) {
 	}
 }
 
+// TestWarrensResponseLocalVaultID: GET /api/warrens carries the workspace's
+// configured vault_id so the UI can label the local project group (e.g.
+// "local (ws-main)") and fold @<local-vault>/… identity nodes back onto
+// their live local counterparts in the all-warrens aggregate view.
+func TestWarrensResponseLocalVaultID(t *testing.T) {
+	server, engine := newTestServer(t)
+	setupSelfAliasWarren(t, engine)
+
+	rec := doRequest(t, server.Handler(), "GET", "/api/warrens", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/warrens = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp WarrensResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode warrens response: %v", err)
+	}
+	if resp.LocalVaultID != "local-vault" {
+		t.Fatalf("local_vault_id = %q, want %q", resp.LocalVaultID, "local-vault")
+	}
+}
+
 // TestWarrensResponseEmptyActiveProjectsShape (C8): with zero mounted
 // projects, GET /api/warrens must still emit "active_projects": [] — the
 // key must never vanish via omitempty, so clients don't have to null-check.
