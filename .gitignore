@@ -60,3 +60,8 @@ web/playwright-report/
 
 # Session task-scratch file (see user workflow)
 human.md
+
+# Raw per-folder scan findings are working artifacts, not repo docs
+artifacts/findings/
+artifacts/warren_findings/
+artifacts/warren_identity_findings/
