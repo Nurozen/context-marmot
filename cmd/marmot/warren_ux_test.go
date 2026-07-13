@@ -84,8 +84,9 @@ func TestWarrenMountBareRefusalLeavesStateUnwritten(t *testing.T) {
 	}
 }
 
-// TestBurrowImpliesMaterialize (C2): burrow without --materialize creates
-// the cache; passing the now-inert flag prints a note.
+// TestBurrowImpliesMaterialize (C2): bare burrow creates the cache — burrow
+// always materializes. The retired --materialize compat flag is rejected as
+// unknown.
 func TestBurrowImpliesMaterialize(t *testing.T) {
 	marmotDir, _ := registeredWorkspace(t, "wp", "project-a")
 
@@ -95,15 +96,14 @@ func TestBurrowImpliesMaterialize(t *testing.T) {
 	}
 	cache := filepath.Join(marmotDir, ".marmot-data", "warrens", "wp", "projects", "project-a", ".marmot")
 	if fi, err := os.Stat(cache); err != nil || !fi.IsDir() {
-		t.Fatalf("burrow without --materialize did not create the cache at %s: %v", cache, err)
+		t.Fatalf("bare burrow did not create the cache at %s: %v", cache, err)
 	}
 	if !loadCLIState(t, marmotDir).Warrens["wp"].Materialized {
 		t.Fatal("burrow did not set the Materialized flag")
 	}
 
-	out, code = captureRun([]string{"warren", "burrow", "--dir", marmotDir, "--warren", "wp", "--materialize", "project-a"})
-	if code != 0 || !strings.Contains(out, "--materialize is implied") {
-		t.Fatalf("explicit --materialize = code %d out %q, want implied note", code, out)
+	if code := run([]string{"warren", "burrow", "--dir", marmotDir, "--warren", "wp", "--materialize", "project-a"}); code != 1 {
+		t.Fatalf("retired --materialize flag exit code = %d, want 1 (unknown flag)", code)
 	}
 }
 

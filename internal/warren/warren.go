@@ -1311,7 +1311,7 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 			// checkout, so materializing an editable project would silently
 			// strand its future edits in the cache.
 			if materialized && containsName(entry.EditableProjects, projectID) {
-				return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or mount without --materialize", projectID, warrenID, projectID, warrenID)
+				return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or use 'marmot warren mount' instead of burrow", projectID, warrenID, projectID, warrenID)
 			}
 			// Vault IDs form one flat routing namespace per workspace: a
 			// duplicate would be resolved last-mount-wins at runtime, silently
@@ -1324,7 +1324,7 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 				// without a mount). It can never be editable or materialized
 				// (a cache/copy would be a stale or split-brained shadow).
 				if materialized {
-					return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; a self-alias serves from the live vault and cannot be materialized — mount without --materialize", projectID, warrenID, vaultID)
+					return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; a self-alias serves from the live vault and cannot be materialized — use 'marmot warren mount' instead of burrow", projectID, warrenID, vaultID)
 				}
 				if containsName(entry.EditableProjects, projectID) {
 					return fmt.Errorf("project %q in warren %q is marked editable but has this workspace's own vault ID %q; edit it directly in this workspace — run 'marmot warren edit %s --warren %s --off' first", projectID, warrenID, vaultID, projectID, warrenID)
@@ -1397,7 +1397,7 @@ func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*Wor
 		if editable && entry.Materialized {
 			cached := materializedProjectPath(wsMarmotDir, warrenID, projectID)
 			if dirExists(cached) {
-				return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — drop the burrow first ('marmot warren burrow --drop --warren %s %s') or re-mount without --materialize before enabling edit", projectID, warrenID, warrenID, projectID)
+				return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — drop the burrow first ('marmot warren burrow --drop --warren %s %s') before enabling edit", projectID, warrenID, warrenID, projectID)
 			}
 		}
 		// Edit implies mount: when the project is not yet active this is an
@@ -1983,8 +1983,8 @@ func Materialize(workspaceMarmotDir, warrenID string, project Project, warrenRoo
 	source := filepath.Join(warrenRoot, filepath.FromSlash(project.Path))
 	// Self-alias backstop: a burrow cache of the workspace's own vault would
 	// be a stale shadow that the reload loop must never route. Mount already
-	// refuses --materialize on self-aliases; this guards the CLI's direct
-	// Materialize calls (post-mount loop, refresh --pull).
+	// refuses materialization on self-aliases; this guards the CLI's direct
+	// Materialize calls (post-burrow loop, refresh --pull).
 	if local := sourceVaultID(workspaceMarmotDir); local != "" {
 		vaultID := project.ProjectID
 		if meta, _, err := LoadProjectMetadata(source); err == nil && meta != nil && meta.VaultID != "" {

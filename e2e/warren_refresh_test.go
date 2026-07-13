@@ -44,7 +44,7 @@ func seedWarrenFixture(t *testing.T) string {
 // without any restart.
 func TestWarrenMountWhileOwnerLive(t *testing.T) {
 	proj := seedProject(t)
-	owner := startMCPDaemon(t, proj)
+	owner := startMCP(t, proj)
 
 	// Baseline: the distinctive warren node is not visible yet.
 	baseline := owner.callTool(900, "context_query", map[string]any{

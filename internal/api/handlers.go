@@ -1163,7 +1163,7 @@ func (s *Server) handleWarrenMountChange(w http.ResponseWriter, r *http.Request,
 	}
 	workspaceRoot := filepath.Dir(s.engine.MarmotDir)
 	if mount {
-		_, err = warren.Mount(workspaceRoot, id, projects, false) // never --materialize over HTTP
+		_, err = warren.Mount(workspaceRoot, id, projects, false) // never materialize (burrow) over HTTP
 	} else {
 		_, err = warren.Unmount(workspaceRoot, id, projects)
 	}

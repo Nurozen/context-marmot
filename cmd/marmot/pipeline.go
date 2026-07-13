@@ -384,15 +384,14 @@ func buildEngine(dir string) (*engineResult, error) {
 // can shrink it.
 var ownerWedgeWait = 10 * time.Second
 
-// runServePipeline starts the MCP server on stdio. When daemon mode is
-// enabled (dark launch: MARMOT_DAEMON=1) it runs the single-owner election —
-// the first serve per vault wins the flock and owns the engine; every other
-// serve relays its stdio session to the owner over a unix socket. Otherwise
-// (the default, an explicit opt-out, or Windows where flock does not exist)
-// it serves standalone exactly as before.
+// runServePipeline starts the MCP server on stdio. By default it runs the
+// single-owner daemon election — the first serve per vault wins the flock and
+// owns the engine; every other serve relays its stdio session to the owner
+// over a unix socket. It serves standalone only on an explicit opt-out
+// (--no-daemon or MARMOT_NO_DAEMON=1) or on Windows, where flock does not
+// exist.
 func runServePipeline(dir string, noDaemon bool) error {
-	if os.Getenv("MARMOT_DAEMON") != "1" ||
-		noDaemon || os.Getenv("MARMOT_NO_DAEMON") == "1" || runtime.GOOS == "windows" {
+	if noDaemon || os.Getenv("MARMOT_NO_DAEMON") == "1" || runtime.GOOS == "windows" {
 		return runServeStandalone(dir)
 	}
 
@@ -454,7 +453,7 @@ func runServePipeline(dir string, noDaemon bool) error {
 }
 
 // runServeStandalone starts the MCP server on stdio without daemon election —
-// today's serve behavior, kept bit-identical for the default/opt-out path.
+// the opt-out (--no-daemon/MARMOT_NO_DAEMON=1) and Windows path.
 func runServeStandalone(dir string) error {
 	result, err := buildEngine(dir)
 	if err != nil {

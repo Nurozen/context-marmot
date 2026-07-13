@@ -118,17 +118,12 @@ func warrenUsage() {
 }
 
 func warrenInit(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true, "id": true}, nil)
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "id": true}, nil)
 	fs := flag.NewFlagSet("warren init", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	warrenID := fs.String("id", "", "Warren ID")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	idFromFlag := *warrenID != ""
 	if !idFromFlag && fs.NArg() == 1 {
@@ -213,17 +208,12 @@ func warrenProjectUsage() {
 // project (D4). It is a warren-repo-side verb: it mutates the manifest in
 // the checkout (flocked, version-checked), not workspace state.
 func warrenProjectSetReadonly(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true}, map[string]bool{"off": true})
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true}, map[string]bool{"off": true})
 	fs := flag.NewFlagSet("warren project set-readonly", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	off := fs.Bool("off", false, "clear the read-only policy (consumers may enable edit again)")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 1 {
@@ -244,46 +234,27 @@ func warrenProjectSetReadonly(args []string) int {
 
 func warrenProjectAdd(args []string) int {
 	args = reorderInterspersedFlags(args,
-		map[string]bool{"warren-dir": true, "root": true, "path": true, "vault-id": true, "id": true, "aliases": true, "alias": true},
+		map[string]bool{"warren-dir": true, "path": true, "vault-id": true, "alias": true},
 		map[string]bool{"generate-id": true},
 	)
 	fs := flag.NewFlagSet("warren project add", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	path := fs.String("path", "", "project .marmot path inside the Warren")
 	vaultID := fs.String("vault-id", "", "vault ID (default: project ID)")
-	idCompat := fs.String("id", "", "project ID")
-	aliasesCompat := fs.String("aliases", "", "comma-separated aliases")
 	generateID := fs.Bool("generate-id", false, "generate the project ID from existing metadata or path")
 	var aliases repeatedStringFlag
 	fs.Var(&aliases, "alias", "project alias (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
-	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() > 1 {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren project add <project-id> --path <project-.marmot> [--warren-dir .] [--vault-id <id>] [--alias <name>]...")
 		return 1
 	}
-	warnDeprecatedFlag(*aliasesCompat != "", "aliases", "alias")
-	aliases = append(aliases, splitCSV(*aliasesCompat)...)
 	projectID := ""
 	if fs.NArg() == 1 {
 		projectID = fs.Arg(0)
-	}
-	warnDeprecatedSpelling(*idCompat != "", "id", "the positional <project-id> argument")
-	if *idCompat != "" {
-		// Refuse the ambiguity trap instead of silently reinterpreting the
-		// positional as --path (the old compat behavior).
-		if fs.NArg() == 1 {
-			fmt.Fprintf(os.Stderr, "warren project add: both --id %q and a positional argument %q given; write 'marmot warren project add %s --path %s'\n", *idCompat, fs.Arg(0), *idCompat, fs.Arg(0))
-			return 1
-		}
-		projectID = *idCompat
 	}
 	if *generateID {
 		projectID = ""
@@ -347,16 +318,13 @@ func generatedProjectID(root, projectPath string) string {
 
 func warrenProjectImport(args []string) int {
 	args = reorderInterspersedFlags(args,
-		map[string]bool{"warren-dir": true, "root": true, "path": true, "vault-id": true, "id": true, "aliases": true, "alias": true},
+		map[string]bool{"warren-dir": true, "path": true, "vault-id": true, "alias": true},
 		map[string]bool{"generate-id": true, "include-heat": true, "no-obsidian": true},
 	)
 	fs := flag.NewFlagSet("warren project import", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	path := fs.String("path", "", "destination .marmot path inside the Warren")
 	vaultID := fs.String("vault-id", "", "vault ID (default: source vault_id or project ID)")
-	idCompat := fs.String("id", "", "project ID")
-	aliasesCompat := fs.String("aliases", "", "comma-separated aliases")
 	generateID := fs.Bool("generate-id", false, "generate the project ID from existing metadata or source path")
 	includeHeat := fs.Bool("include-heat", false, "include _heat/ files")
 	noObsidian := fs.Bool("no-obsidian", false, "exclude .obsidian/ files")
@@ -368,13 +336,7 @@ func warrenProjectImport(args []string) int {
 		}
 		return 1
 	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
-	}
 	*root = resolveWarrenRoot(*root)
-	warnDeprecatedFlag(*aliasesCompat != "", "aliases", "alias")
-	aliases = append(aliases, splitCSV(*aliasesCompat)...)
 
 	var projectID, source string
 	switch fs.NArg() {
@@ -386,10 +348,6 @@ func warrenProjectImport(args []string) int {
 	default:
 		fmt.Fprintln(os.Stderr, "usage: marmot warren project import <project-id> <source-.marmot> [--warren-dir .] [--path projects/<project-id>/.marmot] [--vault-id <id>] [--alias <name>]...")
 		return 1
-	}
-	warnDeprecatedSpelling(*idCompat != "", "id", "the positional <project-id> argument")
-	if *idCompat != "" {
-		projectID = *idCompat
 	}
 	if *generateID {
 		projectID = ""
@@ -436,14 +394,9 @@ func generatedImportProjectID(source string) string {
 func warrenProjectList(args []string) int {
 	fs := flag.NewFlagSet("warren project list", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 0 {
@@ -472,16 +425,11 @@ func warrenProjectList(args []string) int {
 }
 
 func warrenProjectRemove(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true}, nil)
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true}, nil)
 	fs := flag.NewFlagSet("warren project remove", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 1 {
@@ -497,17 +445,12 @@ func warrenProjectRemove(args []string) int {
 }
 
 func warrenProjectRename(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true}, map[string]bool{"keep-path": true})
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true}, map[string]bool{"keep-path": true})
 	fs := flag.NewFlagSet("warren project rename", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	keepPath := fs.Bool("keep-path", false, "rename the project ID only; do not move projects/<old-id>/ to projects/<new-id>/")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 2 {
@@ -561,17 +504,12 @@ func warrenBridgeUsage() {
 }
 
 func warrenBridgeAdd(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true, "relations": true}, nil)
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "relations": true}, nil)
 	fs := flag.NewFlagSet("warren bridge add", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	relations := fs.String("relations", "references", "comma-separated allowed relations")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 2 {
@@ -594,14 +532,9 @@ func warrenBridgeAdd(args []string) int {
 func warrenBridgeList(args []string) int {
 	fs := flag.NewFlagSet("warren bridge list", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 0 {
@@ -630,16 +563,11 @@ func warrenBridgeList(args []string) int {
 }
 
 func warrenBridgeRemove(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true}, nil)
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true}, nil)
 	fs := flag.NewFlagSet("warren bridge remove", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 2 {
@@ -655,19 +583,14 @@ func warrenBridgeRemove(args []string) int {
 }
 
 func warrenDoctor(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "root": true, "dir": true}, map[string]bool{"json": true, "workspace": true})
+	args = reorderInterspersedFlags(args, map[string]bool{"warren-dir": true, "dir": true}, map[string]bool{"json": true, "workspace": true})
 	fs := flag.NewFlagSet("warren doctor", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	dir := fs.String("dir", "", "marmot vault directory for --workspace (default: auto-discover or .marmot)")
 	workspaceMode := fs.Bool("workspace", false, "check this workspace's warren state (vault-ID collisions) instead of a warren repository")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren doctor [--warren-dir .] [--workspace [--dir .marmot]] [--json]")
@@ -735,13 +658,8 @@ func printDoctorReport(report warren.DoctorReport, jsonOut bool, healthyMsg stri
 func warrenFormat(args []string) int {
 	fs := flag.NewFlagSet("warren format", flag.ContinueOnError)
 	root := fs.String("warren-dir", ".", "Warren repository root")
-	rootCompat := fs.String("root", "", "Warren repository root")
 	if err := fs.Parse(args); err != nil {
 		return 1
-	}
-	warnDeprecatedFlag(*rootCompat != "", "root", "warren-dir")
-	if *rootCompat != "" {
-		*root = *rootCompat
 	}
 	*root = resolveWarrenRoot(*root)
 	if fs.NArg() != 0 {
@@ -930,11 +848,10 @@ func warrenMount(args []string, isBurrow bool) int {
 	if isBurrow {
 		name = "burrow"
 	}
-	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "warren": true}, map[string]bool{"materialize": true, "all": true, "drop": true})
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "warren": true}, map[string]bool{"all": true, "drop": true})
 	fs := flag.NewFlagSet("warren "+name, flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	warrenID := fs.String("warren", "", "Warren ID")
-	materialize := fs.Bool("materialize", false, "copy mounted project vaults into the local Warren cache (implied by burrow)")
 	all := fs.Bool("all", false, "expand to every project registered in the Warren")
 	drop := fs.Bool("drop", false, "delete burrow caches for the named projects instead of mounting (burrow only)")
 	if err := fs.Parse(args); err != nil {
@@ -955,14 +872,10 @@ func warrenMount(args []string, isBurrow bool) int {
 	if *drop {
 		return warrenBurrowDrop(*dir, *warrenID, *all, fs.Args())
 	}
-	if isBurrow {
-		// Burrow's whole point is the materialized cache; without it the verb
-		// was exactly `mount`. The flag stays accepted for compatibility.
-		if *materialize {
-			fmt.Println("note: burrow always materializes; --materialize is implied")
-		}
-		*materialize = true
-	}
+	// Burrow's whole point is the materialized cache; without one the verb
+	// would be exactly `mount`. Materialization is what distinguishes the
+	// two verbs — there is no flag for it.
+	materialize := isBurrow
 	marmotDir, workspaceRoot, err := ensureWorkspace(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren %s: %v\n", name, err)
@@ -1007,7 +920,7 @@ func warrenMount(args []string, isBurrow bool) int {
 	for _, project := range manifest.Projects {
 		projectMap[project.ProjectID] = project
 	}
-	if _, err := warren.Mount(workspaceRoot, *warrenID, projects, *materialize); err != nil {
+	if _, err := warren.Mount(workspaceRoot, *warrenID, projects, materialize); err != nil {
 		fmt.Fprintf(os.Stderr, "warren %s: %v\n", name, err)
 		return 1
 	}
@@ -1016,7 +929,7 @@ func warrenMount(args []string, isBurrow bool) int {
 	// cross-vault semantic search silently returns nothing. Warn at mount
 	// time; mounting stays legal (the user may be about to re-index).
 	warnModelSkewOnMount(marmotDir, entry.Path, projects, projectMap)
-	if *materialize {
+	if materialize {
 		sourceCommit := warrenHeadCommit(entry.Path)
 		for i, id := range projects {
 			project, ok := projectMap[id]

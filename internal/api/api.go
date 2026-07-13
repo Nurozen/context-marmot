@@ -90,8 +90,8 @@ func (s *Server) registerRoutes() {
 	// Warren workspace management (U5a): mount/unmount reuse the warren
 	// layer's flock'd state writes and refusal messages; doctor returns the
 	// workspace report verbatim. Deliberately NOT over HTTP:
-	// register/unregister (filesystem paths from a browser), burrow
-	// --materialize/--drop (heavy IO + cache lifecycle), edit toggle
+	// register/unregister (filesystem paths from a browser), burrow and
+	// burrow --drop (heavy IO + cache lifecycle), edit toggle
 	// (write-policy change), propose and refresh --pull (git operations).
 	s.mux.HandleFunc("POST /api/warren/{id}/mount", s.handleWarrenMount)
 	s.mux.HandleFunc("POST /api/warren/{id}/unmount", s.handleWarrenUnmount)

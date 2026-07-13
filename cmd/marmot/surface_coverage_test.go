@@ -138,37 +138,20 @@ func TestCmdSetupNonexistent(t *testing.T) {
 // serve (blocks on stdin JSON-RPC; feed EOF so ListenStdio returns)
 // ---------------------------------------------------------------------------
 
+// TestServeCommandEOF drives the default serve path: the daemon election is
+// on by default, so a plain `marmot serve` wins the election, serves stdio
+// until EOF, WaitIdle returns immediately (no proxies), and teardown leaves
+// the vault clean — lock free, daemon.sock and daemon.info.json removed.
+// Shutdown is exercised via stdin EOF only; no test in this package may send
+// SIGINT/SIGTERM.
 func TestServeCommandEOF(t *testing.T) {
-	// Gate explicitly off: this pins the default standalone path (no election,
-	// no daemon files) regardless of the developer's environment.
-	t.Setenv("MARMOT_DAEMON", "")
-	vault := initTestVault(t)
-	withStdin(t, "", func() {
-		if code := run([]string{"serve", "--dir", vault}); code != 0 {
-			t.Fatalf("serve exit code = %d, want 0", code)
-		}
-	})
-	// The default path must never create daemon artifacts.
-	dataDir := filepath.Join(vault, ".marmot-data")
-	for _, name := range []string{"daemon.lock", "daemon.info.json"} {
-		if _, err := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
-			t.Errorf("standalone serve created %s (stat err = %v)", name, err)
-		}
-	}
-}
-
-// TestServeCommandEOFDaemon drives the same EOF path with the dark-launch
-// gate on: the process wins the election, serves stdio until EOF, WaitIdle
-// returns immediately (no proxies), and teardown leaves the vault clean —
-// lock free, daemon.sock and daemon.info.json removed. Shutdown is exercised
-// via stdin EOF only; no test in this package may send SIGINT/SIGTERM.
-func TestServeCommandEOFDaemon(t *testing.T) {
-	t.Setenv("MARMOT_DAEMON", "1")
+	// Opt-out explicitly off: this pins the default (election) path
+	// regardless of the developer's environment.
 	t.Setenv("MARMOT_NO_DAEMON", "")
 	vault := initTestVault(t)
 	withStdin(t, "", func() {
 		if code := run([]string{"serve", "--dir", vault}); code != 0 {
-			t.Fatalf("serve (daemon) exit code = %d, want 0", code)
+			t.Fatalf("serve exit code = %d, want 0", code)
 		}
 	})
 
@@ -185,6 +168,39 @@ func TestServeCommandEOFDaemon(t *testing.T) {
 		t.Fatalf("daemon.lock not free after serve exit: %v", err)
 	}
 	_ = lock.Release()
+}
+
+// TestServeCommandEOFNoDaemon pins the standalone opt-out: with
+// MARMOT_NO_DAEMON=1 (or the --no-daemon flag) serve never elects and must
+// create ZERO daemon artifacts — no lock file, no info file, no socket.
+func TestServeCommandEOFNoDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		args []string
+	}{
+		{name: "env", env: "1", args: []string{"serve", "--dir"}},
+		{name: "flag", env: "", args: []string{"serve", "--no-daemon", "--dir"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MARMOT_NO_DAEMON", tc.env)
+			vault := initTestVault(t)
+			withStdin(t, "", func() {
+				if code := run(append(tc.args, vault)); code != 0 {
+					t.Fatalf("standalone serve exit code = %d, want 0", code)
+				}
+			})
+			dataDir := filepath.Join(vault, ".marmot-data")
+			for _, name := range []string{"daemon.lock", "daemon.info.json"} {
+				if _, err := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
+					t.Errorf("standalone serve created %s (stat err = %v)", name, err)
+				}
+			}
+			if _, err := os.Stat(daemon.SocketPath(dataDir)); !os.IsNotExist(err) {
+				t.Errorf("standalone serve created a daemon socket (stat err = %v)", err)
+			}
+		})
+	}
 }
 
 // startFakeOwner makes this test process a dial-able "live owner" of vault:
@@ -232,15 +248,14 @@ func startFakeOwner(t *testing.T, vault, reply string) daemon.Info {
 	return info
 }
 
-// TestServeSecondIsProxy runs `serve` with the gate on while the daemon lock
-// is already held and a dial-able owner socket is published: the serve must
+// TestServeSecondIsProxy runs a default `serve` while the daemon lock is
+// already held and a dial-able owner socket is published: the serve must
 // become a proxy and relay the client's line to the owner and the owner's
 // answer back to stdout. A full in-process two-serve flow is not feasible
 // here — both serves would race over the one global os.Stdin/os.Stdout pair —
 // so the owner side is faked in-process and the real owner+proxy pairing is
-// covered end-to-end by the e2e suite (TestConcurrentServes).
+// covered end-to-end by the e2e suite (TestConcurrentServesDaemon).
 func TestServeSecondIsProxy(t *testing.T) {
-	t.Setenv("MARMOT_DAEMON", "1")
 	t.Setenv("MARMOT_NO_DAEMON", "")
 	vault := initTestVault(t)
 	const reply = `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"fake-owner-ack"}]}}`
@@ -271,7 +286,6 @@ func TestServeSecondIsProxy(t *testing.T) {
 // The election loop must give up with a clear error within the wedge window
 // instead of spinning silently forever at 50ms intervals.
 func TestServeStaleOwnerInfoBounded(t *testing.T) {
-	t.Setenv("MARMOT_DAEMON", "1")
 	t.Setenv("MARMOT_NO_DAEMON", "")
 	vault := initTestVault(t)
 	dataDir := filepath.Join(vault, ".marmot-data")
@@ -920,74 +934,47 @@ func TestWarrenFormatAndRegisterErrors(t *testing.T) {
 	}
 }
 
-// TestWarrenDeprecatedFlagSpellingsWarn (U2): legacy flag spellings keep
-// working but print a one-line stderr deprecation notice; canonical
-// spellings stay silent. Nothing schedules the legacy spellings' removal.
-func TestWarrenDeprecatedFlagSpellingsWarn(t *testing.T) {
-	root := t.TempDir()
-	_, stderr, code := captureRunBoth(t, []string{"warren", "init", "--root", root, "--id", "wp"})
-	if code != 0 {
-		t.Fatalf("init --root exit code = %d stderr=%q", code, stderr)
-	}
-	if !strings.Contains(stderr, "warning: --root is deprecated; use --warren-dir") {
-		t.Fatalf("init --root missing deprecation warning: %q", stderr)
-	}
-
-	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "add", "billing", "--root", root, "--aliases", "pay,bill"})
-	if code != 0 {
-		t.Fatalf("project add --root --aliases exit code = %d stderr=%q", code, stderr)
-	}
-	if !strings.Contains(stderr, "warning: --root is deprecated; use --warren-dir") ||
-		!strings.Contains(stderr, "warning: --aliases is deprecated; use --alias") {
-		t.Fatalf("project add legacy spellings missing warnings: %q", stderr)
-	}
-
-	// --id without a positional keeps working, pointing at the positional.
-	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "add", "--id", "ledger", "--warren-dir", root})
-	if code != 0 {
-		t.Fatalf("project add --id exit code = %d stderr=%q", code, stderr)
-	}
-	if !strings.Contains(stderr, "warning: --id is deprecated; use the positional <project-id> argument") {
-		t.Fatalf("project add --id missing deprecation warning: %q", stderr)
-	}
-
-	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "import", "--id", "imported", writeCLIImportSourceVault(t, filepath.Join(t.TempDir(), ".marmot"), "imported-vault"), "--warren-dir", root})
-	if code != 0 {
-		t.Fatalf("project import --id exit code = %d stderr=%q", code, stderr)
-	}
-	if !strings.Contains(stderr, "warning: --id is deprecated; use the positional <project-id> argument") {
-		t.Fatalf("project import --id missing deprecation warning: %q", stderr)
-	}
-
-	// Canonical spellings never warn.
-	_, stderr, code = captureRunBoth(t, []string{"warren", "project", "add", "reports", "--warren-dir", root, "--alias", "rep"})
-	if code != 0 {
-		t.Fatalf("canonical project add exit code = %d stderr=%q", code, stderr)
-	}
-	if strings.Contains(stderr, "deprecated") {
-		t.Fatalf("canonical spellings warned: %q", stderr)
-	}
-}
-
-// TestWarrenProjectAddRefusesIDPlusPositional (U2): the old silent
-// reinterpretation of the positional as --path is now a refusal that names
-// the unambiguous invocation.
-func TestWarrenProjectAddRefusesIDPlusPositional(t *testing.T) {
+// TestWarrenLegacyFlagSpellingsRejected: the U2-era compat spellings
+// (--root, --aliases, and --id outside warren init) are gone; each now
+// errors as an unknown flag, and canonical spellings keep working silently.
+func TestWarrenLegacyFlagSpellingsRejected(t *testing.T) {
 	root := t.TempDir()
 	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "wp"}); code != 0 {
 		t.Fatalf("init exit code = %d", code)
 	}
-	_, stderr, code := captureRunBoth(t, []string{"warren", "project", "add", "--id", "pay", "./svc", "--warren-dir", root})
-	if code != 1 {
-		t.Fatalf("project add --id + positional exit code = %d, want 1 (stderr=%q)", code, stderr)
+	cases := []struct {
+		args    []string
+		removed string
+	}{
+		{[]string{"warren", "init", "--root", t.TempDir(), "--id", "wq"}, "-root"},
+		{[]string{"warren", "project", "add", "billing", "--root", root}, "-root"},
+		{[]string{"warren", "project", "add", "billing", "--warren-dir", root, "--aliases", "pay,bill"}, "-aliases"},
+		{[]string{"warren", "project", "add", "--id", "ledger", "--warren-dir", root}, "-id"},
+		{[]string{"warren", "project", "import", "--id", "imported", "src", "--warren-dir", root}, "-id"},
+		{[]string{"warren", "burrow", "--warren", "wp", "--materialize", "billing"}, "-materialize"},
 	}
-	if !strings.Contains(stderr, `both --id "pay" and a positional argument "./svc" given`) ||
-		!strings.Contains(stderr, `write 'marmot warren project add pay --path ./svc'`) {
-		t.Fatalf("ambiguity refusal message wrong: %q", stderr)
+	for _, tc := range cases {
+		_, stderr, code := captureRunBoth(t, tc.args)
+		if code != 1 {
+			t.Errorf("run(%v) exit code = %d, want 1 (unknown flag)", tc.args, code)
+		}
+		if !strings.Contains(stderr, "flag provided but not defined: "+tc.removed) {
+			t.Errorf("run(%v) stderr = %q, want unknown-flag error for %s", tc.args, stderr, tc.removed)
+		}
 	}
+	// A refused legacy invocation must not have registered anything.
 	out, code := captureRun([]string{"warren", "project", "list", "--warren-dir", root, "--json"})
-	if code != 0 || strings.Contains(out, "pay") {
-		t.Fatalf("refused project was still registered: %s", out)
+	if code != 0 || strings.Contains(out, "billing") || strings.Contains(out, "ledger") {
+		t.Fatalf("refused legacy invocation still registered a project: %s", out)
+	}
+
+	// Canonical spellings keep working silently.
+	_, stderr, code := captureRunBoth(t, []string{"warren", "project", "add", "reports", "--warren-dir", root, "--alias", "rep"})
+	if code != 0 {
+		t.Fatalf("canonical project add exit code = %d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stderr, "deprecated") || strings.Contains(stderr, "not defined") {
+		t.Fatalf("canonical spellings errored or warned: %q", stderr)
 	}
 }
 
@@ -1013,16 +1000,16 @@ func TestWarrenUsageShowsOnlyCanonicalSpellings(t *testing.T) {
 }
 
 func TestWarrenInitPositionalID(t *testing.T) {
-	// Positional id form plus --root compatibility alias; interspersed flags
-	// are reordered, so the id may come before or after the flags.
-	if code := run([]string{"warren", "init", "--root", t.TempDir(), "myrepo"}); code != 0 {
+	// Positional id form; interspersed flags are reordered, so the id may
+	// come before or after the flags.
+	if code := run([]string{"warren", "init", "--warren-dir", t.TempDir(), "myrepo"}); code != 0 {
 		t.Fatalf("warren init positional exit code = %d, want 0", code)
 	}
-	if code := run([]string{"warren", "init", "myrepo", "--root", t.TempDir()}); code != 0 {
+	if code := run([]string{"warren", "init", "myrepo", "--warren-dir", t.TempDir()}); code != 0 {
 		t.Fatalf("warren init positional-first exit code = %d, want 0", code)
 	}
 	// A stray positional alongside --id is an error, not silently ignored.
-	if code := run([]string{"warren", "init", "--root", t.TempDir(), "--id", "myrepo", "stray"}); code != 1 {
+	if code := run([]string{"warren", "init", "--warren-dir", t.TempDir(), "--id", "myrepo", "stray"}); code != 1 {
 		t.Fatalf("warren init --id with stray positional exit code = %d, want 1", code)
 	}
 }
@@ -1030,15 +1017,15 @@ func TestWarrenInitPositionalID(t *testing.T) {
 func TestWarrenInterspersedFlagsAfterPositionals(t *testing.T) {
 	workspace := t.TempDir()
 	marmotDir := filepath.Join(workspace, ".marmot")
-	// Two projects: project-b gets burrowed (trailing --materialize flag
+	// Two projects: project-b gets burrowed (positional-before-flags
 	// coverage), project-a stays a plain mount so it can become editable —
 	// editable + materialized is refused since the A4 correctness fix.
 	warrenRoot := testWarrenRoot(t, "wp", "project-a", "project-b")
 	if code := run([]string{"warren", "register", "wp", warrenRoot, "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren register positional-first exit code = %d, want 0", code)
 	}
-	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "project-b", "--materialize"}); code != 0 {
-		t.Fatalf("warren mount trailing --materialize exit code = %d, want 0", code)
+	if code := run([]string{"warren", "burrow", "project-b", "--dir", marmotDir, "--warren", "wp"}); code != 0 {
+		t.Fatalf("warren burrow positional-first exit code = %d, want 0", code)
 	}
 	if code := run([]string{"warren", "edit", "project-a", "--warren", "wp", "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren edit positional-first exit code = %d, want 0", code)

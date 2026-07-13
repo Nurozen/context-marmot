@@ -194,8 +194,8 @@ func TestWarrenStatusJSONStreamPurity(t *testing.T) {
 
 // TestWarrenRegisterMountQueryServe is scenario E1: register → mount → query
 // through a real serve — the baseline flow. One project is mounted plain,
-// the other via `burrow --materialize` (the explicit flag; C2's implied
-// materialization is pinned separately in the E5 lifecycle test). Both the
+// the other via `burrow` (which always materializes; the same behavior is
+// also pinned in the E5 lifecycle test). Both the
 // CLI `query` and MCP `context_query` must return @vault-prefixed remote
 // results, and the Tier 1 assertions hold:
 //
@@ -231,11 +231,9 @@ func TestWarrenRegisterMountQueryServe(t *testing.T) {
 		}
 	}
 
-	// Explicit --materialize per the reviewer's correction: E1 must not
-	// depend on C2's burrow-implies-materialize default.
-	out, err := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", warrenID, "--materialize", projB)
+	out, err := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", warrenID, projB)
 	if err != nil {
-		t.Fatalf("warren burrow --materialize %s: %v\n%s", projB, err, out)
+		t.Fatalf("warren burrow %s: %v\n%s", projB, err, out)
 	}
 
 	// A3: the cache exists and carries neither the secret nor the sidecars.
@@ -445,7 +443,7 @@ func TestWarrenEditableWriteBackAndBurrowLifecycle(t *testing.T) {
 		t.Errorf("serve shutdown: %v", err)
 	}
 
-	// Burrow lifecycle. Bare `burrow` (no --materialize) must create the
+	// Burrow lifecycle. Bare `burrow` must create the
 	// cache — C2's implied materialization.
 	if out, err := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", warrenID, projB); err != nil {
 		t.Fatalf("warren burrow: %v\n%s", err, out)
@@ -845,9 +843,9 @@ func TestWarrenLocalIdentity(t *testing.T) {
 	if !strings.Contains(editOut, "alias of the live vault") {
 		t.Errorf("edit refusal missing the alias message:\n%s", editOut)
 	}
-	burrowOut, burrowErr := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", selfWarrenID, "--materialize", selfProj)
+	burrowOut, burrowErr := runCLI(consumer, "warren", "burrow", "--dir", ".marmot", "--warren", selfWarrenID, selfProj)
 	if burrowErr == nil {
-		t.Fatalf("warren burrow --materialize on an identified project succeeded:\n%s", burrowOut)
+		t.Fatalf("warren burrow on an identified project succeeded:\n%s", burrowOut)
 	}
 	if !strings.Contains(burrowOut, "cannot be materialized") {
 		t.Errorf("burrow refusal missing the self-alias message:\n%s", burrowOut)
@@ -911,7 +909,7 @@ func TestWarrenLocalIdentity(t *testing.T) {
 // still returns the live content.
 func TestWarrenSelfMountAliasLiveOwner(t *testing.T) {
 	warrenRoot, consumer := seedSelfAliasWarren(t)
-	owner := startMCPDaemon(t, consumer)
+	owner := startMCP(t, consumer)
 
 	// Baseline: nothing mounted, no @pb-vault results yet.
 	baseline := owner.callTool(950, "context_query", map[string]any{

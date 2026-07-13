@@ -112,9 +112,18 @@ func copyDir(t *testing.T, src, dst string) {
 
 // hermeticEnv returns the process environment with HOME pointed at the
 // project dir so spawned marmot processes never read the developer's real
-// ~/.marmot state (e.g. routes.yml vault registrations).
+// ~/.marmot state (e.g. routes.yml vault registrations). Daemon-mode env
+// knobs are stripped so the developer's shell cannot flip a serve's mode
+// under a test; tests opt out explicitly via startMCPStandalone.
 func hermeticEnv(dir string) []string {
-	return append(os.Environ(), "HOME="+dir)
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "MARMOT_NO_DAEMON=") || strings.HasPrefix(kv, "MARMOT_PROXY_NO_RESUME=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "HOME="+dir)
 }
 
 func runCLI(dir string, args ...string) (string, error) {
@@ -239,18 +248,21 @@ type mcpSession struct {
 	closeErr  error
 }
 
+// startMCP spawns a default `marmot serve`, which runs the single-owner
+// daemon election: the first serve per vault wins the flock and owns the
+// engine; later ones relay their stdio session to the owner over the vault's
+// unix socket.
 func startMCP(t *testing.T, proj string) *mcpSession {
 	t.Helper()
 	return startMCPEnv(t, proj, hermeticEnv(proj))
 }
 
-// startMCPDaemon spawns `marmot serve` with the WS2 single-owner daemon
-// enabled (dark-launch gate: MARMOT_DAEMON=1 in the child env). The first
-// such serve per vault wins the flock and owns the engine; later ones relay
-// their stdio session to the owner over the vault's unix socket.
-func startMCPDaemon(t *testing.T, proj string) *mcpSession {
+// startMCPStandalone spawns `marmot serve` with the daemon election opted
+// out (MARMOT_NO_DAEMON=1): the standalone path relies on the WAL-layer
+// multi-process SQLite behavior alone and creates zero daemon artifacts.
+func startMCPStandalone(t *testing.T, proj string) *mcpSession {
 	t.Helper()
-	return startMCPEnv(t, proj, append(hermeticEnv(proj), "MARMOT_DAEMON=1"))
+	return startMCPEnv(t, proj, append(hermeticEnv(proj), "MARMOT_NO_DAEMON=1"))
 }
 
 func startMCPEnv(t *testing.T, proj string, env []string) *mcpSession {
@@ -489,14 +501,26 @@ const lockErr = "database is locked"
 // nothing may report "database is locked", and both processes must exit
 // within the post-EOF shutdown budget.
 //
-// Under WS1 (the default, daemon off) each process keeps its own in-memory
-// graph, so only tool-call success is asserted here. The daemon-mode variant
-// TestConcurrentServesDaemon tightens this to cross-process read-your-writes
-// through the shared owner engine.
+// This test intentionally sets MARMOT_NO_DAEMON=1 (startMCPStandalone): the
+// daemon election is on by default now, but the standalone WAL layer must
+// keep holding on its own — it is the opt-out path (--no-daemon, NFS vaults,
+// Windows) and this is its multi-process SQLite regression. Each standalone
+// process keeps its own in-memory graph, so only tool-call success is
+// asserted here; the default daemon path's TestConcurrentServesDaemon
+// tightens this to cross-process read-your-writes through the shared owner
+// engine.
 func TestConcurrentServes(t *testing.T) {
 	proj := seedProject(t)
-	a := startMCP(t, proj)
-	b := startMCP(t, proj)
+	a := startMCPStandalone(t, proj)
+	b := startMCPStandalone(t, proj)
+
+	// Standalone serves must create zero daemon artifacts.
+	dataDir := filepath.Join(proj, ".marmot", ".marmot-data")
+	for _, name := range []string{"daemon.lock", "daemon.info.json"} {
+		if _, err := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
+			t.Errorf("standalone serve created %s (stat err = %v)", name, err)
+		}
+	}
 
 	const (
 		sustain = 10 * time.Second
@@ -679,13 +703,14 @@ writeLoop:
 	}
 }
 
-// --- Single-owner daemon (WS2 dark launch, MARMOT_DAEMON=1) ---
+// --- Single-owner daemon (the default serve mode) ---
 //
-// All daemon tests set MARMOT_DAEMON=1 in the child env (startMCPDaemon); the
-// default serve path stays byte-for-byte standalone and is covered by the
-// tests above. Per the plan's CI-flake guidance these tests assert on end
-// state (responses received, lock free, socket/info removed), never on
-// durations beyond the harness's existing 5s post-EOF shutdown budget.
+// The daemon election is the default: every startMCP serve elects, and the
+// standalone opt-out (MARMOT_NO_DAEMON=1, startMCPStandalone) is covered by
+// TestConcurrentServes above. Per the plan's CI-flake guidance these tests
+// assert on end state (responses received, lock free, socket/info removed),
+// never on durations beyond the harness's existing 5s post-EOF shutdown
+// budget.
 
 // daemonInfo mirrors the fields of daemon.info.json the tests need. The file
 // is published by the owner after its socket is listening and removed on
@@ -766,15 +791,16 @@ func assertVaultReleased(t *testing.T, proj, socket string) {
 	}
 }
 
-// TestConcurrentServesDaemon is the daemon-mode tightening of
-// TestConcurrentServes: with MARMOT_DAEMON=1 both serve processes execute on
-// the single owner engine, so a node written via serve A must be visible to a
-// context_query on serve B immediately (cross-process read-your-writes), and
-// vice versa — no reindex, no watcher debounce, no per-process graph copies.
+// TestConcurrentServesDaemon is the default-mode tightening of the
+// standalone TestConcurrentServes: two plain serves elect one owner, so both
+// processes execute on the single owner engine and a node written via serve
+// A must be visible to a context_query on serve B immediately (cross-process
+// read-your-writes), and vice versa — no reindex, no watcher debounce, no
+// per-process graph copies.
 func TestConcurrentServesDaemon(t *testing.T) {
 	proj := seedProject(t)
-	a := startMCPDaemon(t, proj)
-	b := startMCPDaemon(t, proj)
+	a := startMCP(t, proj)
+	b := startMCP(t, proj)
 	owner, proxy, _ := splitOwnerProxy(t, proj, a, b)
 
 	// Write via A → read via B.
@@ -861,8 +887,8 @@ func waitDaemonOwner(t *testing.T, proj string, pid int) daemonInfo {
 // could swallow the line across its promotion to owner.
 func TestOwnerFailover(t *testing.T) {
 	proj := seedProject(t)
-	a := startMCPDaemon(t, proj)
-	b := startMCPDaemon(t, proj)
+	a := startMCP(t, proj)
+	b := startMCP(t, proj)
 	owner, survivor, _ := splitOwnerProxy(t, proj, a, b)
 
 	if err := owner.cmd.Process.Kill(); err != nil {
@@ -890,7 +916,7 @@ func TestOwnerFailover(t *testing.T) {
 	// A third serve joins the new owner (its initialize handshake succeeding
 	// proves the join) and sees the post-failover write through the shared
 	// engine.
-	c := startMCPDaemon(t, proj)
+	c := startMCP(t, proj)
 	queryOut := c.callTool(2100, "context_query", map[string]any{
 		"query":  "failover marker surviving serve owner killed",
 		"budget": 4000,
@@ -918,8 +944,8 @@ func TestOwnerFailover(t *testing.T) {
 // daemon.info.json.
 func TestDaemonShutdownBudget(t *testing.T) {
 	proj := seedProject(t)
-	a := startMCPDaemon(t, proj)
-	b := startMCPDaemon(t, proj)
+	a := startMCP(t, proj)
+	b := startMCP(t, proj)
 	owner, proxy, info := splitOwnerProxy(t, proj, a, b)
 
 	// Owner's client disconnects with the proxy attached → the owner must
@@ -956,13 +982,13 @@ func TestDaemonShutdownBudget(t *testing.T) {
 // client restarts `marmot serve` itself.
 func TestDaemonNoResumeProxyExits(t *testing.T) {
 	proj := seedProject(t)
-	owner := startMCPDaemon(t, proj)
+	owner := startMCP(t, proj)
 	// The first serve alone must be the owner before the proxy joins, so the
 	// no-resume env var is guaranteed to land on the proxy side.
 	if info := readDaemonInfo(t, proj); info.PID != owner.cmd.Process.Pid {
 		t.Fatalf("first serve (pid %d) did not become owner (info pid %d)", owner.cmd.Process.Pid, info.PID)
 	}
-	proxy := startMCPEnv(t, proj, append(hermeticEnv(proj), "MARMOT_DAEMON=1", "MARMOT_PROXY_NO_RESUME=1"))
+	proxy := startMCPEnv(t, proj, append(hermeticEnv(proj), "MARMOT_PROXY_NO_RESUME=1"))
 
 	if err := owner.cmd.Process.Kill(); err != nil {
 		t.Fatalf("SIGKILL owner: %v", err)

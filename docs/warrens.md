@@ -461,8 +461,7 @@ marmot warren burrow --warren product-platform --all
 ```
 
 `burrow` always materializes — without a cache the verb would be exactly
-`mount`. (`--materialize` is still accepted for compatibility but is
-implied; a bare `burrow` requires project IDs or `--all`, like `mount`.)
+`mount`. (A bare `burrow` requires project IDs or `--all`, like `mount`.)
 Burrowing is useful when you want offline graph access or a stable local
 snapshot while the Warren git checkout changes elsewhere. If materializing
 fails partway, projects that were mounted but never cached are unmounted
@@ -567,7 +566,7 @@ Editable and materialized are mutually exclusive per project: a materialized
 (burrowed) cache never syncs edits back to the checkout, so `marmot warren
 edit` refuses projects that have a burrow cache (run `marmot warren burrow
 --drop --warren <warren-id> <project-id>` or re-mount without materializing
-first), and `marmot warren burrow` / `mount --materialize` refuses projects
+first), and `marmot warren burrow` refuses projects
 that are currently editable (run `marmot warren edit <project> --off`
 first). If an older state file carries both flags, the checkout path wins
 for editable projects and a warning is printed.

@@ -239,12 +239,11 @@ serves sharing a vault join the same daemon. Election locks on the vault's
 `daemon.lock` inode, so relative/absolute/symlinked spellings of the same vault
 path all join the same election.
 
-- **Currently opt-in** (dark launch): set `MARMOT_DAEMON=1` in the serve
-  process's environment. Without it, every serve runs standalone exactly as
-  before.
-- **Opt out** explicitly with `marmot serve --no-daemon` or
-  `MARMOT_NO_DAEMON=1`; both win over `MARMOT_DAEMON=1`. Windows always runs
-  standalone.
+- **On by default**: a plain `marmot serve` joins the per-vault election; no
+  configuration needed.
+- **Opt out** with `marmot serve --no-daemon` or `MARMOT_NO_DAEMON=1` to run
+  standalone (each serve keeps its own engine over the shared SQLite WAL).
+  Windows always runs standalone.
 - **NFS caveat**: election uses `flock(2)` on
   `.marmot/.marmot-data/daemon.lock`, whose semantics are unreliable on
   NFS/network filesystems — set `MARMOT_NO_DAEMON=1` for vaults that live on

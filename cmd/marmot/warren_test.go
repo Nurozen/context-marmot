@@ -68,7 +68,7 @@ func TestWarrenBurrowMaterializeCachesVaults(t *testing.T) {
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
 		t.Fatalf("register exit code = %d", code)
 	}
-	if code := run([]string{"warren", "burrow", "--materialize", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
+	if code := run([]string{"warren", "burrow", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
 		t.Fatalf("burrow exit code = %d", code)
 	}
 
@@ -77,7 +77,7 @@ func TestWarrenBurrowMaterializeCachesVaults(t *testing.T) {
 		t.Fatalf("expected materialized cache file: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(marmotDir, "project-a")); err == nil {
-		t.Fatalf("burrow --materialize should not copy project under .marmot/project-a")
+		t.Fatalf("burrow should not copy project under .marmot/project-a")
 	}
 }
 
