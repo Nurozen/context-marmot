@@ -3109,6 +3109,30 @@ table.warren-projects .warren-project-id {
   cursor: help;
   text-decoration: underline dotted;
   text-underline-offset: 2px;
+  position: relative;
+}
+
+/* Styled tooltip: native title attrs need a ~1s hover and render
+   inconsistently across platforms, so surface data-tooltip immediately. */
+.warren-editable-local:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  width: 240px;
+  padding: 8px 10px;
+  background: var(--bg-elevated, #2a2a2e);
+  color: var(--text-primary, #e8e8ea);
+  border: 1px solid var(--border, #3f3f46);
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.45;
+  white-space: normal;
+  text-decoration: none;
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
 }
 
 /* ── Toasts — transient operation feedback ───────────────────── */

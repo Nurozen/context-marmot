@@ -435,7 +435,25 @@ Disable writes again:
 marmot warren edit --off --warren product-platform project-a
 ```
 
-Materialize selected project graphs into the local `.marmot-data/` cache:
+### Burrows: local caches of mounted projects
+
+A **burrow** is a materialized local copy of a mounted project's vault,
+stored inside your workspace at
+`.marmot/.marmot-data/warrens/<warren>/projects/<project>/.marmot`. Mounting
+alone reads the project's graph live from the Warren checkout on every
+query; burrowing snapshots it locally so queries keep working when the
+checkout is unreachable (moved, deleted, on a detached network drive) or
+when you want a stable view while the checkout changes underneath you. The
+name follows the metaphor: a warren is the shared network of tunnels, a
+burrow is your own local den dug from it.
+
+Burrows are read-only snapshots — they are never edited (editable and
+materialized are mutually exclusive per project) and never synced back.
+`marmot warren refresh --pull` re-materializes stale burrows from the
+updated checkout; `warren status` shows each cache's age and, for git-backed
+warrens, how many commits behind it is.
+
+Create burrows for selected projects:
 
 ```bash
 marmot warren burrow --warren product-platform project-b

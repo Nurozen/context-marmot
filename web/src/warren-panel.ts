@@ -257,9 +257,13 @@ export class WarrenPanel {
       // Display-only — the underlying editable JSON field is unchanged.
       editableTd.textContent = 'local';
       editableTd.className = 'warren-editable-local';
-      editableTd.title =
+      // Styled CSS tooltip via data-tooltip (native title attrs need a long
+      // hover and render inconsistently); title kept as the a11y fallback.
+      const tip =
         'Edits happen normally in this workspace (live vault). ' +
         'Warren edit/propose applies only to foreign mounted projects.';
+      editableTd.dataset.tooltip = tip;
+      editableTd.title = tip;
     } else {
       editableTd.textContent = project.editable ? 'yes' : 'no';
     }

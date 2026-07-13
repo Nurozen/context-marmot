@@ -78,6 +78,16 @@ test('warren panel lists projects, doctor report, and bridges', async ({ page })
   const editableTitle = await selfEditable.getAttribute('title');
   expect(editableTitle).toContain('Edits happen normally in this workspace');
   expect(editableTitle).toContain('foreign mounted projects');
+  // The styled tooltip must actually become visible on hover (a bare title
+  // attr needs a ~1s native hover delay and reads as "tooltip doesn't show").
+  const tooltipData = await selfEditable.getAttribute('data-tooltip');
+  expect(tooltipData).toContain('Edits happen normally in this workspace');
+  await selfEditable.hover();
+  const tooltipVisible = await selfEditable.evaluate((el) => {
+    const after = getComputedStyle(el, '::after');
+    return after.content !== 'none' && after.content !== '' && after.position === 'absolute';
+  });
+  expect(tooltipVisible).toBe(true);
   // Foreign mounted rows keep the plain yes/no display.
   await expect(panel.locator('tr[data-project="other"] td').nth(2)).toHaveText('no');
 
