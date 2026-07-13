@@ -11,11 +11,21 @@ import { HeatOverlay } from './heat-overlay';
 interface SimNode extends d3.SimulationNodeDatum {
   id: string;
   type: string;
+  /** Namespace group key. Matches the entries of GraphResponse.namespaces:
+      warren views prefix each namespace with the owning project
+      ("proj-c:default") while local views use the raw namespace. Keeping
+      the node key aligned with the label key is what positions the
+      watermark labels — a mismatch parks every label at (0,0), overprinting
+      them into garbled ghost text. */
   namespace: string;
   status: string;
   summary: string;
   context: string;
   edge_count: number;
+  /** Outgoing edges declared on the node itself */
+  out_count: number;
+  /** Incoming edges from other nodes (edge_count - out_count) */
+  in_count: number;
   is_stale: boolean;
   tags: string[];
   superseded_by?: string;
@@ -42,6 +52,9 @@ function shortLabel(id: string): string {
 function nodeRadius(edgeCount: number): number {
   return Math.min(6 + Math.sqrt(edgeCount) * 2.5, 30);
 }
+
+/** Grouping modes for the group-by selector. */
+export type GroupMode = 'none' | 'type' | 'namespace' | 'tag' | 'folder' | 'project';
 
 /* ------------------------------------------------------------------ */
 /*  GraphView                                                          */
@@ -76,7 +89,10 @@ export class GraphView {
   private normalLinks: SimLink[] = [];
   private heatEnabled = false;
   private heatPairs: APIHeatPair[] = [];
-  private groupBy: 'none' | 'type' | 'namespace' | 'tag' | 'folder' = 'type';
+  private groupBy: GroupMode = 'type';
+  /** The workspace's configured vault_id ('' when none) — labels the local
+      project group and recognizes @<local-vault>/… nodes as local. */
+  private localVaultId = '';
 
   /* Multi-selection for curator integration */
   private multiSelectedIds: Set<string> = new Set();
@@ -193,14 +209,22 @@ export class GraphView {
     /* Build SimNodes — restore positions for returning nodes */
     this.nodes = data.nodes.map((n) => {
       const prev = prevPositions.get(n.id);
+      const outCount = n.edges?.length ?? 0;
       return {
         id: n.id,
         type: n.type,
-        namespace: n.namespace,
+        // Warren-served nodes carry provenance; compose the same
+        // "<project>:<namespace>" key the server puts in data.namespaces so
+        // label centroids and namespace grouping resolve (see SimNode docs).
+        namespace: n.provenance?.project_id
+          ? `${n.provenance.project_id}:${n.namespace}`
+          : n.namespace,
         status: n.status,
         summary: n.summary,
         context: n.context,
         edge_count: n.edge_count,
+        out_count: outCount,
+        in_count: Math.max(0, n.edge_count - outCount),
         is_stale: n.is_stale,
         tags: n.tags ?? [],
         superseded_by: n.superseded_by,
@@ -579,6 +603,9 @@ export class GraphView {
       .enter()
       .append('text')
       .attr('class', 'ns-label')
+      // Hidden until the first tick positions it — otherwise every new
+      // label renders one frame stacked at (0,0).
+      .attr('display', 'none')
       .text((d) => d);
     /* Positions are set during tick() via updateNsLabelPositions */
   }
@@ -603,6 +630,10 @@ export class GraphView {
 
     this.nsLabelGroup
       .selectAll<SVGTextElement, string>('.ns-label')
+      // A label with no matching nodes (e.g. every node of that namespace
+      // was deduped away in an aggregate view) must hide rather than fall
+      // back to (0,0), where all such labels stack into garbled ghost text.
+      .attr('display', (d) => (nsCentroids.has(d) ? null : 'none'))
       .attr('x', (d) => {
         const c = nsCentroids.get(d);
         return c && c.count > 0 ? c.sx / c.count : 0;
@@ -618,15 +649,22 @@ export class GraphView {
       .selectAll<SVGGElement, SimNode>('.node')
       .data(this.nodes, (d) => d.id);
 
-    /* Deleted nodes: shrink + fade out over 300ms */
-    nodeSel.exit()
-      .classed('node-exiting', true)
+    /* Deleted nodes: shrink + fade out over 300ms. The remove() must run on
+       the <g class="node"> transition itself — chaining it after
+       select('circle') only removed the circle and left invisible ghost
+       groups behind on every namespace switch (they still intercepted
+       clicks and inflated node counts). */
+    const exitSel = nodeSel.exit().classed('node-exiting', true);
+    exitSel.select('circle')
+      .transition()
+      .duration(300)
+      .ease(d3.easeCubicIn)
+      .attr('r', 0);
+    exitSel
       .transition()
       .duration(300)
       .ease(d3.easeCubicIn)
       .style('opacity', 0)
-      .select('circle')
-      .attr('r', 0)
       .remove();
 
     const enter = nodeSel.enter().append('g').attr('class', (d) => {
@@ -794,7 +832,7 @@ export class GraphView {
 
     const typeInfo = document.createElement('div');
     typeInfo.className = 'tt-type';
-    typeInfo.textContent = `${d.type} \u00B7 ${d.edge_count} edges`;
+    typeInfo.textContent = `${d.type} \u00B7 ${d.out_count} out / ${d.in_count} in`;
     el.appendChild(typeInfo);
 
     const summary = document.createElement('div');
@@ -1046,26 +1084,26 @@ export class GraphView {
       return;
     }
 
-    /* Folder-based grouping: cluster by directory prefix.
-       Uses a wider centroid radius than other modes to give the contour
-       hulls breathing room between islands. */
-    if (this.groupBy === 'folder') {
-      const folders = [...new Set(this.nodes.map((n) => this.nodeFolder(n)))].sort();
+    /* Folder/project-based grouping: cluster by directory prefix or by
+       owning vault. Uses a wider centroid radius than other modes to give
+       the contour hulls breathing room between islands. */
+    if (this.groupBy === 'folder' || this.groupBy === 'project') {
+      const groups = [...new Set(this.nodes.map((n) => this.clusterKey(n)))].sort();
       const r = Math.min(width, height) * 0.38;
       const centroids = new Map<string, { x: number; y: number }>();
-      folders.forEach((key, i) => {
-        if (folders.length === 1) {
+      groups.forEach((key, i) => {
+        if (groups.length === 1) {
           centroids.set(key, { x: cx, y: cy });
         } else {
-          const angle = (2 * Math.PI * i) / folders.length - Math.PI / 2;
+          const angle = (2 * Math.PI * i) / groups.length - Math.PI / 2;
           centroids.set(key, { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) });
         }
       });
       const strength = 0.22;
 
       this.simulation
-        .force('x', d3.forceX<SimNode>((d) => centroids.get(this.nodeFolder(d))?.x ?? cx).strength(strength))
-        .force('y', d3.forceY<SimNode>((d) => centroids.get(this.nodeFolder(d))?.y ?? cy).strength(strength));
+        .force('x', d3.forceX<SimNode>((d) => centroids.get(this.clusterKey(d))?.x ?? cx).strength(strength))
+        .force('y', d3.forceY<SimNode>((d) => centroids.get(this.clusterKey(d))?.y ?? cy).strength(strength));
       return;
     }
 
@@ -1082,24 +1120,58 @@ export class GraphView {
       .force('y', d3.forceY<SimNode>((d) => centroids.get(keyFn(d))?.y ?? cy).strength(strength));
   }
 
-  /** Extract the folder prefix from a node ID (e.g. "packages/node" → "packages"). */
-  private nodeFolder(d: SimNode): string {
-    const slash = d.id.indexOf('/');
-    return slash > 0 ? d.id.substring(0, slash) : '_root';
+  /** Sets the workspace vault_id used to label the local project group. */
+  setLocalVaultId(vaultId: string): void {
+    this.localVaultId = vaultId;
   }
 
-  /** Render topographic contour hulls around folder groups. */
+  /** Extract the vault prefix from a qualified node ID
+      ("@pb-vault/src/calc" → "pb-vault"), '' for unqualified local IDs. */
+  private nodeVault(d: SimNode): string {
+    if (!d.id.startsWith('@')) return '';
+    const slash = d.id.indexOf('/');
+    return slash > 1 ? d.id.substring(1, slash) : '';
+  }
+
+  /** Project group key: local nodes (including @<local-vault>/… identity
+      aliases) form one workspace group; every other @vault-id is its own. */
+  private nodeProject(d: SimNode): string {
+    const vault = this.nodeVault(d);
+    if (vault === '' || vault === this.localVaultId) {
+      return this.localVaultId ? `local (${this.localVaultId})` : 'local';
+    }
+    return vault;
+  }
+
+  /** Extract the folder prefix from a node ID (e.g. "packages/node" →
+      "packages"). Vault-qualified IDs ("@pb-vault/src/calc") group by the
+      genuine directory, qualified as "pb-vault › src" so same-named folders
+      from different vaults never collide. */
+  private nodeFolder(d: SimNode): string {
+    const vault = this.nodeVault(d);
+    const path = vault ? d.id.substring(vault.length + 2) : d.id;
+    const slash = path.indexOf('/');
+    const folder = slash > 0 ? path.substring(0, slash) : '_root';
+    return vault ? `${vault} › ${folder}` : folder;
+  }
+
+  /** Group key for the hull-clustered modes (folder and project). */
+  private clusterKey(d: SimNode): string {
+    return this.groupBy === 'project' ? this.nodeProject(d) : this.nodeFolder(d);
+  }
+
+  /** Render topographic contour hulls around folder/project groups. */
   private renderFolderHulls(): void {
-    if (this.groupBy !== 'folder') {
+    if (this.groupBy !== 'folder' && this.groupBy !== 'project') {
       this.folderHullGroup.selectAll('*').remove();
       return;
     }
 
-    /* Group visible nodes by folder */
+    /* Group visible nodes by cluster key (folder or project) */
     const folderNodes = new Map<string, SimNode[]>();
     for (const n of this.nodes) {
       if (!this.isNodeVisible(n) || n.x == null || n.y == null) continue;
-      const folder = this.nodeFolder(n);
+      const folder = this.clusterKey(n);
       let arr = folderNodes.get(folder);
       if (!arr) { arr = []; folderNodes.set(folder, arr); }
       arr.push(n);
@@ -1249,7 +1321,7 @@ export class GraphView {
   }
 
   /** Change the grouping mode and reheat the simulation. */
-  setGroupBy(mode: 'none' | 'type' | 'namespace' | 'tag' | 'folder'): void {
+  setGroupBy(mode: GroupMode): void {
     this.groupBy = mode;
     const { width, height } = this.dimensions();
     this.applyGroupForces(width, height);

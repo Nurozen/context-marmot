@@ -44,6 +44,24 @@ type Engine struct {
 	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
 	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
 	nsMgrMu      sync.RWMutex
+	// fileCrossVaultBridges snapshots the manager's file-declared cross-vault
+	// bridges at WithNamespaceManager time; warrenBridges holds the current
+	// warren runtime bridges. ReloadWarrenState recomposes
+	// NSManager.CrossVaultBridges = fileCrossVaultBridges ++ warrenBridges so
+	// repeated reloads never duplicate. Both guarded by nsMgrMu.
+	fileCrossVaultBridges []*namespace.Bridge
+	warrenBridges         []*namespace.Bridge
+	// reloadMu serializes ReloadWarrenState: it is invoked concurrently from
+	// HTTP handler goroutines (the refresh endpoint) and the daemon owner's
+	// _warren.md watcher, and each reload is a read-state-then-apply cycle.
+	// Unserialized, a reload that read PRE-change state could apply its stale
+	// routing table AFTER the reload that read post-change state, leaving
+	// e.g. an unmounted vault routable until the next reload, with NSManager
+	// bridges and the registry routing table from two different snapshots.
+	reloadMu sync.Mutex
+	// warnedVaults dedupes best-effort cross-vault degradation warnings so a
+	// broken remote vault warns once per vault per process, not per query.
+	warnedVaults  sync.Map       // map[string]bool
 	reindexWG     sync.WaitGroup // tracks background neighbor reindexes
 	closing       atomic.Bool    // set by Close; stops new background reindexes
 	reindexOnce   sync.Once      // lazily initializes the reindex context
@@ -69,6 +87,16 @@ func (e *Engine) SetGraph(g *graph.Graph) {
 // GetGraph returns the current in-memory graph.
 func (e *Engine) GetGraph() *graph.Graph {
 	return e.graph.Load()
+}
+
+// warnVaultOnce logs a cross-vault degradation warning to stderr at most
+// once per vault for this engine's lifetime (per-query warnings on the
+// best-effort search path would be too chatty for a long-lived daemon).
+func (e *Engine) warnVaultOnce(vaultID, format string, args ...any) {
+	if _, loaded := e.warnedVaults.LoadOrStore(vaultID, true); loaded {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: "+format+"\n", args...)
 }
 
 // NamespaceLock returns the write mutex for the given namespace, creating it if needed.
@@ -157,6 +185,8 @@ func NewEngine(marmotDir string, embedder embedding.Embedder) (*Engine, error) {
 		return nil, fmt.Errorf("engine: create data dir: %w", err)
 	}
 	dbPath := filepath.Join(dataDir, "embeddings.db")
+	// Read-write open is correct here: this is the LOCAL vault's own store
+	// (remote vault stores are opened read-only via the VaultRegistry).
 	es, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("engine: open embedding store: %w", err)
@@ -179,10 +209,17 @@ func (e *Engine) WithHeatMap(h *heatmap.HeatMap) {
 
 // WithNamespaceManager attaches a namespace manager to the engine.
 // When set, cross-namespace edges are validated against bridge manifests.
+// The manager's file-declared cross-vault bridges are snapshotted so
+// ReloadWarrenState can recompose them with warren runtime bridges without
+// duplicating either.
 func (e *Engine) WithNamespaceManager(mgr *namespace.Manager) {
 	e.nsMgrMu.Lock()
 	defer e.nsMgrMu.Unlock()
 	e.NSManager = mgr
+	e.fileCrossVaultBridges = nil
+	if mgr != nil {
+		e.fileCrossVaultBridges = append([]*namespace.Bridge(nil), mgr.CrossVaultBridges...)
+	}
 }
 
 // HasNamespace reports whether the namespace manager knows a namespace.
@@ -253,7 +290,10 @@ func (e *Engine) validateCrossVaultEdges(edges []node.Edge, currentNamespace str
 	}
 	for _, edge := range edges {
 		qid := e.NSManager.ParseQualifiedID(edge.Target, currentNamespace)
-		if qid.VaultID != "" {
+		// A "@<LocalVaultID>/x" target is a local edge wearing a costume:
+		// it resolves against the live vault, so it needs no
+		// LocalVaultID<->LocalVaultID bridge.
+		if qid.VaultID != "" && qid.VaultID != e.LocalVaultID {
 			if err := e.NSManager.ValidateCrossVaultEdge(e.LocalVaultID, qid.VaultID, string(edge.Relation)); err != nil {
 				return err
 			}
@@ -291,10 +331,14 @@ func (e *Engine) WithSummaryScheduler(ss *summary.Scheduler) {
 // WithVaultRegistry attaches a vault registry for cross-vault traversal.
 func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
 	e.VaultRegistry = vr
-	// Cache local vault ID to avoid repeated disk reads in handlers.
+	// Cache local vault ID to avoid repeated disk reads in handlers. An
+	// unreadable config leaves LocalVaultID empty, silently disabling every
+	// alias guard and cross-vault edge validation — degrade loudly.
 	if e.MarmotDir != "" {
 		if cfg, err := config.Load(e.MarmotDir); err == nil {
 			e.LocalVaultID = cfg.VaultID
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: local vault config unreadable (%v); vault_id unknown — local identity (self-mount aliasing) and cross-vault edge validation disabled\n", err)
 		}
 	}
 }
@@ -303,8 +347,9 @@ func (e *Engine) WithVaultRegistry(vr *namespace.VaultRegistry) {
 func (e *Engine) graphResolver() traversal.GraphResolver {
 	if e.VaultRegistry != nil {
 		return &traversal.BridgedGraphResolver{
-			Local:  e.GetGraph(),
-			Vaults: e.VaultRegistry,
+			Local:        e.GetGraph(),
+			Vaults:       e.VaultRegistry,
+			LocalVaultID: e.LocalVaultID,
 		}
 	}
 	return e.GetGraph()

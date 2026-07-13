@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/nurozen/context-marmot/internal/embedding"
@@ -67,7 +68,7 @@ func TestWarrenBurrowMaterializeCachesVaults(t *testing.T) {
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
 		t.Fatalf("register exit code = %d", code)
 	}
-	if code := run([]string{"warren", "burrow", "--materialize", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
+	if code := run([]string{"warren", "burrow", "--dir", marmotDir, "--warren", "product-platform", "project-a"}); code != 0 {
 		t.Fatalf("burrow exit code = %d", code)
 	}
 
@@ -76,7 +77,7 @@ func TestWarrenBurrowMaterializeCachesVaults(t *testing.T) {
 		t.Fatalf("expected materialized cache file: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(marmotDir, "project-a")); err == nil {
-		t.Fatalf("burrow --materialize should not copy project under .marmot/project-a")
+		t.Fatalf("burrow should not copy project under .marmot/project-a")
 	}
 }
 
@@ -360,6 +361,9 @@ func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embed remote node: %v", err)
 	}
+	// Fixture SEEDING must stay a read-write NewStore (NOT NewStoreReadOnly):
+	// this creates and populates the remote vault's DB that the read-only
+	// cross-vault path (A1) is then tested against.
 	embStore, err := embedding.NewStore(filepath.Join(remoteMarmot, ".marmot-data", "embeddings.db"))
 	if err != nil {
 		t.Fatalf("open remote embedding store: %v", err)
@@ -377,11 +381,7 @@ func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 
-	result, err := buildEngine(marmotDir)
-	if err != nil {
-		t.Fatalf("buildEngine: %v", err)
-	}
-	defer result.Cleanup()
+	result := hermeticEngine(t, marmotDir)
 	query, err := result.Engine.HandleContextQuery(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name: "context_query",
@@ -404,6 +404,206 @@ func TestBuildEngineQueriesActiveWarrenMount(t *testing.T) {
 	}
 	if !strings.Contains(text.Text, "@project-a/service/api") {
 		t.Fatalf("expected Warren-mounted result, got:\n%s", text.Text)
+	}
+}
+
+// TestBuildEngineSelfMountResolvesLiveVault (R1): when the workspace's own
+// vault_id matches a mounted warren project's, the mount is a self-alias —
+// queries and @-qualified traversal resolve the LIVE local vault, never the
+// warren snapshot (the pre-alias behavior pinned by the sibling test above
+// for the non-self case).
+func TestBuildEngineSelfMountResolvesLiveVault(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir local .marmot-data: %v", err)
+	}
+	// The workspace carries the mounted copy's vault_id — the collision by
+	// construction that import-preserving-vault_id creates.
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte("---\nversion: \"1\"\nvault_id: project-a\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"), 0o644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	// Warren copy: a STALE snapshot of the same node.
+	warrenRoot := testWarrenRoot(t, "product-platform", "project-a")
+	remoteMarmot := filepath.Join(warrenRoot, "projects", "project-a", ".marmot")
+	remoteStore := node.NewStore(remoteMarmot)
+	if err := remoteStore.SaveNode(&node.Node{
+		ID:        "service/api",
+		Type:      "module",
+		Namespace: "default",
+		Status:    node.StatusActive,
+		Summary:   "payments service API gateway STALE snapshot rev",
+	}); err != nil {
+		t.Fatalf("save warren-copy node: %v", err)
+	}
+
+	// Live vault: the diverged node plus an entry node whose edge crosses via
+	// the @-qualified self ID.
+	embedder := embedding.NewMockEmbedder("test-model")
+	localStore := node.NewStore(marmotDir)
+	liveNodes := []*node.Node{
+		{
+			ID:        "service/api",
+			Type:      "module",
+			Namespace: "default",
+			Status:    node.StatusActive,
+			Summary:   "payments service API gateway LIVE quartz revision",
+		},
+		{
+			ID:        "gw/entry",
+			Type:      "module",
+			Namespace: "default",
+			Status:    node.StatusActive,
+			Summary:   "gateway entry orchestrator zebra",
+			Edges:     []node.Edge{{Target: "@project-a/service/api", Relation: node.References}},
+		},
+	}
+	embStore, err := embedding.NewStore(filepath.Join(marmotDir, ".marmot-data", "embeddings.db"))
+	if err != nil {
+		t.Fatalf("open local embedding store: %v", err)
+	}
+	for _, n := range liveNodes {
+		if err := localStore.SaveNode(n); err != nil {
+			t.Fatalf("save live node %s: %v", n.ID, err)
+		}
+		vec, embedErr := embedder.Embed(n.Summary)
+		if embedErr != nil {
+			t.Fatalf("embed %s: %v", n.ID, embedErr)
+		}
+		h := sha256.Sum256([]byte(n.Summary))
+		if err := embStore.Upsert(n.ID, vec, hex.EncodeToString(h[:]), embedder.Model()); err != nil {
+			t.Fatalf("upsert %s: %v", n.ID, err)
+		}
+	}
+	_ = embStore.Close()
+
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspace, "product-platform", warrenRoot); err != nil {
+		t.Fatalf("RegisterWorkspaceWarren: %v", err)
+	}
+	if _, err := warrenpkg.Mount(workspace, "product-platform", []string{"project-a"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	result := hermeticEngine(t, marmotDir)
+	query, err := result.Engine.HandleContextQuery(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name: "context_query",
+			Arguments: map[string]any{
+				"query":  "gateway entry orchestrator zebra",
+				"depth":  1,
+				"budget": 4096,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("HandleContextQuery: %v", err)
+	}
+	if query.IsError {
+		t.Fatalf("query error: %+v", query.Content)
+	}
+	text, ok := query.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected text content, got %#v", query.Content[0])
+	}
+	if !strings.Contains(text.Text, "@project-a/service/api") {
+		t.Fatalf("expected the @-qualified self node in traversal output, got:\n%s", text.Text)
+	}
+	if !strings.Contains(text.Text, "LIVE quartz revision") {
+		t.Fatalf("@project-a/service/api did not resolve to the LIVE vault:\n%s", text.Text)
+	}
+	if strings.Contains(text.Text, "STALE snapshot rev") {
+		t.Fatalf("query served the warren snapshot instead of the live vault:\n%s", text.Text)
+	}
+}
+
+// TestWarrenRefreshTouchesStateAndChecksReachability (B3.2): a real refresh
+// rewrites the workspace _warren.md (the daemon-owner change signal), reports
+// mounts, and fails loudly when the warren checkout is gone.
+func TestWarrenRefreshTouchesStateAndChecksReachability(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspace, "wp", warrenRoot); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, err := warrenpkg.Mount(workspace, "wp", []string{"project-a"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	statePath := filepath.Join(marmotDir, "_warren.md")
+	before, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("stat state: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond) // ensure a distinguishable mtime
+
+	out, code := captureRun([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "wp"})
+	if code != 0 {
+		t.Fatalf("warren refresh exit = %d, output: %s", code, out)
+	}
+	if !strings.Contains(out, "refreshed") || !strings.Contains(out, "1 active project mount(s)") {
+		t.Fatalf("unexpected refresh output: %q", out)
+	}
+	after, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatalf("stat state after: %v", err)
+	}
+	if !after.ModTime().After(before.ModTime()) {
+		t.Fatal("refresh did not touch the workspace _warren.md (live observers would never fire)")
+	}
+
+	// Unreachable checkout: loud failure, exit 1.
+	if err := os.RemoveAll(warrenRoot); err != nil {
+		t.Fatalf("remove warren root: %v", err)
+	}
+	if _, code := captureRun([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "wp"}); code != 1 {
+		t.Fatalf("warren refresh on unreachable warren exit = %d, want 1", code)
+	}
+}
+
+// TestBuildEngineAlwaysCreatesVaultRegistry (B2): even with zero mounts and
+// no routes, buildEngine wires a registry so a long-lived engine can pick up
+// warren mounts made after startup via ReloadWarrenState.
+func TestBuildEngineAlwaysCreatesVaultRegistry(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if err := os.MkdirAll(filepath.Join(marmotDir, ".marmot-data"), 0o755); err != nil {
+		t.Fatalf("mkdir .marmot-data: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(marmotDir, "_config.md"), []byte("---\nversion: \"1\"\nnamespace: default\nembedding_provider: mock\nembedding_model: test-model\n---\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	result := hermeticEngine(t, marmotDir)
+	if result.Engine.VaultRegistry == nil {
+		t.Fatal("buildEngine must always create a vault registry (mounts made after startup need ReloadWarrenState)")
+	}
+	if got := result.Engine.VaultRegistry.KnownVaultIDs(); len(got) != 0 {
+		t.Fatalf("expected empty registry with no mounts/routes, got %v", got)
+	}
+
+	// A self-alias mount (project vault_id == workspace vault_id) also leaves
+	// the registry empty: the live vault is the sole answerer for its own ID.
+	selfWorkspace := t.TempDir()
+	selfMarmot := filepath.Join(selfWorkspace, ".marmot")
+	writeTestConfig(t, selfMarmot, "self-vault")
+	selfWarren := t.TempDir()
+	saveWarrenProject(t, selfWarren, "wp", "self-proj", "self-vault")
+	if err := warrenpkg.SaveManifest(selfWarren, &warrenpkg.Manifest{
+		WarrenID: "wp",
+		Projects: []warrenpkg.Project{{ProjectID: "self-proj", Path: "projects/self-proj/.marmot"}},
+	}, ""); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	if _, err := warrenpkg.RegisterWorkspaceWarren(selfWorkspace, "wp", selfWarren); err != nil {
+		t.Fatalf("RegisterWorkspaceWarren: %v", err)
+	}
+	if _, err := warrenpkg.Mount(selfWorkspace, "wp", []string{"self-proj"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	selfResult := hermeticEngine(t, selfMarmot)
+	if got := selfResult.Engine.VaultRegistry.KnownVaultIDs(); len(got) != 0 {
+		t.Fatalf("self-alias mount must leave KnownVaultIDs empty, got %v", got)
 	}
 }
 

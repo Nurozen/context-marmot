@@ -175,13 +175,13 @@ func detectCursor(projectRoot string) bool {
 
 // generateClaude writes .mcp.json at the project root.
 func generateClaude(projectRoot, binaryPath, vaultDir string) error {
-	relVault := relOrAbs(projectRoot, vaultDir)
+	absVault := absVaultPath(vaultDir)
 
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
 			"context-marmot": map[string]any{
 				"command": binaryPath,
-				"args":    []string{"serve", "--dir", relVault},
+				"args":    []string{"serve", "--dir", absVault},
 			},
 		},
 	}
@@ -190,7 +190,7 @@ func generateClaude(projectRoot, binaryPath, vaultDir string) error {
 
 // generateCodex writes .codex/config.toml at the project root.
 func generateCodex(projectRoot, binaryPath, vaultDir string) error {
-	relVault := relOrAbs(projectRoot, vaultDir)
+	absVault := absVaultPath(vaultDir)
 
 	dir := filepath.Join(projectRoot, ".codex")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -215,7 +215,7 @@ func generateCodex(projectRoot, binaryPath, vaultDir string) error {
 enabled = true
 command = %q
 args = ["serve", "--dir", %q]
-`, binaryPath, relVault)
+`, binaryPath, absVault)
 
 	f, err := os.OpenFile(configPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -228,7 +228,7 @@ args = ["serve", "--dir", %q]
 
 // generateVSCode writes .vscode/mcp.json at the project root.
 func generateVSCode(projectRoot, binaryPath, vaultDir string) error {
-	relVault := relOrAbs(projectRoot, vaultDir)
+	absVault := absVaultPath(vaultDir)
 
 	dir := filepath.Join(projectRoot, ".vscode")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -240,7 +240,7 @@ func generateVSCode(projectRoot, binaryPath, vaultDir string) error {
 			"context-marmot": map[string]any{
 				"type":    "stdio",
 				"command": binaryPath,
-				"args":    []string{"serve", "--dir", relVault},
+				"args":    []string{"serve", "--dir", absVault},
 			},
 		},
 	}
@@ -249,7 +249,7 @@ func generateVSCode(projectRoot, binaryPath, vaultDir string) error {
 
 // generateCursor writes .cursor/mcp.json at the project root.
 func generateCursor(projectRoot, binaryPath, vaultDir string) error {
-	relVault := relOrAbs(projectRoot, vaultDir)
+	absVault := absVaultPath(vaultDir)
 
 	dir := filepath.Join(projectRoot, ".cursor")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -260,7 +260,7 @@ func generateCursor(projectRoot, binaryPath, vaultDir string) error {
 		"mcpServers": map[string]any{
 			"context-marmot": map[string]any{
 				"command": binaryPath,
-				"args":    []string{"serve", "--dir", relVault},
+				"args":    []string{"serve", "--dir", absVault},
 			},
 		},
 	}
@@ -280,16 +280,14 @@ func writeJSON(path string, v any) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// relOrAbs returns vaultDir as relative to projectRoot if possible,
-// otherwise returns the absolute path.
-func relOrAbs(projectRoot, vaultDir string) string {
+// absVaultPath returns vaultDir as an absolute path. Generated MCP configs
+// must not depend on the client's working directory — MCP clients do not
+// guarantee they launch servers with cwd = project root, so a relative
+// "--dir .marmot" would silently point at the wrong (or no) vault.
+func absVaultPath(vaultDir string) string {
 	abs, err := filepath.Abs(vaultDir)
 	if err != nil {
 		return vaultDir
 	}
-	rel, err := filepath.Rel(projectRoot, abs)
-	if err != nil {
-		return abs
-	}
-	return rel
+	return abs
 }

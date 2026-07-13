@@ -41,11 +41,7 @@ func TestBuildEngineEnforcesWarrenBridgesForActiveMounts(t *testing.T) {
 		t.Fatalf("Mount: %v", err)
 	}
 
-	result, err := buildEngine(marmotDir)
-	if err != nil {
-		t.Fatalf("buildEngine: %v", err)
-	}
-	defer result.Cleanup()
+	result := hermeticEngine(t, marmotDir)
 
 	if result.Engine.NSManager == nil {
 		t.Fatal("expected Warren bridge declarations to attach namespace manager")
@@ -130,6 +126,137 @@ func TestBuildEngineEnforcesWarrenBridgesForActiveMounts(t *testing.T) {
 	}
 	if !dormant.IsError || !strings.Contains(toolResultText(dormant), "no cross-vault bridge") {
 		t.Fatalf("expected dormant endpoint bridge error, got %s", toolResultText(dormant))
+	}
+}
+
+// TestBuildEngineSelfAliasBridgeEndpointIsLiveVault (R1.3): a manifest bridge
+// between a self-alias (project vault_id == workspace vault_id) and a foreign
+// project activates with the workspace's own .marmot as the alias endpoint;
+// the self-alias claims no registry route and edge validation still matches
+// the bridge by (unchanged) vault IDs.
+func TestBuildEngineSelfAliasBridgeEndpointIsLiveVault(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	writeTestConfig(t, marmotDir, "vault-a")
+
+	warrenRoot := t.TempDir()
+	saveWarrenProject(t, warrenRoot, "product-platform", "project-a", "vault-a")
+	saveWarrenProject(t, warrenRoot, "product-platform", "project-b", "vault-b")
+	if err := warrenpkg.SaveManifest(warrenRoot, &warrenpkg.Manifest{
+		WarrenID: "product-platform",
+		Projects: []warrenpkg.Project{
+			{ProjectID: "project-a", Path: "projects/project-a/.marmot"},
+			{ProjectID: "project-b", Path: "projects/project-b/.marmot"},
+		},
+		Bridges: []warrenpkg.Bridge{
+			{Source: "project-a", Target: "project-b", Relations: []string{"calls"}},
+		},
+	}, ""); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspace, "product-platform", warrenRoot); err != nil {
+		t.Fatalf("RegisterWorkspaceWarren: %v", err)
+	}
+	if _, err := warrenpkg.Mount(workspace, "product-platform", []string{"project-a", "project-b"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	result := hermeticEngine(t, marmotDir)
+
+	_, crossVault := result.Engine.BridgeSnapshot()
+	if len(crossVault) != 1 {
+		t.Fatalf("cross-vault bridges = %+v, want exactly 1", crossVault)
+	}
+	bridge := crossVault[0]
+	absMarmot, err := filepath.Abs(marmotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge.SourceVaultID != "vault-a" || bridge.SourceVaultPath != absMarmot {
+		t.Fatalf("alias endpoint = %q/%q, want vault-a at the live workspace .marmot %q", bridge.SourceVaultID, bridge.SourceVaultPath, absMarmot)
+	}
+	remoteMarmot := filepath.Join(warrenRoot, "projects", "project-b", ".marmot")
+	if bridge.TargetVaultID != "vault-b" || bridge.TargetVaultPath != remoteMarmot {
+		t.Fatalf("foreign endpoint = %q/%q, want vault-b at %q", bridge.TargetVaultID, bridge.TargetVaultPath, remoteMarmot)
+	}
+
+	// Bridge activation semantics: edge validation matches by vault ID.
+	if err := result.Engine.NSManager.ValidateCrossVaultEdge("vault-a", "vault-b", "calls"); err != nil {
+		t.Fatalf("expected activated self-alias bridge to allow calls: %v", err)
+	}
+
+	// The self-alias claims no route; only the foreign endpoint registers.
+	knownVaults := make(map[string]bool)
+	for _, id := range result.Engine.VaultRegistry.KnownVaultIDs() {
+		knownVaults[id] = true
+	}
+	if knownVaults["vault-a"] {
+		t.Fatalf("self-alias vault-a routed in registry: %+v", knownVaults)
+	}
+	if !knownVaults["vault-b"] {
+		t.Fatalf("foreign bridge endpoint vault-b missing from registry: %+v", knownVaults)
+	}
+}
+
+// TestBuildEngineIdentityBridgeWithoutSelfMount (R2.3): the same bridge as
+// the R1 sibling above activates with ONLY the foreign endpoint mounted —
+// the identified project (vault_id == workspace vault_id) is synthesized by
+// ActiveMounts, so no self-mount ritual is needed. The delta from the R1
+// test IS R2.
+func TestBuildEngineIdentityBridgeWithoutSelfMount(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	writeTestConfig(t, marmotDir, "vault-a")
+
+	warrenRoot := t.TempDir()
+	saveWarrenProject(t, warrenRoot, "product-platform", "project-a", "vault-a")
+	saveWarrenProject(t, warrenRoot, "product-platform", "project-b", "vault-b")
+	if err := warrenpkg.SaveManifest(warrenRoot, &warrenpkg.Manifest{
+		WarrenID: "product-platform",
+		Projects: []warrenpkg.Project{
+			{ProjectID: "project-a", Path: "projects/project-a/.marmot"},
+			{ProjectID: "project-b", Path: "projects/project-b/.marmot"},
+		},
+		Bridges: []warrenpkg.Bridge{
+			{Source: "project-a", Target: "project-b", Relations: []string{"calls"}},
+		},
+	}, ""); err != nil {
+		t.Fatalf("SaveManifest: %v", err)
+	}
+	if _, err := warrenpkg.RegisterWorkspaceWarren(workspace, "product-platform", warrenRoot); err != nil {
+		t.Fatalf("RegisterWorkspaceWarren: %v", err)
+	}
+	// Only the FOREIGN endpoint is mounted; project-a is never mentioned.
+	if _, err := warrenpkg.Mount(workspace, "product-platform", []string{"project-b"}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+
+	result := hermeticEngine(t, marmotDir)
+
+	_, crossVault := result.Engine.BridgeSnapshot()
+	if len(crossVault) != 1 {
+		t.Fatalf("cross-vault bridges = %+v, want exactly 1 (identity endpoint needs no mount)", crossVault)
+	}
+	bridge := crossVault[0]
+	absMarmot, err := filepath.Abs(marmotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridge.SourceVaultID != "vault-a" || bridge.SourceVaultPath != absMarmot {
+		t.Fatalf("identity endpoint = %q/%q, want vault-a at the live workspace .marmot %q", bridge.SourceVaultID, bridge.SourceVaultPath, absMarmot)
+	}
+	if err := result.Engine.NSManager.ValidateCrossVaultEdge("vault-a", "vault-b", "calls"); err != nil {
+		t.Fatalf("expected identity bridge to allow calls: %v", err)
+	}
+	knownVaults := make(map[string]bool)
+	for _, id := range result.Engine.VaultRegistry.KnownVaultIDs() {
+		knownVaults[id] = true
+	}
+	if knownVaults["vault-a"] {
+		t.Fatalf("identity vault-a routed in registry: %+v", knownVaults)
+	}
+	if !knownVaults["vault-b"] {
+		t.Fatalf("foreign bridge endpoint vault-b missing from registry: %+v", knownVaults)
 	}
 }
 

@@ -256,6 +256,69 @@ func TestBridgedGraphResolver_TraverseDepthZeroCrossVault(t *testing.T) {
 	}
 }
 
+// TestBridgedResolverLocalAlias (R1.4a): "@<LocalVaultID>/x" resolves against
+// the LIVE local graph (never the vault provider), with the same @-qualified
+// ID and edge-target rewrite discipline as the remote path; an empty
+// LocalVaultID falls through to the vault provider (pre-alias behavior).
+func TestBridgedResolverLocalAlias(t *testing.T) {
+	localG := graph.NewGraph()
+	localG.AddNode(&node.Node{
+		ID: "svc/api", Type: "module", Summary: "live local API",
+		Edges: []node.Edge{
+			{Target: "svc/db", Relation: node.Calls},
+			{Target: "@other/ext", Relation: node.References},
+		},
+	})
+	localG.AddNode(&node.Node{ID: "svc/db", Type: "module", Summary: "live local DB"})
+
+	// A stale copy of the same vault behind the provider: the alias
+	// short-circuit must never reach it.
+	staleG := graph.NewGraph()
+	staleG.AddNode(&node.Node{ID: "svc/api", Type: "module", Summary: "STALE snapshot API"})
+	vaults := &mockVaultProvider{graphs: map[string]*graph.Graph{"local": staleG}}
+
+	resolver := &BridgedGraphResolver{Local: localG, Vaults: vaults, LocalVaultID: "local"}
+
+	n, ok := resolver.GetNode("@local/svc/api")
+	if !ok {
+		t.Fatal("expected @local/svc/api to resolve via the live graph")
+	}
+	if n.ID != "@local/svc/api" {
+		t.Fatalf("expected @-qualified ID, got %q", n.ID)
+	}
+	if n.Summary != "live local API" {
+		t.Fatalf("resolved the stale provider copy, not the live graph: %q", n.Summary)
+	}
+	// The returned node is a copy: mutating it must not corrupt the live graph.
+	n.Edges[0].Target = "mutated"
+	if live, _ := localG.GetNode("svc/api"); live.Edges[0].Target != "svc/db" {
+		t.Fatal("alias GetNode returned a shared Edges slice; live graph corrupted")
+	}
+
+	edges := resolver.GetEdges("@local/svc/api", graph.Outbound)
+	if len(edges) != 2 {
+		t.Fatalf("expected 2 outbound edges, got %d", len(edges))
+	}
+	if edges[0].Target != "@local/svc/db" {
+		t.Fatalf("unqualified edge target not rewritten: %q", edges[0].Target)
+	}
+	if edges[1].Target != "@other/ext" {
+		t.Fatalf("already-qualified edge target rewritten: %q", edges[1].Target)
+	}
+
+	// Missing node under the alias: not found, no fallthrough to the provider.
+	if _, ok := resolver.GetNode("@local/missing"); ok {
+		t.Fatal("expected @local/missing to be not found")
+	}
+
+	// Empty LocalVaultID: pre-alias behavior — the provider answers.
+	plain := &BridgedGraphResolver{Local: localG, Vaults: vaults}
+	n, ok = plain.GetNode("@local/svc/api")
+	if !ok || n.Summary != "STALE snapshot API" {
+		t.Fatalf("empty LocalVaultID must fall through to Vaults, got ok=%v summary=%q", ok, n.Summary)
+	}
+}
+
 func TestBridgedGraphResolver_MultiHopCrossVault(t *testing.T) {
 	// Local -> @rv/a -> (a has edge to b within rv).
 	// With edge-target rewriting, b should be reachable as @rv/b.

@@ -546,3 +546,37 @@ func TestExecuteVerify_NoNodes(t *testing.T) {
 		t.Errorf("expected 'no nodes to verify', got %q", res.Message)
 	}
 }
+
+// TestExecuteVerify_CountsSupersededSeparately: /verify intentionally covers
+// superseded nodes too, but its message must break the count down so users
+// don't confuse it with the (smaller) active-node count shown in the graph.
+func TestExecuteVerify_CountsSupersededSeparately(t *testing.T) {
+	eng := setupTestEngine(t)
+	addTestNode(t, eng, &node.Node{ID: "cs-active-1", Type: "concept", Status: "active"})
+	addTestNode(t, eng, &node.Node{ID: "cs-active-2", Type: "concept", Status: "active"})
+	addTestNode(t, eng, &node.Node{ID: "cs-old", Type: "concept", Status: "superseded", SupersededBy: "cs-active-1"})
+
+	res, err := ExecuteCommand(context.Background(), &SlashCommand{Name: "verify"}, eng, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success {
+		t.Fatalf("verify returned error result: %s", res.Message)
+	}
+	for _, want := range []string{"3 node(s)", "2 active", "1 superseded"} {
+		if !strings.Contains(res.Message, want) {
+			t.Errorf("expected message to contain %q, got %q", want, res.Message)
+		}
+	}
+
+	// All-active graphs keep the plain count (no redundant breakdown).
+	engActive := setupTestEngine(t)
+	addTestNode(t, engActive, &node.Node{ID: "cs-only", Type: "concept", Status: "active"})
+	res2, err := ExecuteCommand(context.Background(), &SlashCommand{Name: "verify"}, engActive, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res2.Message, "superseded") {
+		t.Errorf("expected no superseded breakdown for all-active graph, got %q", res2.Message)
+	}
+}

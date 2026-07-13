@@ -48,14 +48,6 @@ export interface CodeRunInfo {
   mutations?: MutationRecord[];
 }
 
-/** Shape returned by /api/verify/:ns */
-interface Suggestion {
-  type: 'orphan' | 'missing_type' | 'duplicate' | 'stale' | 'untagged';
-  message: string;
-  node_ids: string[];
-  actions: string[];
-}
-
 /** Slash command definition for autocomplete */
 interface SlashCommand {
   name: string;
@@ -63,6 +55,7 @@ interface SlashCommand {
 }
 
 const SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'help', hint: '-- List available commands' },
   { name: 'tag', hint: '<name> -- Add tag to selected nodes' },
   { name: 'untag', hint: '<name> -- Remove tag' },
   { name: 'type', hint: '<type> -- Change node type' },
@@ -106,8 +99,6 @@ export class Curator {
   private input: HTMLInputElement;
   private sendBtn: HTMLElement;
   private messagesEl: HTMLElement;
-  private issuesList: HTMLElement;
-  private badge: HTMLElement;
   private hintEl: HTMLElement;
 
   /* State */
@@ -136,8 +127,6 @@ export class Curator {
     this.input = document.getElementById('chat-input') as HTMLInputElement;
     this.sendBtn = document.getElementById('chat-send')!;
     this.messagesEl = document.getElementById('chat-messages')!;
-    this.issuesList = document.getElementById('issues-list')!;
-    this.badge = document.getElementById('issues-badge')!;
     this.hintEl = document.getElementById('chat-context-hint')!;
     this.sessionId = crypto.randomUUID?.() ?? `s-${Date.now()}`;
 
@@ -439,8 +428,9 @@ export class Curator {
 
     /* Still typing the command name */
     if (parts.length <= 1) {
+      /* No slice cap here: the registry is the menu. A previous cap of 8
+         silently dropped /verify (the 9th command) from the bare "/" menu. */
       return SLASH_COMMANDS.filter((c) => c.name.startsWith(cmdPart.toLowerCase()))
-        .slice(0, 8)
         .map((c) => ({
           label: `/${c.name}`,
           hint: c.hint,
@@ -537,6 +527,9 @@ export class Curator {
 
     try {
       switch (cmd) {
+        case 'help':
+          this.cmdHelp();
+          break;
         case 'tag':
           await this.cmdTag(args);
           break;
@@ -559,16 +552,48 @@ export class Curator {
           await this.cmdUnlink(args);
           break;
         case 'verify':
-          await this.loadSuggestions();
-          this.addCommandResult('Health check complete. See Issues tab.', true);
-          this.switchTab('issues');
+          await this.cmdVerify();
           break;
         default:
-          this.addCommandResult(`Unknown command: /${cmd}`, false);
+          this.addCommandResult(
+            `Unknown command: /${cmd}. Type /help to list available commands.`,
+            false,
+          );
       }
     } catch (err) {
       this.addCommandResult(`Error: ${(err as Error).message}`, false);
     }
+  }
+
+  private cmdHelp(): void {
+    const lines = SLASH_COMMANDS.map((c) => `- /${c.name} ${c.hint}`);
+    this.addCommandResult(['Available commands:', ...lines].join('\n'), true);
+  }
+
+  /**
+   * /verify runs the real backend curator verify command (via the slash
+   * command route of POST /api/chat) so the chat shows the actual result —
+   * including the active/superseded breakdown — instead of the old
+   * hardcoded string. The Issues panel (issues.ts) still owns rendering
+   * suggestions via /api/curator/suggestions, so it is asked to refresh
+   * and the Issues tab keeps its pointer role.
+   */
+  private async cmdVerify(): Promise<void> {
+    const data = (await this.apiPost('/api/chat', {
+      message: '/verify',
+      session_id: this.sessionId,
+      selected_nodes: this.selectedNodes,
+      namespace: this.currentNamespace,
+    })) as ChatResponse;
+    const detail = data?.message?.content?.trim();
+    this.addCommandResult(
+      detail
+        ? `Health check complete: ${detail}. See Issues tab.`
+        : 'Health check complete. See Issues tab.',
+      true,
+    );
+    document.dispatchEvent(new CustomEvent('curator-refresh-issues'));
+    this.switchTab('issues');
   }
 
   private async cmdTag(args: string[]): Promise<void> {
@@ -1099,127 +1124,6 @@ export class Curator {
 
   private scrollToBottom(): void {
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
-  }
-
-  /* ================================================================ */
-  /*  Issues / Suggestions                                             */
-  /* ================================================================ */
-
-  async loadSuggestions(): Promise<void> {
-    try {
-      const res = await fetch(
-        `/api/verify/${encodeURIComponent(this.currentNamespace)}`,
-      );
-      if (!res.ok) {
-        this.badge.hidden = true;
-        return;
-      }
-      const data = await res.json();
-      const suggestions: Suggestion[] = data.issues ?? data.suggestions ?? [];
-
-      /* Update badge */
-      if (suggestions.length > 0) {
-        this.badge.textContent = String(suggestions.length);
-        this.badge.hidden = false;
-      } else {
-        this.badge.hidden = true;
-      }
-
-      /* Render issue cards */
-      this.issuesList.innerHTML = '';
-
-      /* Progress bar */
-      const totalNodes = this.nodeIds.length || 1;
-      const pct = Math.round(
-        ((totalNodes - suggestions.length) / totalNodes) * 100,
-      );
-      const progress = document.createElement('div');
-      progress.className = 'issues-progress';
-      progress.innerHTML =
-        `<div class="issues-progress-label">Your graph is ${pct}% curated</div>` +
-        `<div class="issues-progress-bar"><div class="issues-progress-fill" style="width:${pct}%"></div></div>`;
-      this.issuesList.appendChild(progress);
-
-      for (const s of suggestions) {
-        this.issuesList.appendChild(this.renderSuggestion(s));
-      }
-    } catch {
-      this.badge.hidden = true;
-    }
-  }
-
-  private renderSuggestion(s: Suggestion): HTMLElement {
-    const card = document.createElement('div');
-    card.className = 'issue-card';
-
-    const typeLabel =
-      s.type === 'orphan'
-        ? 'Orphan node'
-        : s.type === 'missing_type'
-          ? 'Missing type'
-          : s.type === 'duplicate'
-            ? 'Possible duplicate'
-            : s.type === 'stale'
-              ? 'Stale source'
-              : 'Untagged cluster';
-
-    card.innerHTML =
-      `<div class="issue-card-type">${escHtml(typeLabel)}</div>` +
-      `<div class="issue-card-message">${escHtml(s.message)}</div>`;
-
-    const actions = document.createElement('div');
-    actions.className = 'issue-card-actions';
-
-    if (s.type === 'orphan') {
-      actions.appendChild(
-        this.makeIssueBtn('Delete', 'danger', async () => {
-          for (const id of s.node_ids) {
-            await this.apiDelete(`/api/node/${encodeURIComponent(id)}`);
-          }
-          card.remove();
-          this.reloadGraph();
-        }),
-      );
-      actions.appendChild(
-        this.makeIssueBtn('Keep', 'neutral', () => {
-          card.remove();
-        }),
-      );
-    } else if (s.type === 'missing_type') {
-      actions.appendChild(
-        this.makeIssueBtn('Set type...', 'positive', () => {
-          this.open(true);
-          this.input.value = '/type ';
-          this.handleInput();
-        }),
-      );
-      actions.appendChild(
-        this.makeIssueBtn('Dismiss', 'neutral', () => {
-          card.remove();
-        }),
-      );
-    } else {
-      actions.appendChild(
-        this.makeIssueBtn('Dismiss', 'neutral', () => {
-          card.remove();
-        }),
-      );
-    }
-
-    card.appendChild(actions);
-    return card;
-  }
-
-  private makeIssueBtn(
-    label: string,
-    style: 'danger' | 'neutral' | 'positive',
-    onClick: () => void,
-  ): HTMLButtonElement {
-    const btn = document.createElement('button');
-    btn.textContent = label;
-    btn.className = `issue-btn-${style}`;
-    btn.addEventListener('click', () => void onClick());
-    return btn;
   }
 
   /* ================================================================ */

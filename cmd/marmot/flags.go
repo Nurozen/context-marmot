@@ -1,6 +1,8 @@
 package main
 
-import "strings"
+import (
+	"strings"
+)
 
 // reorderInterspersedFlags moves flag arguments ahead of positional arguments
 // so subcommands accept flags before or after positionals, even though Go's

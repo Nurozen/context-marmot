@@ -1,9 +1,13 @@
 package namespace
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/nurozen/context-marmot/internal/embedding"
 )
 
 // setupRemoteVault creates a minimal remote vault dir with a config and one
@@ -22,11 +26,33 @@ func setupRemoteVault(t *testing.T, id string) string {
 	return dir
 }
 
-func TestResolveEmbeddingStore(t *testing.T) {
-	vaultDir := setupRemoteVault(t, "emb-vault")
+// seedRemoteEmbeddingDB writes a real embeddings.db with one row into the
+// vault's .marmot-data dir and closes it (checkpointing the WAL away).
+// Remote stores are opened read-only, so the DB must genuinely exist.
+func seedRemoteEmbeddingDB(t *testing.T, vaultDir string) string {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Join(vaultDir, ".marmot-data"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	dbPath := filepath.Join(vaultDir, ".marmot-data", "embeddings.db")
+	store, err := embedding.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("seed remote embeddings.db: %v", err)
+	}
+	emb := embedding.NewMockEmbedder("mock-test")
+	vec, _ := emb.Embed("A concept.")
+	if err := store.Upsert("concept-a", vec, "hash", emb.Model()); err != nil {
+		t.Fatalf("seed upsert: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("seed close: %v", err)
+	}
+	return dbPath
+}
+
+func TestResolveEmbeddingStore(t *testing.T) {
+	vaultDir := setupRemoteVault(t, "emb-vault")
+	seedRemoteEmbeddingDB(t, vaultDir)
 
 	bridges := []*Bridge{
 		{SourceVaultID: "local", TargetVaultID: "emb-vault", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
@@ -61,9 +87,7 @@ func TestResolveEmbeddingStoreUnknownVault(t *testing.T) {
 
 func TestResolveEmbeddingStoreAfterGraphLoad(t *testing.T) {
 	vaultDir := setupRemoteVault(t, "pre-loaded")
-	if err := os.MkdirAll(filepath.Join(vaultDir, ".marmot-data"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	seedRemoteEmbeddingDB(t, vaultDir)
 	bridges := []*Bridge{
 		{SourceVaultID: "local", TargetVaultID: "pre-loaded", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
 	}
@@ -82,9 +106,7 @@ func TestResolveEmbeddingStoreAfterGraphLoad(t *testing.T) {
 
 func TestRegistryClose(t *testing.T) {
 	vaultDir := setupRemoteVault(t, "close-vault")
-	if err := os.MkdirAll(filepath.Join(vaultDir, ".marmot-data"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	seedRemoteEmbeddingDB(t, vaultDir)
 	bridges := []*Bridge{
 		{SourceVaultID: "local", TargetVaultID: "close-vault", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
 	}
@@ -99,4 +121,83 @@ func TestRegistryClose(t *testing.T) {
 	// Close is safe to call again with no loaded stores.
 	empty := NewVaultRegistry("local", "/tmp/local", nil, nil)
 	empty.Close()
+}
+
+// TestResolveEmbeddingStoreDoesNotMutateRemote is the A1 regression: a
+// cross-vault search through the registry must not migrate schema, write
+// data, or change a byte of the remote vault's embeddings.db (the remote is
+// someone else's git checkout). Missing remote DBs must error, not be
+// created.
+func TestResolveEmbeddingStoreDoesNotMutateRemote(t *testing.T) {
+	vaultDir := setupRemoteVault(t, "ro-vault")
+	dbPath := seedRemoteEmbeddingDB(t, vaultDir)
+	before, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read remote db: %v", err)
+	}
+
+	bridges := []*Bridge{
+		{SourceVaultID: "local", TargetVaultID: "ro-vault", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
+	}
+	r := NewVaultRegistry("local", "/tmp/local", bridges, nil)
+	defer r.Close()
+
+	store, err := r.ResolveEmbeddingStore("ro-vault")
+	if err != nil {
+		t.Fatalf("ResolveEmbeddingStore: %v", err)
+	}
+	emb := embedding.NewMockEmbedder("mock-test")
+	query, _ := emb.Embed("A concept.")
+	results, err := store.SearchActive(query, 5, emb.Model())
+	if err != nil {
+		t.Fatalf("SearchActive on remote store: %v", err)
+	}
+	if len(results) != 1 || results[0].NodeID != "concept-a" {
+		t.Fatalf("results = %+v, want concept-a", results)
+	}
+
+	// A write through the resolved store must be rejected, not silently
+	// mutate the remote checkout.
+	vec, _ := emb.Embed("sneaky write")
+	if err := store.Upsert("sneaky", vec, "h", emb.Model()); err == nil {
+		t.Fatal("expected Upsert on remote store to be rejected")
+	}
+
+	// The remote main DB file is byte-identical (no journal-mode flip, no
+	// schema migration, no data). The WAL sidecar, if the RO open created
+	// one, stays empty.
+	after, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read remote db after: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("cross-vault read mutated the remote embeddings.db")
+	}
+	if fi, err := os.Stat(dbPath + "-wal"); err == nil && fi.Size() != 0 {
+		t.Errorf("cross-vault read wrote %d bytes into the remote WAL", fi.Size())
+	}
+
+	// Missing remote DB: resolving errors instead of creating a file.
+	emptyVault := setupRemoteVault(t, "no-db-vault")
+	r2 := NewVaultRegistry("local", "/tmp/local", []*Bridge{
+		{SourceVaultID: "local", TargetVaultID: "no-db-vault", SourceVaultPath: "/tmp/local", TargetVaultPath: emptyVault},
+	}, nil)
+	defer r2.Close()
+	if _, err := r2.ResolveEmbeddingStore("no-db-vault"); err == nil {
+		t.Fatal("expected error resolving store for vault without embeddings.db")
+	}
+	if _, err := os.Stat(filepath.Join(emptyVault, ".marmot-data", "embeddings.db")); !os.IsNotExist(err) {
+		t.Fatalf("resolve created a remote embeddings.db (stat err=%v)", err)
+	}
+}
+
+// TestResolveEmbeddingStoreUnknownVaultHint (U4.3): the unknown-vault error
+// matches ResolveGraph's wording so both resolvers explain where vault IDs
+// come from.
+func TestResolveEmbeddingStoreUnknownVaultHint(t *testing.T) {
+	r := NewVaultRegistry("local", "/tmp/local", nil, nil)
+	_, err := r.ResolveEmbeddingStore("nope")
+	if err == nil || !strings.Contains(err.Error(), `unknown vault "nope": not in routing table or bridge manifests`) {
+		t.Fatalf("err = %v, want routing-table hint", err)
+	}
 }

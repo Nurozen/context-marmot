@@ -50,6 +50,68 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEnvOverrideDisables is the regression test for manual-test issue 9:
+// a fresh scratch vault must be able to opt out of the user's global
+// ~/.marmot/routes.yml via MARMOT_ROUTES=off (aliases: none, 0).
+func TestEnvOverrideDisables(t *testing.T) {
+	for _, val := range []string{"off", "none", "0"} {
+		t.Run(val, func(t *testing.T) {
+			t.Setenv("MARMOT_ROUTES", val)
+			if got := DefaultPath(); got != "" {
+				t.Errorf("expected empty path, got %q", got)
+			}
+			rt, err := Load()
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if len(rt.Vaults) != 0 {
+				t.Errorf("expected empty table, got %d entries", len(rt.Vaults))
+			}
+			if err := Save(rt); err == nil {
+				t.Error("expected Save to fail while routing is disabled")
+			}
+			if err := Update(func(rt *RoutingTable) error { return nil }); err == nil {
+				t.Error("expected Update to fail while routing is disabled")
+			}
+		})
+	}
+}
+
+func TestEnvOverrideRedirectsPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.yml")
+	t.Setenv("MARMOT_ROUTES", path)
+
+	if got := DefaultPath(); got != path {
+		t.Fatalf("expected DefaultPath %q, got %q", path, got)
+	}
+
+	if err := Update(func(rt *RoutingTable) error {
+		rt.Set("alpha", "/projects/alpha/.marmot")
+		return nil
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	rt, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if p, ok := rt.Get("alpha"); !ok || p != "/projects/alpha/.marmot" {
+		t.Errorf("expected alpha route via env-redirected table, got %q (ok=%v)", p, ok)
+	}
+}
+
+func TestSetOverridePathWinsOverEnv(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "override.yml")
+	t.Setenv("MARMOT_ROUTES", "off")
+	SetOverridePath(override)
+	defer SetOverridePath("")
+
+	if got := DefaultPath(); got != override {
+		t.Errorf("expected SetOverridePath to win over MARMOT_ROUTES, got %q", got)
+	}
+}
+
 func TestRemove(t *testing.T) {
 	rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
 	rt.Set("alpha", "/path/a")

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/frontmatter"
 	"github.com/nurozen/context-marmot/internal/routes"
 	"gopkg.in/yaml.v3"
 )
@@ -164,17 +165,12 @@ func LoadNamespace(nsDir string) (*Namespace, error) {
 
 // parseNamespace extracts YAML frontmatter from _namespace.md content.
 func parseNamespace(data []byte) (*Namespace, error) {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
-		return nil, fmt.Errorf("missing YAML frontmatter")
+	yamlBlock, _, err := frontmatter.Split(data)
+	if err != nil {
+		return nil, err
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return nil, fmt.Errorf("unterminated YAML frontmatter")
-	}
-	yamlBlock := content[3 : end+3]
 	var ns Namespace
-	if err := yaml.Unmarshal([]byte(yamlBlock), &ns); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, &ns); err != nil {
 		return nil, fmt.Errorf("unmarshal namespace: %w", err)
 	}
 	if ns.Name == "" {
@@ -257,7 +253,7 @@ func SaveNamespace(nsDir string, ns *Namespace) error {
 	buf.WriteString("---\n")
 	buf.Write(yamlBytes)
 	buf.WriteString("---\n\n")
-	buf.WriteString(fmt.Sprintf("Namespace configuration for %s.\n", ns.Name))
+	fmt.Fprintf(&buf, "Namespace configuration for %s.\n", ns.Name)
 
 	path := filepath.Join(nsDir, "_namespace.md")
 	tmp, err := os.CreateTemp(nsDir, ".namespace-*.md.tmp")
@@ -361,17 +357,12 @@ func LoadBridge(path string) (*Bridge, error) {
 
 // parseBridge extracts YAML frontmatter from a bridge manifest.
 func parseBridge(data []byte) (*Bridge, error) {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
-		return nil, fmt.Errorf("missing YAML frontmatter")
+	yamlBlock, _, err := frontmatter.Split(data)
+	if err != nil {
+		return nil, err
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return nil, fmt.Errorf("unterminated YAML frontmatter")
-	}
-	yamlBlock := content[3 : end+3]
 	var b Bridge
-	if err := yaml.Unmarshal([]byte(yamlBlock), &b); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, &b); err != nil {
 		return nil, fmt.Errorf("unmarshal bridge: %w", err)
 	}
 	if b.Source == "" || b.Target == "" {
@@ -423,8 +414,8 @@ func SaveBridge(vaultDir string, b *Bridge) error {
 	buf.WriteString("---\n")
 	buf.Write(yamlBytes)
 	buf.WriteString("---\n\n")
-	buf.WriteString(fmt.Sprintf("Bridge between [[%s/_namespace]] and [[%s/_namespace]].\n\n", b.Source, b.Target))
-	buf.WriteString(fmt.Sprintf("Allowed cross-namespace relation types: %s.\n\n", formatRelationList(b.AllowedRelations)))
+	fmt.Fprintf(&buf, "Bridge between [[%s/_namespace]] and [[%s/_namespace]].\n\n", b.Source, b.Target)
+	fmt.Fprintf(&buf, "Allowed cross-namespace relation types: %s.\n\n", formatRelationList(b.AllowedRelations))
 	buf.WriteString("Actual edges are declared in individual node files and auto-discovered by the engine.\n")
 
 	filename := BridgeKey(b.Source, b.Target) + ".md"
@@ -538,15 +529,10 @@ type edgeRef struct {
 
 // extractEdgesFromFrontmatter does a lightweight YAML parse to extract edge targets.
 func extractEdgesFromFrontmatter(data []byte) []edgeRef {
-	content := string(data)
-	if !strings.HasPrefix(content, "---") {
+	yamlBlock, _, err := frontmatter.Split(data)
+	if err != nil {
 		return nil
 	}
-	end := strings.Index(content[3:], "---")
-	if end < 0 {
-		return nil
-	}
-	yamlBlock := content[3 : end+3]
 
 	var fm struct {
 		Edges []struct {
@@ -554,7 +540,7 @@ func extractEdgesFromFrontmatter(data []byte) []edgeRef {
 			Relation string `yaml:"relation"`
 		} `yaml:"edges"`
 	}
-	if err := yaml.Unmarshal([]byte(yamlBlock), &fm); err != nil {
+	if err := yaml.Unmarshal(yamlBlock, &fm); err != nil {
 		return nil
 	}
 
@@ -612,10 +598,17 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 	}
 
 	if localCfg.VaultID == "" {
-		return nil, fmt.Errorf("local vault at %s has no vault_id set; run 'marmot configure' first", localVaultDir)
+		return nil, fmt.Errorf("local vault at %s has no vault_id set; run 'marmot configure --vault-id <id>' first", localVaultDir)
 	}
 	if remoteCfg.VaultID == "" {
-		return nil, fmt.Errorf("remote vault at %s has no vault_id set; run 'marmot configure' in that project first", remoteVaultDir)
+		return nil, fmt.Errorf("remote vault at %s has no vault_id set; run 'marmot configure --vault-id <id>' in that project first", remoteVaultDir)
+	}
+	// Bridging a vault to a copy of itself would write a degenerate
+	// @X--@X.md manifest and double-register X in the routing table (the
+	// second Set silently clobbers the first) — the same live-vault
+	// shadowing the warren self-alias machinery exists to prevent.
+	if localCfg.VaultID == remoteCfg.VaultID {
+		return nil, fmt.Errorf("both vaults have vault_id %q — refusing to bridge a vault to itself (a self-route would shadow the live vault); if these are truly different projects, give one a distinct vault_id in its .marmot/_config.md", localCfg.VaultID)
 	}
 
 	absLocal, err := filepath.Abs(localVaultDir)
@@ -662,12 +655,16 @@ func CreateCrossVaultBridge(localVaultDir, remoteVaultDir string, allowedRelatio
 		return nil, fmt.Errorf("commit bridge to remote vault: %w", err)
 	}
 
-	// Auto-register both vaults in the global routing table (best-effort).
-	_ = routes.Update(func(rt *routes.RoutingTable) error {
+	// Auto-register both vaults in the global routing table (best-effort:
+	// the bridge manifests are already committed, but an unregistered route
+	// silently breaks cross-vault resolution later — so say so).
+	if err := routes.Update(func(rt *routes.RoutingTable) error {
 		rt.Set(localCfg.VaultID, absLocal)
 		rt.Set(remoteCfg.VaultID, absRemote)
 		return nil
-	})
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: bridge created but vaults not auto-registered in routes.yml: %v — run 'marmot route add' manually\n", err)
+	}
 
 	return bridge, nil
 }
@@ -692,7 +689,7 @@ func writeCrossVaultBridgeTemp(vaultDir string, b *Bridge) (string, string, erro
 	buf.WriteString("---\n")
 	buf.Write(yamlBytes)
 	buf.WriteString("---\n")
-	buf.WriteString(fmt.Sprintf("# Cross-Vault Bridge: %s <-> %s\n", b.SourceVaultID, b.TargetVaultID))
+	fmt.Fprintf(&buf, "# Cross-Vault Bridge: %s <-> %s\n", b.SourceVaultID, b.TargetVaultID)
 
 	path := filepath.Join(bridgeDir, filename)
 	tmpPath := path + ".tmp"

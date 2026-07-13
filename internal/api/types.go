@@ -51,6 +51,13 @@ type GraphResponse struct {
 	EdgeCount  int           `json:"edge_count"`
 	HeatPairs  []APIHeatPair `json:"heat_pairs,omitempty"`
 	Namespaces []string      `json:"namespaces,omitempty"` // populated only for _all view
+	// Skipped lists Warren project IDs whose mounts were unavailable or
+	// whose graphs failed to load (Warren graph view only; additive field).
+	Skipped []string `json:"skipped,omitempty"`
+	// SkippedReasons maps each skipped project ID to why it was skipped —
+	// the same reason the server logs to stderr, made visible over HTTP so
+	// UIs can render it (U4.4; additive field).
+	SkippedReasons map[string]string `json:"skipped_reasons,omitempty"`
 }
 
 // APIHeatPair represents a co-access frequency pair.
@@ -79,7 +86,31 @@ type SearchResult struct {
 
 // WarrensResponse lists local workspace Warren registrations.
 type WarrensResponse struct {
-	Warrens map[string]warren.WorkspaceWarren `json:"warrens"`
+	Warrens map[string]WarrenEntry `json:"warrens"`
+	// LocalVaultID is this workspace's configured vault_id (empty when the
+	// vault has none). The UI uses it to label the local project group and
+	// to fold @<local-vault>/… identity nodes back onto their live local
+	// counterparts in aggregate views.
+	LocalVaultID string `json:"local_vault_id,omitempty"`
+}
+
+// WarrenEntry is a registered warren's workspace state plus its computed
+// identified projects (checkout vault_id matches this workspace's vault).
+// Identity is derived at read time, never stored, so the field lives on the
+// response type — additive over the raw WorkspaceWarren shape.
+type WarrenEntry struct {
+	warren.WorkspaceWarren
+	// ActiveProjects shadows the embedded field's omitempty JSON tag so the
+	// API always emits an array (`"active_projects": []` when nothing is
+	// mounted) — clients must not have to null-check a key that vanishes.
+	// The on-disk workspace-state YAML shape is unaffected.
+	ActiveProjects     []string `json:"active_projects"`
+	IdentifiedProjects []string `json:"identified_projects,omitempty"`
+	// Reachable reports whether the registered checkout directory still
+	// exists — the same computation as the CLI's 'warren list' REACHABLE
+	// column (additive) — so UIs can badge moved/deleted warrens even when
+	// nothing is mounted.
+	Reachable bool `json:"reachable"`
 }
 
 // WarrenStatusResponse describes a registered Warren in this workspace.
@@ -87,6 +118,25 @@ type WarrenStatusResponse struct {
 	WarrenID string                 `json:"warren_id"`
 	Path     string                 `json:"path"`
 	Projects []warren.ProjectStatus `json:"projects"`
+}
+
+// WarrenMountRequest is the JSON body for POST /api/warren/{id}/mount and
+// POST /api/warren/{id}/unmount. When All is true the project list is
+// expanded server-side: every manifest project for mount, every currently
+// active project for unmount.
+type WarrenMountRequest struct {
+	Projects []string `json:"projects,omitempty"`
+	All      bool     `json:"all,omitempty"`
+}
+
+// WarrenMountResponse is returned by POST /api/warren/{id}/mount and
+// POST /api/warren/{id}/unmount after the workspace state change and the
+// engine-wide warren reload both succeed.
+type WarrenMountResponse struct {
+	WarrenID string   `json:"warren_id"`
+	Action   string   `json:"action"` // "mounted" or "unmounted"
+	Projects []string `json:"projects"`
+	Status   string   `json:"status"` // "reloaded"
 }
 
 // NamespacesResponse is returned by the GET /api/namespaces endpoint.
@@ -134,6 +184,9 @@ type NodeUpdateResponse struct {
 	NodeID string `json:"node_id"`
 	Hash   string `json:"hash"`
 	Status string `json:"status"`
+	// Warning is set when the node write succeeded but a secondary effect
+	// (e.g. the embedding refresh on an editable Warren mount) failed.
+	Warning string `json:"warning,omitempty"`
 }
 
 // ChatUndoRequest is the JSON body for POST /api/chat/undo. When UndoID is
@@ -155,6 +208,30 @@ type ChatUndoResponse struct {
 type SuggestionsResponse struct {
 	Suggestions []curator.Suggestion `json:"suggestions"`
 	NodeCount   int                  `json:"node_count"`
+	// IntegrityIssues are the scoped integrity-check results the /verify
+	// slash command counts, so the Issues panel can show the same set the
+	// chat message reports. Always an array (empty when the graph is clean).
+	IntegrityIssues []IntegrityIssueAPI `json:"integrity_issues"`
+	// IntegrityNodeCount is how many nodes (superseded included) the
+	// integrity checks covered — matches the "across N node(s)" figure in
+	// the /verify chat message.
+	IntegrityNodeCount int `json:"integrity_node_count"`
+}
+
+// IntegrityIssueAPI is the JSON projection of a verify.IntegrityIssue.
+type IntegrityIssueAPI struct {
+	NodeID   string `json:"node_id"`
+	Type     string `json:"type"` // dangling_edge, hash_mismatch, structural_cycle, missing_source
+	Message  string `json:"message"`
+	Severity string `json:"severity"` // error, warning, info
+}
+
+// VersionResponse is returned by GET /api/version. Version is the live-reload
+// graph version counter (bumped on every vault change); AppVersion is the
+// marmot build version injected via ldflags in cmd/marmot.
+type VersionResponse struct {
+	Version    int64  `json:"version"`
+	AppVersion string `json:"app_version"`
 }
 
 // ErrorResponse is returned for any API error.

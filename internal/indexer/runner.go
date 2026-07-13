@@ -55,8 +55,10 @@ type RunnerConfig struct {
 	VaultDir string
 	// Namespace is the target namespace for generated nodes.
 	Namespace string
-	// Incremental enables incremental indexing: only re-index files whose
-	// source hash has changed since the last run.
+	// Incremental is retained for backward compatibility. The runner now
+	// always performs deterministic hash-based skipping: an entity whose
+	// node already exists with the same source hash is never re-indexed,
+	// so re-running an index over an unchanged tree is a no-op.
 	Incremental bool
 	// ExtraIgnore is an optional list of additional ignore patterns.
 	ExtraIgnore []string
@@ -70,6 +72,15 @@ type RunResult struct {
 	Skipped    int
 	Errors     int
 	Total      int
+	// ErrorDetails holds a human-readable diagnostic for every error
+	// counted in Errors (file or node ID plus the underlying cause).
+	ErrorDetails []string
+}
+
+// recordError increments the error count and stores a diagnostic message.
+func (r *RunResult) recordError(format string, args ...any) {
+	r.Errors++
+	r.ErrorDetails = append(r.ErrorDetails, fmt.Sprintf(format, args...))
 }
 
 // Runner orchestrates indexing an entire directory tree, converting source
@@ -125,17 +136,6 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 
 	ignore := NewIgnoreMatcher(r.config.SrcDir, r.config.ExtraIgnore)
 
-	// Build a set of existing node IDs for incremental mode.
-	existingNodes := make(map[string]bool)
-	if r.config.Incremental {
-		metas, err := r.nodeStore.ListNodes()
-		if err == nil {
-			for _, m := range metas {
-				existingNodes[m.ID] = true
-			}
-		}
-	}
-
 	// Collect entities from all files.
 	type pendingNode struct {
 		entity   SourceEntity
@@ -144,6 +144,12 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		target   string // for UPDATE/SUPERSEDE: the existing node ID
 	}
 	var pending []pendingNode
+
+	// currentIDs tracks every entity ID emitted by this run. A classifier
+	// decision must never supersede a node that is itself a live entity of
+	// the source tree being indexed (e.g. a file node superseded by one of
+	// its own child functions).
+	currentIDs := make(map[string]bool)
 
 	walkErr := filepath.Walk(r.config.SrcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -189,7 +195,7 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		// Index the file.
 		indexResult, err := idx.IndexFile(path, relPath, r.config.Namespace)
 		if err != nil {
-			result.Errors++
+			result.recordError("%s: %v", relPath, err)
 			return nil // skip files that fail to parse
 		}
 		if indexResult == nil || len(indexResult.Entities) == 0 {
@@ -199,28 +205,32 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		// Process each entity.
 		for _, entity := range indexResult.Entities {
 			result.Total++
+			currentIDs[entity.ID] = true
 
-			// Incremental check: compare source hash.
-			if r.config.Incremental && existingNodes[entity.ID] {
-				nodePath := r.nodeStore.NodePath(entity.ID)
-				existing, loadErr := r.nodeStore.LoadNode(nodePath)
-				if loadErr == nil && existing != nil && existing.Source.Hash == entity.Source.Hash {
+			// Deterministic identity check: a source entity always maps to
+			// the same node ID, so if that node already exists the decision
+			// is purely hash-based — same hash is a no-op, changed hash is a
+			// plain UPDATE. The classifier is never consulted for existing
+			// entities: it must not re-route them onto a different node.
+			nodePath := r.nodeStore.NodePath(entity.ID)
+			if existing, loadErr := r.nodeStore.LoadNode(nodePath); loadErr == nil && existing != nil {
+				if existing.Source.Hash == entity.Source.Hash && existing.Status == node.StatusActive {
 					result.Skipped++
 					continue
 				}
+				// Changed content, or a node that needs reactivating.
+				pending = append(pending, pendingNode{
+					entity: entity,
+					action: llm.ActionUPDATE,
+					target: entity.ID,
+				})
+				continue
 			}
 
-			// Determine action.
+			// New entity: default to ADD; consult the classifier (if any)
+			// so renames/moves can supersede pre-existing nodes.
 			action := llm.ActionADD
 			var targetNodeID string
-
-			if r.config.Incremental && existingNodes[entity.ID] {
-				// Entity already exists with a different hash.
-				action = llm.ActionUPDATE
-				targetNodeID = entity.ID
-			}
-
-			// Use classifier if available for more nuanced decisions.
 			var prebuilt *node.Node
 			if r.classifier != nil && r.graph != nil {
 				prebuilt = entityToNode(entity, r.config.Namespace)
@@ -258,7 +268,24 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		}
 		n.ValidFrom = now
 
-		switch p.action {
+		action := p.action
+		// Guard: never supersede a node that is itself a live entity of the
+		// tree being indexed (e.g. a parent file node vs. its own child
+		// function). Such classifier decisions degrade to a plain ADD.
+		if action == llm.ActionSUPERSEDE && (p.target == "" || p.target == n.ID || currentIDs[p.target]) {
+			action = llm.ActionADD
+		}
+		// A supersede against a node that no longer exists is also an ADD.
+		var oldNode *node.Node
+		if action == llm.ActionSUPERSEDE {
+			if loaded, loadErr := r.nodeStore.LoadNode(r.nodeStore.NodePath(p.target)); loadErr == nil && loaded != nil {
+				oldNode = loaded
+			} else {
+				action = llm.ActionADD
+			}
+		}
+
+		switch action {
 		case llm.ActionNOOP:
 			result.Skipped++
 			continue
@@ -266,7 +293,7 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		case llm.ActionADD:
 			n.Status = node.StatusActive
 			if err := r.nodeStore.SaveNode(n); err != nil {
-				result.Errors++
+				result.recordError("save node %s: %v", n.ID, err)
 				continue
 			}
 			result.Added++
@@ -274,26 +301,23 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 		case llm.ActionUPDATE:
 			n.Status = node.StatusActive
 			if err := r.nodeStore.SaveNode(n); err != nil {
-				result.Errors++
+				result.recordError("save node %s: %v", n.ID, err)
 				continue
 			}
 			result.Updated++
 
 		case llm.ActionSUPERSEDE:
-			// Mark old node as superseded if it exists and is different.
-			if p.target != "" && p.target != n.ID {
-				oldPath := r.nodeStore.NodePath(p.target)
-				oldNode, loadErr := r.nodeStore.LoadNode(oldPath)
-				if loadErr == nil && oldNode != nil {
-					oldNode.Status = node.StatusSuperseded
-					oldNode.ValidUntil = now
-					oldNode.SupersededBy = n.ID
-					_ = r.nodeStore.SaveNode(oldNode)
-				}
+			// Mark old node as superseded (the guards above ensure the
+			// target exists, is distinct, and is not a current entity).
+			oldNode.Status = node.StatusSuperseded
+			oldNode.ValidUntil = now
+			oldNode.SupersededBy = n.ID
+			if saveErr := r.nodeStore.SaveNode(oldNode); saveErr != nil {
+				result.recordError("supersede node %s: %v", p.target, saveErr)
 			}
 			n.Status = node.StatusActive
 			if err := r.nodeStore.SaveNode(n); err != nil {
-				result.Errors++
+				result.recordError("save node %s: %v", n.ID, err)
 				continue
 			}
 			result.Superseded++
@@ -302,7 +326,7 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 			// Unknown action — treat as ADD.
 			n.Status = node.StatusActive
 			if err := r.nodeStore.SaveNode(n); err != nil {
-				result.Errors++
+				result.recordError("save node %s: %v", n.ID, err)
 				continue
 			}
 			result.Added++
@@ -321,17 +345,16 @@ func (r *Runner) Run(ctx context.Context) (*RunResult, error) {
 
 	// Batch embed all new/changed nodes.
 	if r.embedder != nil && len(embedQueue) > 0 {
-		result.Errors += r.batchEmbedItems(embedQueue)
+		r.batchEmbedItems(embedQueue, result)
 	}
 
 	return result, nil
 }
 
 // batchEmbedItems embeds a list of (nodeID, text) pairs in batches and upserts
-// them into the embedding store. Returns the count of failed upserts.
-func (r *Runner) batchEmbedItems(items []embedItem) int {
+// them into the embedding store, recording any failures on result.
+func (r *Runner) batchEmbedItems(items []embedItem, result *RunResult) {
 	const batchSize = 32
-	var errCount int
 
 	for i := 0; i < len(items); i += batchSize {
 		end := i + batchSize
@@ -351,12 +374,12 @@ func (r *Runner) batchEmbedItems(items []embedItem) int {
 			for _, item := range batch {
 				vec, embErr := r.embedder.Embed(item.text)
 				if embErr != nil {
-					errCount++
+					result.recordError("embed node %s: %v", item.nodeID, embErr)
 					continue
 				}
 				summaryHash := hashString(item.text)
 				if upsertErr := r.embStore.Upsert(item.nodeID, vec, summaryHash, r.embedder.Model()); upsertErr != nil {
-					errCount++
+					result.recordError("embed upsert node %s: %v", item.nodeID, upsertErr)
 				}
 			}
 			continue
@@ -368,12 +391,10 @@ func (r *Runner) batchEmbedItems(items []embedItem) int {
 			}
 			summaryHash := hashString(batch[j].text)
 			if upsertErr := r.embStore.Upsert(batch[j].nodeID, vec, summaryHash, r.embedder.Model()); upsertErr != nil {
-				errCount++
+				result.recordError("embed upsert node %s: %v", batch[j].nodeID, upsertErr)
 			}
 		}
 	}
-
-	return errCount
 }
 
 // embedItem holds a node ID and the text to embed.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -228,6 +229,12 @@ func TestContextWriteRejectsMountedWarrenID(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("expected @vault ID write to be rejected")
+	}
+	// C8 aligned the MCP path with the API: the rejection is now scoped to
+	// vaults that are not active editable mounts (this engine has none) and
+	// names the enabling command.
+	if text := resultText(t, res); !strings.Contains(text, "not an editable warren mount") {
+		t.Fatalf("rejection = %q, want editable-mount wording", text)
 	}
 	if eng.GetGraph().NodeCount() != 0 {
 		t.Fatalf("expected no graph mutation, got %d nodes", eng.GetGraph().NodeCount())

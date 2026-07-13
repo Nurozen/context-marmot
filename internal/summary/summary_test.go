@@ -200,6 +200,8 @@ func TestSchedulerNotifyChange(t *testing.T) {
 	}
 
 	sched := NewScheduler(engine, config, dir, "test", loader)
+	sched.Start(context.Background())
+	defer sched.Stop()
 
 	// Set lastNodeCount to 5, then notify with 10 (100% delta, well above 20%).
 	sched.mu.Lock()
@@ -242,6 +244,8 @@ func TestSchedulerNotifyChangeBelowThreshold(t *testing.T) {
 	}
 
 	sched := NewScheduler(engine, config, dir, "test", loader)
+	sched.Start(context.Background())
+	defer sched.Stop()
 
 	// Set lastNodeCount to 10, then notify with 11 (10% delta, below 20% threshold).
 	sched.mu.Lock()
@@ -278,6 +282,8 @@ func TestSchedulerMinNodes(t *testing.T) {
 	}
 
 	sched := NewScheduler(engine, config, dir, "test", loader)
+	sched.Start(context.Background())
+	defer sched.Stop()
 
 	// Notify with only 2 nodes — below MinNodes.
 	sched.NotifyChange(2)
@@ -288,6 +294,39 @@ func TestSchedulerMinNodes(t *testing.T) {
 	if mock.GetSummarizeCalls() != 0 {
 		t.Errorf("SummarizeCalls = %d, want 0 (below MinNodes)", mock.GetSummarizeCalls())
 	}
+}
+
+// TestSchedulerNotifyChangeBeforeStartIsNoop pins the coexistence guarantee:
+// a scheduler that is attached but never started (query/ui while a live serve
+// owner runs the vault's single scheduler) must not spawn regenerations from
+// write notifications.
+func TestSchedulerNotifyChangeBeforeStartIsNoop(t *testing.T) {
+	mock := &llm.MockProvider{
+		SummaryResult: "Test summary.",
+	}
+	engine := NewEngine(mock)
+	dir := t.TempDir()
+
+	loader := func() ([]*node.Node, error) {
+		return []*node.Node{
+			{ID: "a", Type: "concept", Status: "active", Summary: "Node A."},
+			{ID: "b", Type: "concept", Status: "active", Summary: "Node B."},
+			{ID: "c", Type: "concept", Status: "active", Summary: "Node C."},
+		}, nil
+	}
+
+	sched := NewScheduler(engine, SchedulerConfig{DeltaThreshold: 0.2, MinNodes: 3}, dir, "test", loader)
+
+	// Well above every threshold — would regenerate if the scheduler ran.
+	sched.NotifyChange(10)
+
+	time.Sleep(100 * time.Millisecond)
+	if mock.GetSummarizeCalls() != 0 {
+		t.Errorf("SummarizeCalls = %d, want 0 (scheduler never started)", mock.GetSummarizeCalls())
+	}
+
+	// Stop on a never-started scheduler stays a safe no-op.
+	sched.Stop()
 }
 
 func TestSchedulerStartStop(t *testing.T) {

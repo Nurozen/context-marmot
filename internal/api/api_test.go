@@ -35,15 +35,15 @@ func writeTestNode(t *testing.T, marmotDir, id, nodeType, summary string, edges 
 	// Build YAML frontmatter.
 	var buf strings.Builder
 	buf.WriteString("---\n")
-	buf.WriteString(fmt.Sprintf("id: %s\n", id))
-	buf.WriteString(fmt.Sprintf("type: %s\n", nodeType))
+	fmt.Fprintf(&buf, "id: %s\n", id)
+	fmt.Fprintf(&buf, "type: %s\n", nodeType)
 	buf.WriteString("namespace: default\n")
 	buf.WriteString("status: active\n")
 	if len(edges) > 0 {
 		buf.WriteString("edges:\n")
 		for _, e := range edges {
-			buf.WriteString(fmt.Sprintf("    - target: %s\n", e.target))
-			buf.WriteString(fmt.Sprintf("      relation: %s\n", e.relation))
+			fmt.Fprintf(&buf, "    - target: %s\n", e.target)
+			fmt.Fprintf(&buf, "      relation: %s\n", e.relation)
 		}
 	}
 	buf.WriteString("---\n\n")
@@ -132,7 +132,20 @@ func newTestServer(t *testing.T) (*Server, *mcpserver.Engine) {
 	return server, engine
 }
 
+// setupAPIWarren registers AND mounts a one-project warren. The endpoint
+// tests that drive mounting over HTTP use registerAPIWarren instead.
 func setupAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID string) string {
+	t.Helper()
+	warrenRoot := registerAPIWarren(t, workspaceRoot, warrenID, projectID, vaultID)
+	if _, err := warrenpkg.Mount(workspaceRoot, warrenID, []string{projectID}, false); err != nil {
+		t.Fatalf("Mount: %v", err)
+	}
+	return warrenRoot
+}
+
+// registerAPIWarren builds a one-project warren checkout and registers it in
+// the workspace without mounting anything.
+func registerAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID string) string {
 	t.Helper()
 	warrenRoot := t.TempDir()
 	marmotDir := filepath.Join(warrenRoot, "projects", projectID, ".marmot")
@@ -164,9 +177,6 @@ func setupAPIWarren(t *testing.T, workspaceRoot, warrenID, projectID, vaultID st
 	if _, err := warrenpkg.RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot); err != nil {
 		t.Fatalf("RegisterWorkspaceWarren: %v", err)
 	}
-	if _, err := warrenpkg.Mount(workspaceRoot, warrenID, []string{projectID}, false); err != nil {
-		t.Fatalf("Mount: %v", err)
-	}
 	return warrenRoot
 }
 
@@ -188,17 +198,16 @@ func seedRemoteEmbedding(t *testing.T, marmotDir, vaultID, nodeID, text string) 
 	}
 }
 
+// wireWarrenVaultRegistry mirrors buildEngine's warren wiring: an always-on
+// empty registry plus ReloadWarrenState (the production path — B2 removed
+// the hand-built second wiring path this helper used to be).
 func wireWarrenVaultRegistry(t *testing.T, engine *mcpserver.Engine) {
 	t.Helper()
-	mounts, err := warrenpkg.ActiveMounts(engine.MarmotDir)
-	if err != nil {
-		t.Fatalf("ActiveMounts: %v", err)
+	t.Setenv("MARMOT_ROUTES", "off")
+	engine.WithVaultRegistry(namespace.NewVaultRegistry("", engine.MarmotDir, nil, routes.EmptyTable()))
+	if err := engine.ReloadWarrenState(); err != nil {
+		t.Fatalf("ReloadWarrenState: %v", err)
 	}
-	rt := &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
-	for _, mount := range mounts {
-		rt.Set(mount.VaultID, mount.Path)
-	}
-	engine.WithVaultRegistry(namespace.NewVaultRegistry("", engine.MarmotDir, nil, rt))
 }
 
 // doRequest is a helper that performs an HTTP request against the server handler
@@ -319,6 +328,11 @@ func TestWarrenGraphAndEditableWritePolicy(t *testing.T) {
 	rec = doRequest(t, handler, "PUT", updatePath, `{"summary":"updated summary"}`)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected read-only 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// U4.2: the refusal names its remediation command.
+	if body := rec.Body.String(); !strings.Contains(body, "'marmot warren edit project-a --warren product-platform'") ||
+		!strings.Contains(body, "unless the warren author marked it read-only") {
+		t.Fatalf("read-only refusal = %q, want the warren edit remediation hint", body)
 	}
 
 	if _, err := warrenpkg.SetEditable(workspaceRoot, "product-platform", "project-a", true); err != nil {

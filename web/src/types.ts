@@ -37,10 +37,14 @@ export interface GraphResponse {
   edge_count: number;
   heat_pairs?: APIHeatPair[];
   namespaces?: string[];
+  /** Warren graph view only: project IDs skipped from the view. */
+  skipped?: string[];
+  /** Warren graph view only: why each skipped project was skipped. */
+  skipped_reasons?: Record<string, string>;
 }
 
 export interface Provenance {
-  source?: 'local' | 'warren_mount' | 'warren_materialized' | string;
+  source?: 'local' | 'warren_mount' | 'warren_materialized' | 'local_alias' | string;
   warren_id?: string;
   project_id?: string;
   vault_id?: string;
@@ -68,10 +72,60 @@ export interface WorkspaceWarren {
   active_projects?: string[];
   editable_projects?: string[];
   materialized_projects?: string[];
+  /** Computed: projects whose vault_id matches this workspace (served live; never mounted). */
+  identified_projects?: string[];
+  /** Computed: whether the registered checkout directory still exists (CLI REACHABLE). */
+  reachable?: boolean;
 }
 
 export interface WarrensResponse {
   warrens: Record<string, WorkspaceWarren>;
+  /** This workspace's configured vault_id (absent when the vault has none). */
+  local_vault_id?: string;
+}
+
+/** One warren project's workspace state (GET /api/warren/{id}/status). */
+export interface ProjectStatus {
+  warren_id: string;
+  warren_path?: string;
+  project_id: string;
+  path: string;
+  vault_id?: string;
+  registered: boolean;
+  active: boolean;
+  editable: boolean;
+  materialized: boolean;
+  available: boolean;
+  /** Identity: this project IS the workspace vault (served live, read-only, never routed). */
+  self_alias?: boolean;
+}
+
+export interface WarrenStatusResponse {
+  warren_id: string;
+  path: string;
+  projects: ProjectStatus[];
+}
+
+/** Response of POST /api/warren/{id}/mount and /unmount. */
+export interface WarrenMountResponse {
+  warren_id: string;
+  action: 'mounted' | 'unmounted';
+  projects: string[];
+  status: string;
+}
+
+/** One workspace doctor finding (GET /api/doctor/workspace). */
+export interface DoctorIssue {
+  severity: 'error' | 'warning' | 'info' | string;
+  code: string;
+  message: string;
+  project_id?: string;
+  path?: string;
+}
+
+export interface DoctorReport {
+  warren_id?: string;
+  issues?: DoctorIssue[];
 }
 
 export interface BridgeInfo {

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/config"
@@ -89,6 +91,34 @@ func TestWithVaultRegistryCachesLocalVaultID(t *testing.T) {
 	}
 	if eng.LocalVaultID != "local-vault" {
 		t.Errorf("expected cached LocalVaultID=local-vault, got %q", eng.LocalVaultID)
+	}
+
+	// Unreadable config: LocalVaultID stays empty (disabling every alias
+	// guard), but no longer silently — the degradation warns on stderr.
+	eng2 := testEngine(t)
+	if err := os.WriteFile(filepath.Join(eng2.MarmotDir, "_config.md"), []byte("---\nvault_id: [\n---\n"), 0o644); err != nil {
+		t.Fatalf("corrupt config: %v", err)
+	}
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	func() {
+		defer func() { os.Stderr = old }()
+		eng2.WithVaultRegistry(namespace.NewVaultRegistry("", eng2.MarmotDir, nil, nil))
+		_ = w.Close()
+	}()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr pipe: %v", err)
+	}
+	if eng2.LocalVaultID != "" {
+		t.Errorf("unreadable config must leave LocalVaultID empty, got %q", eng2.LocalVaultID)
+	}
+	if !strings.Contains(string(out), "local vault config unreadable") || !strings.Contains(string(out), "self-mount aliasing") {
+		t.Errorf("expected degradation warning on stderr, got %q", out)
 	}
 }
 
@@ -501,6 +531,19 @@ func TestValidateCrossVaultEdges(t *testing.T) {
 	}))
 	if !res.IsError {
 		t.Fatal("expected edge to unbridged vault to be rejected")
+	}
+
+	// A "@<LocalVaultID>/x" target is a local edge wearing a costume: it
+	// passes with no bridge (no relation restriction), while foreign vaults
+	// still require one.
+	res, _ = eng.HandleContextWrite(ctx, makeCallToolRequest("context_write", map[string]any{
+		"id":      "gw/selfref",
+		"type":    "module",
+		"summary": "gateway referencing its own vault by qualified ID",
+		"edges":   []map[string]any{{"target": "@local/svc/api", "relation": "writes"}},
+	}))
+	if res.IsError {
+		t.Fatalf("self-qualified edge target rejected: %s", resultText(t, res))
 	}
 }
 

@@ -10,12 +10,14 @@
   <div id="app">
     <header id="toolbar">
       <div class="toolbar-left">
+        <button id="filter-toggle" title="Toggle filters" aria-label="Toggle filters">&#9776;</button>
         <h1 class="logo">
           <img class="logo-mark-img" src="logo-mark.png" alt="" width="38" height="28" />
           ContextMarmot
         </h1>
         <select id="namespace-select"></select>
         <button id="refresh-btn" title="Refresh graph">&#x21BB;</button>
+        <button id="warren-toggle" class="hidden" title="Warren management">Warrens <span id="warren-badge" class="curator-badge" hidden>0</span></button>
       </div>
       <div class="toolbar-center">
         <input type="text" id="search-input" placeholder="Search nodes… (press /)" />
@@ -26,6 +28,7 @@
           <option value="type" selected>Group by type</option>
           <option value="tag">Group by tag</option>
           <option value="folder">Group by folder</option>
+          <option value="project">Group by project</option>
           <option value="namespace">Group by namespace</option>
         </select>
         <label class="toggle"><input type="checkbox" id="heat-toggle" /> Heat</label>
@@ -51,6 +54,13 @@
         <div id="minimap"></div>
         <div id="legend"></div>
       </div>
+      <aside id="warren-panel" class="hidden" aria-label="Warren management">
+        <div class="warren-panel-header">
+          <h3>Warrens</h3>
+          <button id="warren-panel-close" title="Close">&#x2715;</button>
+        </div>
+        <div id="warren-panel-body"></div>
+      </aside>
       <aside id="detail-panel" class="hidden">
         <button id="detail-close">&#x2715;</button>
         <div id="detail-content"></div>

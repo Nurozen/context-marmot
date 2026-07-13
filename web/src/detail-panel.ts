@@ -122,19 +122,26 @@ export class DetailPanel {
       this.content.appendChild(provenanceSection);
     }
 
-    // ── Summary (editable) ──
+    // Read-only warren nodes (@foreign warren_mount and local_alias views)
+    // must not accept typing: the save path is blocked, so an editable
+    // textarea would be a silent dead-end.
+    const isReadOnlyWarrenNode = Boolean(node.provenance && !node.provenance.editable);
+
+    // ── Summary (editable unless read-only warren node) ──
     const summarySection = this.createSection('Summary');
     const summaryArea = document.createElement('textarea');
     this.styleTextarea(summaryArea, 3);
     summaryArea.value = node.summary;
+    if (isReadOnlyWarrenNode) this.markReadOnly(summaryArea);
     summarySection.appendChild(summaryArea);
     this.content.appendChild(summarySection);
 
-    // ── Context (editable) ──
+    // ── Context (editable unless read-only warren node) ──
     const contextSection = this.createSection('Context');
     const contextArea = document.createElement('textarea');
     this.styleTextarea(contextArea, 6);
     contextArea.value = node.context;
+    if (isReadOnlyWarrenNode) this.markReadOnly(contextArea);
     contextSection.appendChild(contextArea);
     this.content.appendChild(contextSection);
 
@@ -151,8 +158,13 @@ export class DetailPanel {
     }
 
     // ── Edges (grouped by relation) ──
-    if (node.edges.length > 0) {
-      const edgesSection = this.createSection(`Edges (${node.edges.length})`);
+    // The API's `edges` array holds only the edges declared on this node
+    // (outgoing), while `edge_count` is the total in+out degree. Label both
+    // so the panel agrees with the hover card ("N out / M in").
+    const outCount = node.edges.length;
+    const inCount = Math.max(0, (node.edge_count ?? outCount) - outCount);
+    if (outCount > 0 || inCount > 0) {
+      const edgesSection = this.createSection(`Edges (${outCount} out / ${inCount} in)`);
       const grouped = this.groupEdges(node.edges, node.id);
       const list = document.createElement('ul');
       list.className = 'edge-list';
@@ -184,6 +196,16 @@ export class DetailPanel {
       }
 
       edgesSection.appendChild(list);
+
+      if (inCount > 0) {
+        const note = document.createElement('p');
+        note.textContent = `${inCount} incoming edge${inCount > 1 ? 's' : ''} from other nodes (not listed).`;
+        note.style.fontSize = '10px';
+        note.style.color = 'var(--text-muted)';
+        note.style.marginTop = '4px';
+        edgesSection.appendChild(note);
+      }
+
       this.content.appendChild(edgesSection);
     }
 
@@ -203,7 +225,6 @@ export class DetailPanel {
     // ── Save button ──
     const saveBtn = document.createElement('button');
     saveBtn.textContent = 'Save Changes';
-    const isReadOnlyWarrenNode = Boolean(node.provenance && !node.provenance.editable);
     saveBtn.disabled = true;
     Object.assign(saveBtn.style, {
       marginTop: '12px',
@@ -220,8 +241,20 @@ export class DetailPanel {
       transition: 'opacity var(--transition-fast)',
     });
 
+    let readOnlyHint: HTMLElement | null = null;
     if (isReadOnlyWarrenNode) {
       saveBtn.textContent = 'Read-only Warren Node';
+      readOnlyHint = document.createElement('p');
+      readOnlyHint.className = 'readonly-hint';
+      if (node.provenance?.source === 'local_alias') {
+        // Identity/self-alias: the @-qualified view is a read-through of the
+        // live workspace vault; the write path is the unqualified node.
+        readOnlyHint.textContent = 'This is your live vault — edit the unqualified node.';
+      } else {
+        const project = node.provenance?.project_id ?? '<project>';
+        const warrenId = node.provenance?.warren_id ?? '<warren>';
+        readOnlyHint.textContent = `Enable writes: marmot warren edit ${project} --warren ${warrenId}`;
+      }
     }
 
     const enableSave = () => {
@@ -258,6 +291,7 @@ export class DetailPanel {
     });
 
     this.content.appendChild(saveBtn);
+    if (readOnlyHint) this.content.appendChild(readOnlyHint);
 
     // Show the panel
     this.container.classList.remove('hidden');
@@ -282,6 +316,15 @@ export class DetailPanel {
     h4.textContent = title;
     section.appendChild(h4);
     return section;
+  }
+
+  /** Read-only affordance for warren-node textareas: blocks typing and
+   *  makes the blocked state visible (styling lives in style.css via the
+   *  [readonly] attribute selector). */
+  private markReadOnly(el: HTMLTextAreaElement): void {
+    el.readOnly = true;
+    el.setAttribute('aria-readonly', 'true');
+    el.title = 'Read-only warren node — edits are not accepted here.';
   }
 
   private styleTextarea(el: HTMLTextAreaElement, rows: number): void {

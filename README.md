@@ -151,6 +151,14 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
+> **Codex CLI users:** Codex (observed with v0.143) gates MCP servers behind its
+> own approval/trust model. In headless runs (`codex exec`), project-level
+> `.codex/config.toml` MCP servers may be hidden, and MCP tool calls are
+> auto-cancelled (`"user cancelled MCP tool call"`) under the default read-only
+> sandbox. Run codex with `--dangerously-bypass-approvals-and-sandbox` (or mark
+> the project as trusted) for the context-marmot tools to be listed and
+> executable. This is Codex approval behavior, not a marmot limitation.
+
 ### Mount a Warren for multi-project context
 
 A Warren is a git-backed collection of project `.marmot/` vaults. It lets a local
@@ -158,6 +166,10 @@ workspace query selected upstream project graphs without copying every project
 graph into the local vault.
 
 ```bash
+# In your local project first: give the workspace a vault_id — the identity
+# key for warren bridges involving your own project
+marmot configure --vault-id my-project
+
 # From the Warren repository
 marmot warren init --id product-platform
 marmot warren project import project-a ../project-a/.marmot --vault-id project-a-vault
@@ -171,17 +183,34 @@ marmot warren mount --warren product-platform project-a project-b
 # Make one mounted project editable in this workspace
 marmot warren edit --warren product-platform project-a
 
-# Cache selected project graphs locally for offline use
-marmot warren burrow --materialize --warren product-platform project-b
+# Cache selected project graphs locally for offline use (burrow always materializes)
+marmot warren burrow --warren product-platform project-b
+
+# Undo: deactivate projects, delete caches, remove the Warren
+marmot warren unmount --warren product-platform project-a
+marmot warren burrow --drop --warren product-platform --all
+marmot warren unregister --warren product-platform
 ```
 
-Mounted projects are dormant until `marmot warren mount` activates them. Active
+Mounted projects are dormant until `marmot warren mount` activates them (a
+bare `mount`/`burrow` with no project IDs requires an explicit `--all`). Active
 Warren projects are included in MCP/CLI graph queries and appear as a separate
 `Warren <id>` view in `marmot ui`. Local namespace views such as `default` remain
 local-scoped.
 
-See [docs/warrens.md](docs/warrens.md) for Warren layout, read/write policy,
-authoring commands, bridge policy, materialization, and UI/API behavior.
+Cross-vault resolution uses a **global routing table** at `~/.marmot/routes.yml`
+(populated by `marmot route add` and `marmot warren register`). Every
+`marmot query`/`marmot serve` loads it, so even a brand-new vault reports
+`vault registry: N remote vaults registered` if other vaults are registered on
+the machine. Set `MARMOT_ROUTES=off` (or `none`/`0`) to run without the global
+table — useful for hermetic tests and scratch vaults — or point
+`MARMOT_ROUTES=/path/to/routes.yml` at an alternate table.
+
+See the ["Quickstart: zero to first bridge"](docs/warrens.md#quickstart-zero-to-first-bridge)
+walkthrough in [docs/warrens.md](docs/warrens.md) for the full
+zero-to-first-bridge flow (including workspace identity), plus Warren layout,
+read/write policy, authoring commands, bridge policy, materialization, and
+UI/API behavior.
 
 ## MCP Tools
 
@@ -195,6 +224,31 @@ Once connected, agents get five tools:
 | `context_verify` | Check node staleness, dangling edges, and structural integrity. |
 | `context_delete` | Soft-delete (supersede) a node. Excluded from future queries by default. |
 
+### Serve and the single-owner daemon
+
+Each MCP client spawns its own `marmot serve` process, so several serves often
+share one vault. Daemon mode makes that safe: **the first serve owns the vault**
+(one engine, one summary scheduler, one graph watcher) and every later serve
+transparently relays its stdio MCP session to the owner over a unix socket, so
+all clients see one consistent, always-fresh graph. If the owner dies, a
+surviving serve re-elects itself and takes over.
+
+Ownership is **per-vault**, not per-machine: serves pointed at different vaults
+(e.g. one per project) each elect their own owner and never interact; only
+serves sharing a vault join the same daemon. Election locks on the vault's
+`daemon.lock` inode, so relative/absolute/symlinked spellings of the same vault
+path all join the same election.
+
+- **On by default**: a plain `marmot serve` joins the per-vault election; no
+  configuration needed.
+- **Opt out** with `marmot serve --no-daemon` or `MARMOT_NO_DAEMON=1` to run
+  standalone (each serve keeps its own engine over the shared SQLite WAL).
+  Windows always runs standalone.
+- **NFS caveat**: election uses `flock(2)` on
+  `.marmot/.marmot-data/daemon.lock`, whose semantics are unreliable on
+  NFS/network filesystems — set `MARMOT_NO_DAEMON=1` for vaults that live on
+  one.
+
 ## CLI Reference
 
 | Command | Description |
@@ -205,7 +259,7 @@ Once connected, agents get five tools:
 | `marmot index [--dir .marmot] [--force] [<path>] [--incremental]` | Index node files or run static analysis on source code. `--force` rebuilds all embeddings. |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
 | `marmot verify [--dir .marmot]` | Run integrity and staleness checks |
-| `marmot serve [--dir .marmot]` | Start the MCP server on stdio |
+| `marmot serve [--dir .marmot] [--no-daemon]` | Start the MCP server on stdio (see [serve and the single-owner daemon](#serve-and-the-single-owner-daemon)) |
 | `marmot status [--dir .marmot]` | Show vault stats: node counts, edges, embeddings, namespaces, heat map |
 | `marmot watch [--dir .marmot]` | Start file watcher for auto-reindex on source changes |
 | `marmot namespace create/list/update/doctor/remove ...` | Manage per-namespace `_namespace.md` manifests |
@@ -214,21 +268,25 @@ Once connected, agents get five tools:
 | `marmot warren project import <project-id> <source-.marmot> [--vault-id <id>]` | Copy an existing project vault into a Warren |
 | `marmot warren project add <project-id> --path <project-.marmot> [--vault-id <id>]` | Register an already placed project vault in a Warren |
 | `marmot warren project list/remove/rename ...` | List or maintain Warren project entries |
+| `marmot warren project set-readonly <project-id> [--off]` | Author-side write policy: veto consumer edits for one project |
 | `marmot warren bridge add/list/remove ...` | Maintain Warren-owned project bridge policy |
-| `marmot warren doctor [--json]` | Validate a Warren repository |
+| `marmot warren doctor [--workspace] [--json]` | Validate a Warren repository (or, with `--workspace`, this workspace's warren state) |
 | `marmot warren format` | Normalize a Warren manifest |
 | `marmot warren register <id> <path>` | Register a git-backed Warren repository in this workspace |
 | `marmot warren list [--json]` | List registered Warrens and local mount state |
-| `marmot warren mount --warren <id> <project-id>...` | Activate selected Warren projects for query/UI use |
-| `marmot warren burrow --materialize --warren <id> <project-id>...` | Activate and cache selected Warren projects under `.marmot-data/` |
-| `marmot warren status --warren <id> [--json]` | Show registered/active/editable/materialized project state |
-| `marmot warren edit [--off] --warren <id> <project-id>` | Toggle write access for one mounted Warren project |
-| `marmot warren refresh --warren <id>` | Refresh git-backed Warren state from disk |
-| `marmot warren propose --warren <id>` | Print a proposal-oriented summary for Warren changes |
+| `marmot warren mount --warren <id> <project-id>...\|--all` | Activate selected (or, with `--all`, every) Warren project for query/UI use |
+| `marmot warren unmount --warren <id> <project-id>...\|--all` | Deactivate Warren projects (non-destructive; burrow caches kept) |
+| `marmot warren burrow --warren <id> <project-id>...\|--all` | Activate and cache Warren projects under `.marmot-data/` (always materializes) |
+| `marmot warren burrow --drop --warren <id> <project-id>...\|--all` | Delete burrow caches (clears the materialized flag with the last one) |
+| `marmot warren unregister --warren <id> [--force]` | Remove a Warren from the workspace (refuses while mounts/caches exist unless forced) |
+| `marmot warren status --warren <id> [--json]` | Show registered/active/editable/materialized project state (flags unreachable checkouts) |
+| `marmot warren edit [--off] --warren <id> <project-id>` | Toggle write access for one Warren project (edit implies mount) |
+| `marmot warren refresh [--pull] --warren <id>` | Reload Warren state for live engines; `--pull` also fast-forwards the checkout and re-materializes stale burrow caches |
+| `marmot warren propose [--warren <id>] [<project-id>]` | Branch + commit one project's editable-mount edits for review (local-only; never pushes) |
 | `marmot summarize [--namespace ...]` | Force summary regeneration for a namespace |
 | `marmot reembed [--dir .marmot]` | Regenerate all embeddings (use after changing provider/model) |
 | `marmot sdk [--out ./marmot-sdk.ts]` | Generate a type-safe TypeScript SDK from MCP tool schemas |
-| `marmot ui [--dir .marmot] [--port 3274] [--no-open]` | Start the embedded graph visualization UI |
+| `marmot ui [--dir .marmot] [--host 127.0.0.1] [--port 3274] [--no-open]` | Start the embedded graph visualization UI (binds loopback only by default; `--host 0.0.0.0` exposes it) |
 
 ## Architecture
 

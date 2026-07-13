@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	nspkg "github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/sdkgen"
 	"github.com/nurozen/context-marmot/internal/summary"
@@ -394,9 +397,16 @@ func (s *Server) handleNodeUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req NodeUpdateRequest) {
-	vaultID, localID, ok := splitQualifiedVaultID(id)
+	vaultID, localID, ok := warren.SplitQualifiedVaultID(id)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid Warren node id: "+id)
+		return
+	}
+	// Self-alias guard: an @-write to the workspace's own vault ID would land
+	// in the warren checkout copy and split-brain the live vault (including
+	// legacy state that still records the self project as editable).
+	if vaultID != "" && vaultID == s.engine.LocalVaultID {
+		writeError(w, http.StatusForbidden, fmt.Sprintf("vault %q is this workspace's own vault; update the node via PUT /api/node/%s (no @ prefix)", vaultID, localID))
 		return
 	}
 	mount, ok := s.findWarrenMountByVault(vaultID)
@@ -405,9 +415,18 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		return
 	}
 	if !mount.Editable {
-		writeError(w, http.StatusForbidden, "Warren project is read-only in this workspace: "+mount.ProjectID)
+		writeError(w, http.StatusForbidden, fmt.Sprintf("Warren project is read-only in this workspace: %s — enable writes with 'marmot warren edit %s --warren %s' (unless the warren author marked it read-only)", mount.ProjectID, mount.ProjectID, mount.WarrenID))
 		return
 	}
+
+	// Serialize the load-modify-save cycle on the same per-mount lock as the
+	// MCP @-write path (handleWarrenContextWrite): C8 makes the payloads
+	// equivalent, but without shared locking a concurrent API+MCP (or
+	// API+API) update to one mounted node would interleave and silently drop
+	// one writer's summary/context/tags.
+	mu := s.engine.NamespaceLock("@" + vaultID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	store := node.NewStore(mount.Path)
 	path := store.NodePath(localID)
@@ -430,40 +449,52 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		diskNode.Tags = *req.Tags
 	}
 
-	if err := store.SaveNode(diskNode); err != nil {
+	// warren.WriteEditableNode is the single MCP/API write-back path: the node
+	// save error is fatal, while an embedding failure must not roll the
+	// durable node write back or 500 the request — the response carries a
+	// warning field (and stderr gets a line) so a stale embedding is never
+	// silent.
+	var warning string
+	var vec []float32
+	var summaryHash, model string
+	if embeddingChanged && s.engine.Embedder != nil {
+		embedText := warren.EmbedText(diskNode)
+		if embedText != "" {
+			v, err := s.engine.Embedder.Embed(embedText)
+			if err != nil {
+				warning = "embedding not updated: " + err.Error()
+			} else {
+				vec = v
+				h := sha256.Sum256([]byte(embedText))
+				summaryHash = hex.EncodeToString(h[:])
+				model = s.engine.Embedder.Model()
+			}
+		}
+	}
+	writeWarning, err := warren.WriteEditableNode(mount, diskNode, vec, summaryHash, model)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "save Warren node: "+err.Error())
 		return
 	}
-
-	if embeddingChanged && s.engine.Embedder != nil {
-		embedText := diskNode.Summary
-		if diskNode.Context != "" {
-			ctxSnip := diskNode.Context
-			if len(ctxSnip) > 6000 {
-				ctxSnip = ctxSnip[:6000]
-			}
-			embedText = diskNode.Summary + "\n\n" + ctxSnip
-		}
-		if embedText != "" {
-			vec, err := s.engine.Embedder.Embed(embedText)
-			if err == nil {
-				embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
-				if storeErr == nil {
-					h := sha256.Sum256([]byte(embedText))
-					_ = embStore.Upsert(diskNode.ID, vec, hex.EncodeToString(h[:]), s.engine.Embedder.Model())
-					_ = embStore.Close()
-				}
-			}
-		}
+	if warning == "" {
+		warning = writeWarning
+	}
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "warning: warren editable write %s: %s\n", id, warning)
 	}
 	if s.engine.VaultRegistry != nil {
-		_ = s.engine.VaultRegistry.Refresh(vaultID)
+		if err := s.engine.VaultRegistry.Refresh(vaultID); err != nil && !errors.Is(err, nspkg.ErrNotLoaded) {
+			// ErrNotLoaded means nothing was cached — nothing to refresh.
+			// Anything else makes the stale-cache window visible, not silent.
+			fmt.Fprintf(os.Stderr, "warning: refresh after editable write failed for vault %q: %v\n", vaultID, err)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, NodeUpdateResponse{
-		NodeID: id,
-		Hash:   verify.ComputeNodeHash(diskNode),
-		Status: "updated",
+		NodeID:  id,
+		Hash:    verify.ComputeNodeHash(diskNode),
+		Status:  "updated",
+		Warning: warning,
 	})
 }
 
@@ -542,7 +573,10 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 	if warrenFilter == ns {
 		return nil
 	}
-	mounts, _ := warren.ActiveMounts(s.engine.MarmotDir)
+	mounts, err := warren.ActiveMounts(s.engine.MarmotDir)
+	if err != nil {
+		s.warnVaultOnce("_active_mounts", "warren mounts unavailable for search: %v", err)
+	}
 	mountByVault := make(map[string]warren.ProjectStatus, len(mounts))
 	for _, mount := range mounts {
 		if !mount.Available || mount.VaultID == "" {
@@ -558,16 +592,40 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 	}
 
 	var results []embedding.ScoredResult
-	for vaultID := range mountByVault {
-		if vaultID == "" || vaultID == s.engine.LocalVaultID {
+	for vaultID, mount := range mountByVault {
+		if vaultID == "" {
+			continue
+		}
+		if vaultID == s.engine.LocalVaultID {
+			// A self-alias project is served from the live vault: search the
+			// local store directly (the registry must never resolve our own
+			// vault) so the project stays visible in its warren's scope.
+			if !mount.SelfAlias {
+				continue // stale engine cache or hand-edited state: stay skipped
+			}
+			localResults, err := s.engine.EmbeddingStore.SearchActive(vec, limit, s.engine.Embedder.Model())
+			if err != nil {
+				s.warnVaultOnce(vaultID, "local vault search failed for warren scope: %v", err)
+				continue
+			}
+			for _, result := range localResults {
+				results = append(results, embedding.ScoredResult{
+					NodeID: "@" + vaultID + "/" + result.NodeID,
+					Score:  result.Score,
+				})
+			}
 			continue
 		}
 		remoteStore, err := s.engine.VaultRegistry.ResolveEmbeddingStore(vaultID)
 		if err != nil {
+			// Best-effort: local results still return, but the degradation is
+			// visible (once per vault) instead of silently vanishing.
+			s.warnVaultOnce(vaultID, "warren vault %q embedding store unavailable, excluded from search: %v", vaultID, err)
 			continue
 		}
 		remoteResults, err := remoteStore.SearchActive(vec, limit, s.engine.Embedder.Model())
 		if err != nil {
+			s.warnVaultOnce(vaultID, "warren vault %q search failed, excluded from results: %v", vaultID, err)
 			continue
 		}
 		for _, result := range remoteResults {
@@ -585,9 +643,25 @@ func (s *Server) resolveSearchNode(id string) (*node.Node, *warren.Provenance, b
 		n, ok := s.engine.GetGraph().GetNode(id)
 		return n, nil, ok
 	}
-	vaultID, nodeID, ok := splitQualifiedVaultID(id)
+	vaultID, nodeID, ok := warren.SplitQualifiedVaultID(id)
 	if !ok || s.engine.VaultRegistry == nil {
 		return nil, nil, false
+	}
+	// The workspace's own vault ID resolves against the live graph (zero
+	// staleness, no registry copy) with alias provenance; edits go through
+	// the unqualified local node, so the @-qualified view stays read-only.
+	if vaultID != "" && vaultID == s.engine.LocalVaultID {
+		n, ok := s.engine.GetGraph().GetNode(nodeID)
+		if !ok {
+			return nil, nil, false
+		}
+		return n, &warren.Provenance{
+			Source:      "local_alias",
+			VaultID:     vaultID,
+			MarmotDir:   s.engine.MarmotDir,
+			QualifiedID: id,
+			Editable:    false, // edit via the unqualified local node, not @-writes
+		}, true
 	}
 	n, ok := s.engine.VaultRegistry.Resolve(vaultID, nodeID)
 	if !ok {
@@ -782,14 +856,41 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleWarrens lists Warren registrations for the current local workspace.
+// handleWarrens lists Warren registrations for the current local workspace,
+// each with its computed identified projects (identity is derived from
+// vault_id at read time, never stored in workspace state).
 func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
 	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, WarrensResponse{Warrens: state.Warrens})
+	identified := make(map[string][]string)
+	if mounts, mountsErr := warren.ActiveMounts(s.engine.MarmotDir); mountsErr == nil {
+		for _, mount := range mounts {
+			if mount.SelfAlias {
+				identified[mount.WarrenID] = append(identified[mount.WarrenID], mount.ProjectID)
+			}
+		}
+	}
+	warrens := make(map[string]WarrenEntry, len(state.Warrens))
+	for id, entry := range state.Warrens {
+		active := entry.ActiveProjects
+		if active == nil {
+			// JSON shape stability: emit [] instead of dropping the key.
+			active = []string{}
+		}
+		warrens[id] = WarrenEntry{
+			WorkspaceWarren:    entry,
+			ActiveProjects:     active,
+			IdentifiedProjects: identified[id],
+			Reachable:          dirExists(entry.Path),
+		}
+	}
+	writeJSON(w, http.StatusOK, WarrensResponse{
+		Warrens:      warrens,
+		LocalVaultID: s.engine.LocalVaultID,
+	})
 }
 
 // handleWarrenStatus returns mounted/editable status for a single Warren.
@@ -834,7 +935,8 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
 		return
 	}
-	if _, ok := state.Warrens[id]; !ok {
+	entry, ok := state.Warrens[id]
+	if !ok {
 		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
 		return
 	}
@@ -849,17 +951,53 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 		Nodes:     []APINode{},
 		Edges:     []APIEdge{},
 	}
+
+	// An unreachable warren (checkout moved/deleted, no burrow cache) yields
+	// zero mounts from ActiveMounts, which used to render as a clean empty
+	// 200 graph — silent exactly when the user most needs a signal (C2).
+	// Surface every active project as skipped with the manifest error so the
+	// UI can toast and the panel rows carry skip tooltips.
+	if !entry.Materialized {
+		if _, _, merr := warren.LoadManifest(entry.Path); merr != nil {
+			for _, projectID := range entry.ActiveProjects {
+				markSkipped(&resp, projectID, fmt.Sprintf("warren unreachable: manifest unreadable at %s: %v", entry.Path, merr))
+			}
+		}
+	}
 	nsSet := make(map[string]bool)
+	renderedVaults := make(map[string]bool)
 
 	for _, mount := range mounts {
-		if mount.WarrenID != id || !mount.Available {
+		if mount.WarrenID != id {
 			continue
 		}
-		store := node.NewStore(mount.Path)
+		// Node IDs are keyed by vault (@<vault_id>/<node>), so each vault
+		// renders once. Two identified projects sharing the workspace
+		// vault_id are coherent per the alias contract — a second pass over
+		// the live vault would duplicate every node and edge.
+		if mount.VaultID != "" && renderedVaults[mount.VaultID] {
+			continue
+		}
+		if !mount.Available {
+			fmt.Fprintf(os.Stderr, "warning: warren %q project %q unavailable at %s, skipped from graph\n", id, mount.ProjectID, mount.Path)
+			markSkipped(&resp, mount.ProjectID, fmt.Sprintf("project unavailable at %s", mount.Path))
+			continue
+		}
+		// A self-alias serves from the live workspace vault, never the warren
+		// snapshot; its @-qualified view stays read-only (edits go through
+		// the unqualified local node).
+		storeDir, provenanceSource, provenanceDir, provenanceEditable := mount.Path, "warren_mount", mount.Path, mount.Editable
+		if mount.SelfAlias {
+			storeDir, provenanceSource, provenanceDir, provenanceEditable = s.engine.MarmotDir, "local_alias", s.engine.MarmotDir, false
+		}
+		store := node.NewStore(storeDir)
 		g, err := graph.LoadGraph(store)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: warren %q project %q graph unreadable: %v (skipped from graph)\n", id, mount.ProjectID, err)
+			markSkipped(&resp, mount.ProjectID, fmt.Sprintf("graph unreadable: %v", err))
 			continue
 		}
+		renderedVaults[mount.VaultID] = true
 		nodes := g.AllActiveNodes()
 		for _, n := range nodes {
 			outEdges := g.GetEdges(n.ID, graph.Outbound)
@@ -867,13 +1005,13 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 			apiNode := nodeToAPI(n, len(outEdges)+len(inEdges))
 			apiNode.ID = "@" + mount.VaultID + "/" + n.ID
 			apiNode.Provenance = &warren.Provenance{
-				Source:      "warren_mount",
+				Source:      provenanceSource,
 				WarrenID:    mount.WarrenID,
 				ProjectID:   mount.ProjectID,
 				VaultID:     mount.VaultID,
-				MarmotDir:   mount.Path,
+				MarmotDir:   provenanceDir,
 				QualifiedID: apiNode.ID,
-				Editable:    mount.Editable,
+				Editable:    provenanceEditable,
 			}
 			for i, edge := range apiNode.Edges {
 				edge.Source = apiNode.ID
@@ -909,7 +1047,11 @@ func (s *Server) handleWarrenGraph(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleWarrenRefresh is a no-op refresh hook for git-backed Warren state.
+// handleWarrenRefresh reloads the engine's warren state (routes, mounts,
+// runtime bridges, vault registry) from disk. The reload is engine-global,
+// not per-warren — mounts/bridges/routes are one composite state and a
+// partial reload would reintroduce split views; the {id} is validated and
+// echoed so callers can gate on a specific warren being registered.
 func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -925,27 +1067,143 @@ func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
 		return
 	}
+	if err := s.engine.ReloadWarrenState(); err != nil {
+		writeError(w, http.StatusInternalServerError, "warren refresh: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"warren_id": id,
-		"status":    "git-backed Warren state is read from disk",
+		"status":    "reloaded",
 	})
 }
 
-func splitQualifiedVaultID(id string) (vaultID, nodeID string, ok bool) {
-	if !strings.HasPrefix(id, "@") {
-		return "", "", false
+// dirExists mirrors the CLI 'warren list' REACHABLE computation: the
+// registered checkout directory exists on disk.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// markSkipped records a Warren graph skip with its reason (the same reason
+// the stderr warning carries, U4.4) so UIs can render it as a tooltip.
+func markSkipped(resp *GraphResponse, projectID, reason string) {
+	resp.Skipped = append(resp.Skipped, projectID)
+	if resp.SkippedReasons == nil {
+		resp.SkippedReasons = make(map[string]string)
 	}
-	rest := strings.TrimPrefix(id, "@")
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
+	resp.SkippedReasons[projectID] = reason
+}
+
+// handleWarrenMount mounts warren projects into the workspace over HTTP.
+// The handler is thin: warren.Mount owns validation and refusal messages
+// (collisions, unknown projects, identity no-ops), which pass through as
+// 400s so the UI gets the same message quality as the CLI. Materialized
+// mounts are never offered over HTTP (heavy IO + cache lifecycle).
+func (s *Server) handleWarrenMount(w http.ResponseWriter, r *http.Request) {
+	s.handleWarrenMountChange(w, r, true)
+}
+
+// handleWarrenUnmount unmounts warren projects from the workspace over HTTP.
+func (s *Server) handleWarrenUnmount(w http.ResponseWriter, r *http.Request) {
+	s.handleWarrenMountChange(w, r, false)
+}
+
+func (s *Server) handleWarrenMountChange(w http.ResponseWriter, r *http.Request, mount bool) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "warren id is required")
+		return
 	}
-	return parts[0], parts[1], true
+	var req WarrenMountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	state, _, err := warren.LoadWorkspaceStateFromMarmot(s.engine.MarmotDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "load Warren state: "+err.Error())
+		return
+	}
+	entry, ok := state.Warrens[id]
+	if !ok {
+		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
+		return
+	}
+	action := "unmounted"
+	if mount {
+		action = "mounted"
+	}
+	projects := req.Projects
+	if req.All {
+		if mount {
+			manifest, _, manifestErr := warren.LoadManifest(entry.Path)
+			if manifestErr != nil {
+				writeError(w, http.StatusInternalServerError, "load Warren manifest: "+manifestErr.Error())
+				return
+			}
+			projects = make([]string, 0, len(manifest.Projects))
+			for _, project := range manifest.Projects {
+				projects = append(projects, project.ProjectID)
+			}
+		} else {
+			projects = append([]string(nil), entry.ActiveProjects...)
+		}
+	}
+	if len(projects) == 0 {
+		if req.All {
+			// Nothing to do (e.g. unmount --all with nothing mounted): a
+			// no-op, not an error.
+			writeJSON(w, http.StatusOK, WarrenMountResponse{
+				WarrenID: id, Action: action, Projects: []string{}, Status: "reloaded",
+			})
+			return
+		}
+		writeError(w, http.StatusBadRequest, `no projects specified: provide "projects" or set "all": true`)
+		return
+	}
+	workspaceRoot := filepath.Dir(s.engine.MarmotDir)
+	if mount {
+		_, err = warren.Mount(workspaceRoot, id, projects, false) // never materialize (burrow) over HTTP
+	} else {
+		_, err = warren.Unmount(workspaceRoot, id, projects)
+	}
+	if err != nil {
+		// Warren-layer refusals (vault-ID collisions, unknown projects,
+		// not-mounted, editable self-alias) pass through verbatim.
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.engine.ReloadWarrenState(); err != nil {
+		writeError(w, http.StatusInternalServerError, "warren reload after "+action+": "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, WarrenMountResponse{
+		WarrenID: id,
+		Action:   action,
+		Projects: projects,
+		Status:   "reloaded",
+	})
+}
+
+// handleDoctorWorkspace returns the workspace-level warren doctor report
+// verbatim — the same JSON shape as `marmot warren doctor --workspace`
+// (severity/code/message issues incl. self_identity, self_alias_* and
+// vault_id_collision_workspace).
+func (s *Server) handleDoctorWorkspace(w http.ResponseWriter, r *http.Request) {
+	report, err := warren.DoctorWorkspace(s.engine.MarmotDir, filepath.Dir(s.engine.MarmotDir))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "warren doctor: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) findWarrenMountByVault(vaultID string) (warren.ProjectStatus, bool) {
 	mounts, err := warren.ActiveMounts(s.engine.MarmotDir)
 	if err != nil {
+		// Behavior unchanged (callers report "mount not found") but the real
+		// cause is no longer silent.
+		fmt.Fprintf(os.Stderr, "warning: warren mounts unavailable while resolving vault %q: %v\n", vaultID, err)
 		return warren.ProjectStatus{}, false
 	}
 	for _, mount := range mounts {
@@ -971,9 +1229,13 @@ func matchNamespace(nodeNS, requested string) bool {
 	return false
 }
 
-// handleVersion returns the current graph version counter.
+// handleVersion returns the current graph version counter (live-reload) and
+// the marmot build version.
 func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]int64{"version": s.version.Load()})
+	writeJSON(w, http.StatusOK, VersionResponse{
+		Version:    s.version.Load(),
+		AppVersion: s.appVersion,
+	})
 }
 
 // handleSSE streams Server-Sent Events to the client. When the graph version
@@ -1317,9 +1579,61 @@ func (s *Server) handleSuggestions(w http.ResponseWriter, r *http.Request) {
 
 	suggestions := curator.Analyze(g, s.engine.NodeStore, s.engine.EmbeddingStore, s.engine.Embedder, opts)
 
+	// Report the number of nodes the analysis actually covered: active nodes
+	// only (superseded nodes are never analyzed), scoped to the namespace
+	// filter when one was given. Using the raw graph size here inflated the
+	// "N nodes · X% curated" health summary with superseded nodes.
 	nodeCount := 0
 	if g != nil {
-		nodeCount = g.NodeCount()
+		if ns != "" {
+			nodeCount = len(nodeIDs)
+		} else {
+			nodeCount = len(g.AllActiveNodes())
+		}
 	}
-	writeJSON(w, http.StatusOK, SuggestionsResponse{Suggestions: suggestions, NodeCount: nodeCount})
+
+	integrity, integrityNodes := s.collectIntegrityIssues(ns)
+
+	writeJSON(w, http.StatusOK, SuggestionsResponse{
+		Suggestions:        suggestions,
+		NodeCount:          nodeCount,
+		IntegrityIssues:    integrity,
+		IntegrityNodeCount: integrityNodes,
+	})
+}
+
+// collectIntegrityIssues runs the same scoped integrity checks as the /verify
+// slash command (superseded nodes included) so the Issues tab shows exactly
+// the issues the /verify chat message counts. A non-empty ns restricts the
+// checks to that namespace's nodes.
+func (s *Server) collectIntegrityIssues(ns string) ([]IntegrityIssueAPI, int) {
+	var selected []string
+	if ns != "" {
+		g := s.engine.GetGraph()
+		if g == nil {
+			return []IntegrityIssueAPI{}, 0
+		}
+		for _, n := range g.AllNodes() {
+			if matchNamespace(n.Namespace, ns) {
+				selected = append(selected, n.ID)
+			}
+		}
+		// An empty selection would make CollectIntegrityIssues cover the
+		// whole graph — an unknown namespace must report nothing instead.
+		if len(selected) == 0 {
+			return []IntegrityIssueAPI{}, 0
+		}
+	}
+
+	issues, nodes := curator.CollectIntegrityIssues(s.engine, selected)
+	out := make([]IntegrityIssueAPI, 0, len(issues))
+	for _, issue := range issues {
+		out = append(out, IntegrityIssueAPI{
+			NodeID:   issue.NodeID,
+			Type:     string(issue.IssueType),
+			Message:  issue.Message,
+			Severity: string(issue.Severity),
+		})
+	}
+	return out, len(nodes)
 }

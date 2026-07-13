@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/nurozen/context-marmot/internal/graph"
+	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 )
 
@@ -348,6 +349,67 @@ func TestCrossVaultEdgeMultipleVaults(t *testing.T) {
 	}
 	for target := range expectedTargets {
 		t.Errorf("missing edge to %s", target)
+	}
+}
+
+// TestCrossVaultEdgeSelfQualifiedTargetLocal (R1.4): an edge target qualified
+// with the workspace's OWN vault ID is accepted without any bridge (it is a
+// local edge wearing a costume) and traverses to the live local node through
+// the engine's resolver.
+func TestCrossVaultEdgeSelfQualifiedTargetLocal(t *testing.T) {
+	eng := testEngine(t)
+	ctx := context.Background()
+
+	eng.LocalVaultID = "local"
+	eng.VaultRegistry = namespace.NewVaultRegistry("local", eng.MarmotDir, nil, nil)
+	eng.WithNamespaceManager(&namespace.Manager{
+		Namespaces: map[string]*namespace.Namespace{},
+		Bridges:    map[string]*namespace.Bridge{},
+		CrossVaultBridges: []*namespace.Bridge{{
+			SourceVaultID:    "local",
+			TargetVaultID:    "remote",
+			AllowedRelations: []string{"calls"},
+		}},
+	})
+
+	// The live target node.
+	res, err := eng.HandleContextWrite(ctx, makeCallToolRequest("context_write", map[string]any{
+		"id":      "svc/api",
+		"type":    "module",
+		"summary": "live service API",
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("write target: err=%v result=%s", err, resultText(t, res))
+	}
+
+	// Self-qualified edge with a relation NO bridge allows: accepted, because
+	// the local vault needs no bridge to itself.
+	res, err = eng.HandleContextWrite(ctx, makeCallToolRequest("context_write", map[string]any{
+		"id":      "gw/proxy",
+		"type":    "module",
+		"summary": "gateway writing to its own vault via qualified ID",
+		"edges":   []map[string]any{{"target": "@local/svc/api", "relation": "writes"}},
+	}))
+	if err != nil || res.IsError {
+		t.Fatalf("self-qualified edge write rejected: err=%v result=%s", err, resultText(t, res))
+	}
+
+	n, ok := eng.GetGraph().GetNode("gw/proxy")
+	if !ok || len(n.Edges) != 1 || n.Edges[0].Target != "@local/svc/api" {
+		t.Fatalf("stored node = %+v, want one @local/svc/api edge", n)
+	}
+
+	// Traversable as local: the engine resolver serves the LIVE node for the
+	// qualified ID (never the registry, which has no route for it).
+	resolved, ok := eng.graphResolver().GetNode("@local/svc/api")
+	if !ok {
+		t.Fatal("@local/svc/api did not resolve through the engine resolver")
+	}
+	if resolved.Summary != "live service API" {
+		t.Fatalf("resolved summary = %q, want the live node", resolved.Summary)
+	}
+	if resolved.ID != "@local/svc/api" {
+		t.Fatalf("resolved ID = %q, want the @-qualified traversal key", resolved.ID)
 	}
 }
 

@@ -75,40 +75,45 @@ func (s *Scheduler) Start(ctx context.Context) {
 
 // Stop signals the background goroutine to stop and blocks until it exits.
 // It also waits for any in-flight NotifyChange regenerations to complete.
+// running is cleared before draining so a concurrent NotifyChange cannot
+// spawn a regeneration that Stop would miss.
 func (s *Scheduler) Stop() {
 	s.mu.Lock()
 	if !s.running {
 		s.mu.Unlock()
 		return
 	}
+	s.running = false
 	s.mu.Unlock()
 
 	close(s.stopCh)
 	<-s.doneCh
 	s.wg.Wait() // drain any NotifyChange-spawned goroutines
-
-	s.mu.Lock()
-	s.running = false
-	s.mu.Unlock()
 }
 
 // NotifyChange is called after writes to check whether the node count delta
 // exceeds the configured threshold. If so, it triggers an async regeneration.
 // Only one NotifyChange-spawned regeneration runs at a time to avoid duplicate work.
+// It is a no-op unless the scheduler has been started: processes that attach
+// a scheduler but deliberately never start it (query/ui while a live serve
+// owner runs the vault's single scheduler) must not spawn their own LLM
+// regenerations racing the owner's _summary.md writes.
 func (s *Scheduler) NotifyChange(currentNodeCount int) {
 	s.mu.Lock()
-	if s.regenerating {
+	if !s.running || s.regenerating {
 		s.mu.Unlock()
-		return // another regeneration is already in-flight
+		return // not started, or another regeneration is already in-flight
 	}
 	shouldRegen := s.shouldRegenerate(currentNodeCount)
 	if shouldRegen {
 		s.regenerating = true
+		// Add under the lock so Stop's running=false → wg.Wait ordering can
+		// never miss a goroutine spawned here.
+		s.wg.Add(1)
 	}
 	s.mu.Unlock()
 
 	if shouldRegen {
-		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
 			defer func() {

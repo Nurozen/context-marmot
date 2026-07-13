@@ -593,8 +593,13 @@ func executeUnlink(_ context.Context, cmd *SlashCommand, engine *mcp.Engine) (*C
 	}, nil
 }
 
-// executeVerify runs integrity/staleness checks on selected nodes (or all nodes).
-func executeVerify(_ context.Context, _ *SlashCommand, engine *mcp.Engine, selectedNodes []string) (*CommandResult, error) {
+// CollectIntegrityIssues runs the same scoped integrity checks the /verify
+// command runs and returns the raw issues plus the nodes they covered. An
+// empty selection covers the whole graph (superseded nodes included — their
+// supersession chains and validity windows are part of graph integrity).
+// The API layer reuses this so the Issues panel shows exactly the issues
+// the /verify chat message counts.
+func CollectIntegrityIssues(engine *mcp.Engine, selectedNodes []string) ([]verify.IntegrityIssue, []*node.Node) {
 	g := engine.GetGraph()
 
 	var nodes []*node.Node
@@ -607,12 +612,8 @@ func executeVerify(_ context.Context, _ *SlashCommand, engine *mcp.Engine, selec
 			}
 		}
 	}
-
 	if len(nodes) == 0 {
-		return &CommandResult{
-			Success: true,
-			Message: "no nodes to verify",
-		}, nil
+		return nil, nil
 	}
 
 	// MarmotDir is typically .marmot; project root is its parent.
@@ -628,17 +629,49 @@ func executeVerify(_ context.Context, _ *SlashCommand, engine *mcp.Engine, selec
 			knownIDs[n.ID] = true
 		}
 	}
-	issues := verify.VerifyIntegrityScoped(nodes, knownIDs, projectRoot)
+	return verify.VerifyIntegrityScoped(nodes, knownIDs, projectRoot), nodes
+}
+
+// executeVerify runs integrity/staleness checks on selected nodes (or all nodes).
+func executeVerify(_ context.Context, _ *SlashCommand, engine *mcp.Engine, selectedNodes []string) (*CommandResult, error) {
+	issues, nodes := CollectIntegrityIssues(engine, selectedNodes)
+
+	if len(nodes) == 0 {
+		return &CommandResult{
+			Success: true,
+			Message: "no nodes to verify",
+		}, nil
+	}
+
+	// Verify intentionally covers superseded nodes too (their supersession
+	// chains and validity windows are part of graph integrity), so break the
+	// count down to avoid confusing it with the active-node count shown in
+	// the graph view.
+	scope := fmt.Sprintf("%d node(s)", len(nodes))
+	if active := countActive(nodes); active != len(nodes) {
+		scope = fmt.Sprintf("%d node(s) (%d active, %d superseded)", len(nodes), active, len(nodes)-active)
+	}
 
 	if len(issues) == 0 {
 		return &CommandResult{
 			Success: true,
-			Message: fmt.Sprintf("verified %d node(s) with no issues", len(nodes)),
+			Message: fmt.Sprintf("verified %s with no issues", scope),
 		}, nil
 	}
 
 	return &CommandResult{
 		Success: true,
-		Message: fmt.Sprintf("found %d issue(s) across %d node(s)", len(issues), len(nodes)),
+		Message: fmt.Sprintf("found %d issue(s) across %s", len(issues), scope),
 	}, nil
+}
+
+// countActive returns how many of the given nodes are active.
+func countActive(nodes []*node.Node) int {
+	active := 0
+	for _, n := range nodes {
+		if n.Status == node.StatusActive {
+			active++
+		}
+	}
+	return active
 }

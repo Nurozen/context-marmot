@@ -397,23 +397,190 @@ func TestRemoveProjectErrors(t *testing.T) {
 func TestRenameProjectErrors(t *testing.T) {
 	root := t.TempDir()
 	writeWarrenFixture(t, root, "product-platform", "api", "web")
-	if _, err := RenameProject(root, "../bad", "ok"); err == nil {
+	if _, err := RenameProject(root, "../bad", "ok", false); err == nil {
 		t.Fatal("expected invalid old ID error")
 	}
-	if _, err := RenameProject(root, "api", "../bad"); err == nil {
+	if _, err := RenameProject(root, "api", "../bad", false); err == nil {
 		t.Fatal("expected invalid new ID error")
 	}
-	if _, err := RenameProject(root, "api", "api"); err == nil {
+	if _, err := RenameProject(root, "api", "api", false); err == nil {
 		t.Fatal("expected same-ID error")
 	}
-	if _, err := RenameProject(root, "api", "web"); err == nil {
+	if _, err := RenameProject(root, "api", "web", false); err == nil {
 		t.Fatal("expected new-ID-already-exists error")
 	}
-	if _, err := RenameProject(root, "ghost", "new"); err == nil {
+	if _, err := RenameProject(root, "ghost", "new", false); err == nil {
 		t.Fatal("expected old-ID-not-found error")
 	}
-	if _, err := RenameProject(t.TempDir(), "api", "new"); err == nil {
+	if _, err := RenameProject(t.TempDir(), "api", "new", false); err == nil {
 		t.Fatal("expected load error")
+	}
+}
+
+// TestRenameMovesConventionalDir (U6): a rename of a project at the
+// conventional projects/<id>/.marmot path moves the whole project directory
+// and rewrites the manifest path, while vault_id stays untouched.
+func TestRenameMovesConventionalDir(t *testing.T) {
+	root := t.TempDir()
+	writeWarrenFixture(t, root, "product-platform", "api", "web")
+
+	result, err := RenameProject(root, "api", "api-service", false)
+	if err != nil {
+		t.Fatalf("RenameProject: %v", err)
+	}
+	if !result.Moved || result.OldDir != "projects/api" || result.NewDir != "projects/api-service" {
+		t.Fatalf("result = %+v, want Moved projects/api -> projects/api-service", result)
+	}
+	if _, err := os.Stat(filepath.Join(root, "projects", "api")); !os.IsNotExist(err) {
+		t.Fatalf("old dir still exists (err=%v)", err)
+	}
+	meta, _, err := LoadProjectMetadata(filepath.Join(root, "projects", "api-service", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata at new path: %v", err)
+	}
+	if meta.ProjectID != "api-service" || meta.VaultID != "api-vault" {
+		t.Fatalf("metadata after move = %+v, want project api-service with vault_id api-vault", meta)
+	}
+	if result.VaultID != "api-vault" {
+		t.Fatalf("result.VaultID = %q, want api-vault", result.VaultID)
+	}
+	projects, err := ListProjects(root)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	for _, project := range projects {
+		if project.ProjectID == "api-service" && project.Path != "projects/api-service/.marmot" {
+			t.Fatalf("manifest path = %q, want projects/api-service/.marmot", project.Path)
+		}
+	}
+}
+
+// TestRenameKeepPath (U6): --keep-path renames the ID everywhere but leaves
+// the directory and manifest path alone.
+func TestRenameKeepPath(t *testing.T) {
+	root := t.TempDir()
+	writeWarrenFixture(t, root, "product-platform", "api")
+
+	result, err := RenameProject(root, "api", "api-service", true)
+	if err != nil {
+		t.Fatalf("RenameProject: %v", err)
+	}
+	if result.Moved || result.PathKept != "projects/api/.marmot" {
+		t.Fatalf("result = %+v, want PathKept projects/api/.marmot", result)
+	}
+	meta, _, err := LoadProjectMetadata(filepath.Join(root, "projects", "api", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata at kept path: %v", err)
+	}
+	if meta.ProjectID != "api-service" || meta.VaultID != "api-vault" {
+		t.Fatalf("metadata after keep-path rename = %+v", meta)
+	}
+}
+
+// TestRenameRefusesExistingTargetDir (U6): the move refuses when
+// projects/<newID> already exists, and the manifest keeps the old ID (the
+// refusal fires before the manifest commit point).
+func TestRenameRefusesExistingTargetDir(t *testing.T) {
+	root := t.TempDir()
+	writeWarrenFixture(t, root, "product-platform", "api")
+	if err := os.MkdirAll(filepath.Join(root, "projects", "api-service"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := RenameProject(root, "api", "api-service", false)
+	if err == nil || !strings.Contains(err.Error(), "already exists in the warren") {
+		t.Fatalf("err = %v, want existing-target refusal", err)
+	}
+	projects, listErr := ListProjects(root)
+	if listErr != nil {
+		t.Fatalf("ListProjects: %v", listErr)
+	}
+	if len(projects) != 1 || projects[0].ProjectID != "api" {
+		t.Fatalf("manifest changed despite refusal: %+v", projects)
+	}
+}
+
+// TestRenameUnconventionalPathSkipsMove (U6): a project stored outside
+// projects/<oldID>/ keeps its path; only the IDs change.
+func TestRenameUnconventionalPathSkipsMove(t *testing.T) {
+	root := t.TempDir()
+	marmotDir := filepath.Join(root, "custom", "spot", ".marmot")
+	if err := SaveProjectMetadata(marmotDir, &ProjectMetadata{ProjectID: "api", WarrenID: "wp", VaultID: "api-vault"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	manifest := &Manifest{WarrenID: "wp", Projects: []Project{{ProjectID: "api", Path: "custom/spot/.marmot"}}}
+	if err := SaveManifest(root, manifest, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := RenameProject(root, "api", "api-service", false)
+	if err != nil {
+		t.Fatalf("RenameProject: %v", err)
+	}
+	if result.Moved || result.PathKept != "custom/spot/.marmot" {
+		t.Fatalf("result = %+v, want unmoved custom/spot/.marmot", result)
+	}
+	meta, _, err := LoadProjectMetadata(marmotDir)
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata: %v", err)
+	}
+	if meta.ProjectID != "api-service" || meta.VaultID != "api-vault" {
+		t.Fatalf("metadata after unconventional rename = %+v", meta)
+	}
+}
+
+// TestRenameRepointsNestedProjectPaths: the manifest accepts arbitrary
+// relative paths, so another project's checkout can live under
+// projects/<oldID>/. The directory move relocates that checkout too — the
+// rename must repoint the nested project's manifest path in the same
+// transaction instead of stranding it at the stale prefix.
+func TestRenameRepointsNestedProjectPaths(t *testing.T) {
+	root := t.TempDir()
+	writeWarrenFixture(t, root, "product-platform", "api")
+	// Project "sub" is checked out inside project api's directory.
+	nestedDir := filepath.Join(root, "projects", "api", "sub", ".marmot")
+	if err := SaveProjectMetadata(nestedDir, &ProjectMetadata{ProjectID: "sub", WarrenID: "product-platform", VaultID: "sub-vault"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddProject(root, Project{ProjectID: "sub", Path: "projects/api/sub/.marmot"}); err != nil {
+		t.Fatalf("AddProject nested: %v", err)
+	}
+
+	result, err := RenameProject(root, "api", "api-service", false)
+	if err != nil {
+		t.Fatalf("RenameProject: %v", err)
+	}
+	if !result.Moved {
+		t.Fatalf("result = %+v, want Moved", result)
+	}
+	if len(result.Repointed) != 1 || result.Repointed[0] != "sub" {
+		t.Fatalf("Repointed = %v, want [sub]", result.Repointed)
+	}
+	projects, err := ListProjects(root)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	for _, project := range projects {
+		if project.ProjectID == "sub" && project.Path != "projects/api-service/sub/.marmot" {
+			t.Fatalf("nested path = %q, want projects/api-service/sub/.marmot", project.Path)
+		}
+	}
+	// The repointed path resolves: the nested checkout moved with the parent.
+	meta, _, err := LoadProjectMetadata(filepath.Join(root, "projects", "api-service", "sub", ".marmot"))
+	if err != nil {
+		t.Fatalf("LoadProjectMetadata at repointed path: %v", err)
+	}
+	if meta.ProjectID != "sub" || meta.VaultID != "sub-vault" {
+		t.Fatalf("nested metadata = %+v, want project sub with vault_id sub-vault", meta)
+	}
+
+	// keep-path never moves, so nothing is repointed.
+	keep, err := RenameProject(root, "api-service", "api2", true)
+	if err != nil {
+		t.Fatalf("RenameProject --keep-path: %v", err)
+	}
+	if keep.Moved || len(keep.Repointed) != 0 {
+		t.Fatalf("keep-path result = %+v, want no move and no repoints", keep)
 	}
 }
 
@@ -503,7 +670,7 @@ func TestStatusFallsBackToMaterializedWhenSourceGone(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, true); err != nil {
@@ -526,20 +693,20 @@ func TestStatusFallsBackToMaterializedWhenSourceGone(t *testing.T) {
 func TestMaterializeCopyDirErrors(t *testing.T) {
 	marmotDir := t.TempDir()
 	// Source path does not exist.
-	if _, err := Materialize(marmotDir, "w", Project{ProjectID: "p", Path: "projects/p/.marmot"}, t.TempDir()); err == nil {
-		t.Fatal("expected copyDir stat error for missing source")
+	if _, err := Materialize(marmotDir, "w", Project{ProjectID: "p", Path: "projects/p/.marmot"}, t.TempDir(), ""); err == nil {
+		t.Fatal("expected copyFilteredTree stat error for missing source")
 	}
 
-	// copyDir with a file source (not a directory).
+	// copyFilteredTree with a file source (not a directory).
 	filePath := filepath.Join(t.TempDir(), "afile")
 	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	if err := copyDir(filePath, filepath.Join(t.TempDir(), "dest")); err == nil {
+	if err := copyFilteredTree(filePath, filepath.Join(t.TempDir(), "dest"), nil, nil, nil); err == nil {
 		t.Fatal("expected error copying non-directory source")
 	}
 
-	// Successful copyDir round-trip preserving nested files.
+	// Successful copyFilteredTree round-trip preserving nested files.
 	src := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(src, "sub"), 0o755); err != nil {
 		t.Fatalf("mkdir sub: %v", err)
@@ -548,8 +715,8 @@ func TestMaterializeCopyDirErrors(t *testing.T) {
 		t.Fatalf("write nested: %v", err)
 	}
 	dst := filepath.Join(t.TempDir(), "copy")
-	if err := copyDir(src, dst); err != nil {
-		t.Fatalf("copyDir: %v", err)
+	if err := copyFilteredTree(src, dst, nil, nil, nil); err != nil {
+		t.Fatalf("copyFilteredTree: %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(dst, "sub", "f.txt")); err != nil || string(b) != "hi" {
 		t.Fatalf("nested file not copied: %v %q", err, b)
@@ -712,7 +879,7 @@ func TestActiveMountsMaterializedFallback(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	project := Project{ProjectID: "project-a", Path: "projects/project-a/.marmot"}
-	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot); err != nil {
+	if _, err := Materialize(marmotDir, "product-platform", project, warrenRoot, ""); err != nil {
 		t.Fatalf("Materialize: %v", err)
 	}
 	if _, err := Mount(workspace, "product-platform", []string{"project-a"}, true); err != nil {

@@ -161,3 +161,39 @@ Namespace-level write mutexes are fully implemented. Each namespace gets a lazil
 **Impact:** Token budgets are approximate. A budget of 4000 tokens may produce output that is actually 3400-4600 tokens when measured by a real tokenizer. For most use cases this is acceptable -- the budget is a soft ceiling, not a billing boundary. Edge cases include non-Latin scripts (where chars/4 overestimates) and highly repetitive code (where it underestimates).
 
 **Resolution:** The `TokenEstimator` interface is defined in the traversal package. A proper tokenizer (e.g., tiktoken for OpenAI models, or a BPE tokenizer for Claude) can be plugged in as an alternative implementation. No specific phase is assigned; this is a drop-in upgrade when precision becomes necessary.
+
+---
+
+## Warrens
+
+### Warren management is CLI-first
+
+**What:** `warren register`/`unregister`, `burrow` (materialize and drop), `edit`, `propose`, and `refresh --pull` exist only as CLI verbs. The HTTP surface is read-mostly by design: `POST /api/warren/{id}/refresh` reloads the serving engine's warren state but never runs `git pull` (git operations stay in user hands), and filesystem-path-taking verbs (register) or cache-lifecycle verbs (burrow) are deliberately not exposed to a browser.
+
+**Impact:** Managing which warrens exist, which projects are editable, and cache lifecycles requires a terminal next to the UI.
+
+**Resolution:** Mount/unmount and workspace-doctor endpoints are the planned first HTTP additions (UX pass item U5); edit toggling, burrow, and propose over HTTP are explicitly deferred.
+
+### Two cross-project bridge surfaces
+
+**What:** `marmot bridge <path>` (pairwise cross-vault bridges with `_bridges/` manifests in both vaults) and warren manifest bridges are separate systems with different relation defaults; `marmot bridge` selects its mode by a path-shape heuristic (`looksLikeVaultPath`).
+
+**Impact:** Users must know which surface they are on; see "When to use which cross-project mechanism" in [docs/bridges.md](bridges.md). Both refuse self-bridges (bridging a vault to a copy of itself), so the worst self-injury is closed.
+
+**Resolution:** Reconciliation is real design work and remains backlog.
+
+### Mixed-binary workspaces and identity
+
+**What:** Warren *identity* (a workspace's own project served live, no mount) is derived from `vault_id` and writes no state, so old and new binaries exchange workspace state freely. The one asymmetry: a workspace cleaned of its redundant legacy self-mount loses bridge activation when driven by a pre-identity binary, which still requires the mount.
+
+**Impact:** Only workspaces routinely driven by multiple marmot versions (shared checkouts, CI + local) can notice, and doctor's cleanup hint is a suggestion, never an auto-fix.
+
+**Resolution:** Self-resolving under the auto-release train as old binaries retire.
+
+### Rename moves conventional directories only
+
+**What:** `warren project rename` moves `projects/<old-id>/` to `projects/<new-id>/` only for the conventional layout; unconventional (custom or absolute) project paths keep their location, and `--keep-path` opts out of the move entirely. The checkout `vault_id` is never rewritten by rename — it is the identity key; change it by re-importing with `--vault-id`.
+
+**Impact:** Unconventionally-placed projects keep directory names that no longer match their project IDs.
+
+**Resolution:** Working as intended; `warren doctor` (`project_missing`, `project_id_mismatch`) detects torn or drifted states.

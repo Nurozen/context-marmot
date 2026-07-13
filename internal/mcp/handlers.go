@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,6 +19,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/traversal"
 	"github.com/nurozen/context-marmot/internal/verify"
+	"github.com/nurozen/context-marmot/internal/warren"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -79,13 +82,20 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 			}
 			remoteStore, err := e.VaultRegistry.ResolveEmbeddingStore(vid)
 			if err != nil {
-				continue // best-effort
+				// Best-effort: local results still return, but the degraded
+				// vault is visible (once per vault) instead of vanishing.
+				e.warnVaultOnce(vid, "warren vault %q embedding store unavailable, excluded from context_query: %v", vid, err)
+				continue
 			}
 			var remoteResults []embedding.ScoredResult
+			var searchErr error
 			if includeSuperseded {
-				remoteResults, _ = remoteStore.Search(queryVec, 3, e.Embedder.Model())
+				remoteResults, searchErr = remoteStore.Search(queryVec, 3, e.Embedder.Model())
 			} else {
-				remoteResults, _ = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+				remoteResults, searchErr = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+			}
+			if searchErr != nil {
+				e.warnVaultOnce(vid, "warren vault %q search failed, excluded from context_query: %v", vid, searchErr)
 			}
 			// Prefix remote results with @vault-id/ so BridgedGraphResolver can resolve them.
 			for _, r := range remoteResults {
@@ -213,6 +223,68 @@ type WriteResult struct {
 	NodeID string `json:"node_id"`
 	Hash   string `json:"hash"`
 	Status string `json:"status"`
+	// Provenance notes where a warren @-write landed (editable mount writes
+	// go to the project's own checkout, never a materialized cache).
+	Provenance string `json:"provenance,omitempty"`
+	// Warning surfaces a non-fatal degradation (e.g. the node write landed
+	// but its embedding upsert failed) instead of swallowing it.
+	Warning string `json:"warning,omitempty"`
+}
+
+// knownWriteArgs is the set of top-level arguments accepted by context_write,
+// mirroring the tool schema registered in server.go.
+var knownWriteArgs = map[string]bool{
+	"id":        true,
+	"type":      true,
+	"namespace": true,
+	"summary":   true,
+	"context":   true,
+	"tags":      true,
+	"edges":     true,
+	"source":    true,
+}
+
+// writeArgAliases maps commonly misused argument names to the schema field
+// the caller almost certainly meant, so validation errors can point clients
+// (and their typos) at the right field.
+var writeArgAliases = map[string]string{
+	"content":     "context",
+	"body":        "context",
+	"text":        "context",
+	"description": "summary",
+	"title":       "summary",
+	"node_id":     "id",
+	"tag":         "tags",
+	"edge":        "edges",
+}
+
+// validateWriteArgNames rejects unknown top-level context_write arguments.
+// Historically unknown arguments were silently ignored, which turned client
+// typos (e.g. "content" instead of "context") into empty-body nodes. Keys
+// with a leading underscore are tolerated as protocol/client metadata.
+// Returns an empty string when the arguments are valid.
+func validateWriteArgNames(args map[string]any) string {
+	var unknown []string
+	for k := range args {
+		if knownWriteArgs[k] || strings.HasPrefix(k, "_") {
+			continue
+		}
+		unknown = append(unknown, k)
+	}
+	if len(unknown) == 0 {
+		return ""
+	}
+	sort.Strings(unknown)
+	parts := make([]string, 0, len(unknown))
+	for _, k := range unknown {
+		if want, ok := writeArgAliases[k]; ok {
+			parts = append(parts, fmt.Sprintf("%q (did you mean %q?)", k, want))
+		} else {
+			parts = append(parts, fmt.Sprintf("%q", k))
+		}
+	}
+	return fmt.Sprintf("unknown argument(s) %s — valid arguments are: id, type, namespace, summary, context, tags, edges, source",
+		strings.Join(parts, ", "))
 }
 
 // HandleContextWrite is the handler for the context_write MCP tool.
@@ -221,12 +293,19 @@ type WriteResult struct {
 func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args := req.GetArguments()
 
+	if msg := validateWriteArgNames(args); msg != "" {
+		return mcp.NewToolResultError(msg), nil
+	}
+
 	id := req.GetString("id", "")
 	if id == "" {
 		return mcp.NewToolResultError("id parameter is required"), nil
 	}
 	if strings.HasPrefix(id, "@") {
-		return mcp.NewToolResultError("direct context_write to mounted Warren nodes is not supported; enable the project with marmot warren edit and use the Warren-aware API/UI write path"), nil
+		// Qualified @vault-id/... writes are accepted for active editable
+		// warren mounts, exactly like the HTTP API/UI path (both go through
+		// warren.WriteEditableNode so they cannot diverge).
+		return e.handleWarrenContextWrite(req, id)
 	}
 	if err := node.ValidateNodeID(id); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil
@@ -247,6 +326,9 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 
 	summary := req.GetString("summary", "")
 	nodeCtx := req.GetString("context", "")
+	if strings.TrimSpace(summary) == "" && strings.TrimSpace(nodeCtx) == "" {
+		return mcp.NewToolResultError(`summary or context is required: put a searchable 1-2 sentence description in "summary" and the full node body in "context" — refusing to create an empty node`), nil
+	}
 
 	// Parse tags.
 	var tags []string
@@ -490,6 +572,129 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		NodeID: id,
 		Hash:   nodeHash,
 		Status: writeStatus,
+	}
+	return mcp.NewToolResultJSON(result)
+}
+
+// handleWarrenContextWrite services context_write for qualified
+// "@vault-id/node-id" IDs: updates to existing nodes of active *editable*
+// warren mounts. It mirrors the HTTP API's warren node-update semantics
+// (summary/context/tags updates of an existing node) and shares
+// warren.WriteEditableNode, so the two paths produce byte-identical files.
+// Creating brand-new nodes in a mounted project is not supported — do that
+// in the project's own workspace.
+func (e *Engine) handleWarrenContextWrite(req mcp.CallToolRequest, qualifiedID string) (*mcp.CallToolResult, error) {
+	vaultID, localID, ok := warren.SplitQualifiedVaultID(qualifiedID)
+	if !ok {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid qualified node ID %q: expected @vault-id/node-id", qualifiedID)), nil
+	}
+	// Self-alias guard (defense in depth over ActiveMounts forcing
+	// Editable=false on alias statuses): an @-write to the workspace's own
+	// vault ID would land in the warren checkout copy and split-brain the
+	// live vault — including legacy state that still records the self
+	// project as editable.
+	if vaultID != "" && vaultID == e.LocalVaultID {
+		return mcp.NewToolResultError(fmt.Sprintf("vault %q is this workspace's own vault; write the node locally as %q (no @ prefix) — self-alias warren mounts are read-through views of the live vault", vaultID, localID)), nil
+	}
+	mounts, err := warren.ActiveMounts(e.MarmotDir)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("warren mounts unavailable: %v", err)), nil
+	}
+	var mount warren.ProjectStatus
+	found := false
+	for _, m := range mounts {
+		if m.VaultID == vaultID {
+			mount = m
+			found = true
+			break
+		}
+	}
+	if !found || !mount.Editable {
+		return mcp.NewToolResultError(fmt.Sprintf("vault %q is not an editable warren mount in this workspace; run 'marmot warren edit --warren <id> <project>'", vaultID)), nil
+	}
+	if err := node.ValidateNodeID(localID); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil
+	}
+
+	summary := req.GetString("summary", "")
+	nodeCtx := req.GetString("context", "")
+	if strings.TrimSpace(summary) == "" && strings.TrimSpace(nodeCtx) == "" {
+		return mcp.NewToolResultError(`summary or context is required: put a searchable 1-2 sentence description in "summary" and the full node body in "context" — refusing to blank a mounted node`), nil
+	}
+	args := req.GetArguments()
+	var tags []string
+	tagsProvided := false
+	if rawTags, ok := args["tags"]; ok {
+		tagsProvided = true
+		tagBytes, err := json.Marshal(rawTags)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+		if err := json.Unmarshal(tagBytes, &tags); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("invalid tags: %v", err)), nil
+		}
+	}
+
+	// Serialize concurrent MCP writes to the same mount.
+	mu := e.NamespaceLock("@" + vaultID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	store := node.NewStore(mount.Path)
+	diskNode, err := store.LoadNode(store.NodePath(localID))
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("node %q not found in warren mount %s/%s — @-writes update existing mounted nodes; create new nodes in the project's own workspace", qualifiedID, mount.WarrenID, mount.ProjectID)), nil
+	}
+	embeddingChanged := false
+	if summary != "" {
+		diskNode.Summary = summary
+		embeddingChanged = true
+	}
+	if nodeCtx != "" {
+		diskNode.Context = nodeCtx
+		embeddingChanged = true
+	}
+	if tagsProvided {
+		diskNode.Tags = tags
+	}
+
+	var vec []float32
+	var summaryHash, model string
+	var warning string
+	if embeddingChanged && e.Embedder != nil {
+		if embedText := warren.EmbedText(diskNode); embedText != "" {
+			v, embErr := e.Embedder.Embed(embedText)
+			if embErr != nil {
+				warning = "embedding not updated: " + embErr.Error()
+			} else {
+				vec = v
+				summaryHash = sha256Hex(embedText)
+				model = e.Embedder.Model()
+			}
+		}
+	}
+	writeWarning, err := warren.WriteEditableNode(mount, diskNode, vec, summaryHash, model)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("save warren node: %v", err)), nil
+	}
+	if warning == "" {
+		warning = writeWarning
+	}
+	if warning != "" {
+		fmt.Fprintf(os.Stderr, "warning: warren editable write %s: %s\n", qualifiedID, warning)
+	}
+	// Make the write visible to already-cached cross-vault searches.
+	if e.VaultRegistry != nil {
+		if refreshErr := e.VaultRegistry.Refresh(vaultID); refreshErr != nil && !errors.Is(refreshErr, namespace.ErrNotLoaded) {
+			fmt.Fprintf(os.Stderr, "warning: refresh after editable write failed for vault %q: %v\n", vaultID, refreshErr)
+		}
+	}
+	result := WriteResult{
+		NodeID:     qualifiedID,
+		Hash:       verify.ComputeNodeHash(diskNode),
+		Status:     "updated",
+		Provenance: fmt.Sprintf("warren_mount %s/%s (editable): wrote to the project checkout at %s", mount.WarrenID, mount.ProjectID, mount.Path),
+		Warning:    warning,
 	}
 	return mcp.NewToolResultJSON(result)
 }

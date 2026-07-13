@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/nurozen/context-marmot/internal/daemon"
 	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/llm"
 	"github.com/nurozen/context-marmot/internal/routes"
@@ -135,13 +138,218 @@ func TestCmdSetupNonexistent(t *testing.T) {
 // serve (blocks on stdin JSON-RPC; feed EOF so ListenStdio returns)
 // ---------------------------------------------------------------------------
 
+// TestServeCommandEOF drives the default serve path: the daemon election is
+// on by default, so a plain `marmot serve` wins the election, serves stdio
+// until EOF, WaitIdle returns immediately (no proxies), and teardown leaves
+// the vault clean — lock free, daemon.sock and daemon.info.json removed.
+// Shutdown is exercised via stdin EOF only; no test in this package may send
+// SIGINT/SIGTERM.
 func TestServeCommandEOF(t *testing.T) {
+	// Opt-out explicitly off: this pins the default (election) path
+	// regardless of the developer's environment.
+	t.Setenv("MARMOT_NO_DAEMON", "")
 	vault := initTestVault(t)
 	withStdin(t, "", func() {
 		if code := run([]string{"serve", "--dir", vault}); code != 0 {
 			t.Fatalf("serve exit code = %d, want 0", code)
 		}
 	})
+
+	dataDir := filepath.Join(vault, ".marmot-data")
+	if _, err := os.Stat(filepath.Join(dataDir, "daemon.info.json")); !os.IsNotExist(err) {
+		t.Errorf("daemon.info.json still present after serve exit (stat err = %v)", err)
+	}
+	if _, err := os.Stat(daemon.SocketPath(dataDir)); !os.IsNotExist(err) {
+		t.Errorf("daemon socket still present after serve exit (stat err = %v)", err)
+	}
+	// Lock free: a fresh acquire must succeed immediately.
+	lock, err := daemon.TryAcquire(dataDir)
+	if err != nil {
+		t.Fatalf("daemon.lock not free after serve exit: %v", err)
+	}
+	_ = lock.Release()
+}
+
+// TestServeCommandEOFNoDaemon pins the standalone opt-out: with
+// MARMOT_NO_DAEMON=1 (or the --no-daemon flag) serve never elects and must
+// create ZERO daemon artifacts — no lock file, no info file, no socket.
+func TestServeCommandEOFNoDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		args []string
+	}{
+		{name: "env", env: "1", args: []string{"serve", "--dir"}},
+		{name: "flag", env: "", args: []string{"serve", "--no-daemon", "--dir"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MARMOT_NO_DAEMON", tc.env)
+			vault := initTestVault(t)
+			withStdin(t, "", func() {
+				if code := run(append(tc.args, vault)); code != 0 {
+					t.Fatalf("standalone serve exit code = %d, want 0", code)
+				}
+			})
+			dataDir := filepath.Join(vault, ".marmot-data")
+			for _, name := range []string{"daemon.lock", "daemon.info.json"} {
+				if _, err := os.Stat(filepath.Join(dataDir, name)); !os.IsNotExist(err) {
+					t.Errorf("standalone serve created %s (stat err = %v)", name, err)
+				}
+			}
+			if _, err := os.Stat(daemon.SocketPath(dataDir)); !os.IsNotExist(err) {
+				t.Errorf("standalone serve created a daemon socket (stat err = %v)", err)
+			}
+		})
+	}
+}
+
+// startFakeOwner makes this test process a dial-able "live owner" of vault:
+// it takes the daemon lock, listens on the vault's socket (answering every
+// received line with reply, when non-empty), and publishes daemon.info.json.
+// Cleanup releases everything.
+func startFakeOwner(t *testing.T, vault, reply string) daemon.Info {
+	t.Helper()
+	dataDir := filepath.Join(vault, ".marmot-data")
+	lock, err := daemon.TryAcquire(dataDir)
+	if err != nil {
+		t.Fatalf("TryAcquire: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Release() })
+
+	sock := daemon.SocketPath(dataDir)
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen %q: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				sc := bufio.NewScanner(c)
+				for sc.Scan() {
+					if reply != "" {
+						_, _ = c.Write([]byte(reply + "\n"))
+					}
+				}
+			}(conn)
+		}
+	}()
+
+	info := daemon.Info{PID: os.Getpid(), Socket: sock, Version: "test", StartedAt: time.Now().UTC()}
+	if err := lock.WriteInfo(info); err != nil {
+		t.Fatalf("WriteInfo: %v", err)
+	}
+	return info
+}
+
+// TestServeSecondIsProxy runs a default `serve` while the daemon lock is
+// already held and a dial-able owner socket is published: the serve must
+// become a proxy and relay the client's line to the owner and the owner's
+// answer back to stdout. A full in-process two-serve flow is not feasible
+// here — both serves would race over the one global os.Stdin/os.Stdout pair —
+// so the owner side is faked in-process and the real owner+proxy pairing is
+// covered end-to-end by the e2e suite (TestConcurrentServesDaemon).
+func TestServeSecondIsProxy(t *testing.T) {
+	t.Setenv("MARMOT_NO_DAEMON", "")
+	vault := initTestVault(t)
+	const reply = `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"fake-owner-ack"}]}}`
+	startFakeOwner(t, vault, reply)
+
+	// Sanity: the published owner info is what the election loop will read.
+	if _, err := daemon.ReadInfo(filepath.Join(vault, ".marmot-data")); err != nil {
+		t.Fatalf("daemon.info.json unreadable: %v", err)
+	}
+
+	var out string
+	var code int
+	withStdin(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`+"\n", func() {
+		out, code = captureRun([]string{"serve", "--dir", vault})
+	})
+	if code != 0 {
+		t.Fatalf("proxy serve exit code = %d, want 0 (stdout: %q)", code, out)
+	}
+	if !strings.Contains(out, "fake-owner-ack") {
+		t.Fatalf("proxy did not relay the owner's answer; stdout = %q", out)
+	}
+}
+
+// TestServeStaleOwnerInfoBounded pins the plan-2.11 wedge bound for the
+// stale-info case: the flock is held AND daemon.info.json is readable but
+// points at a socket nothing listens on (a wedged owner, a reaped tmp
+// socket, or a SIGKILLed predecessor's leftovers plus a wedged successor).
+// The election loop must give up with a clear error within the wedge window
+// instead of spinning silently forever at 50ms intervals.
+func TestServeStaleOwnerInfoBounded(t *testing.T) {
+	t.Setenv("MARMOT_NO_DAEMON", "")
+	vault := initTestVault(t)
+	dataDir := filepath.Join(vault, ".marmot-data")
+
+	// Hold the flock without ever listening: a wedged owner.
+	lock, err := daemon.TryAcquire(dataDir)
+	if err != nil {
+		t.Fatalf("TryAcquire: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Release() })
+	// Publish info pointing at a socket that refuses every dial.
+	sock := daemon.SocketPath(dataDir)
+	_ = os.Remove(sock)
+	if err := lock.WriteInfo(daemon.Info{PID: os.Getpid(), Socket: sock, Version: "test", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteInfo: %v", err)
+	}
+
+	oldWait := ownerWedgeWait
+	ownerWedgeWait = 500 * time.Millisecond
+	t.Cleanup(func() { ownerWedgeWait = oldWait })
+
+	start := time.Now()
+	var code int
+	withStdin(t, "", func() {
+		code = run([]string{"serve", "--dir", vault})
+	})
+	if code != 1 {
+		t.Fatalf("serve with wedged owner exit code = %d, want 1", code)
+	}
+	// Generous ceiling: the point is "bounded", not a precise duration.
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("serve took %v to give up on a wedged owner; wedge bound not applied", elapsed)
+	}
+}
+
+// TestWatchRefusedWhenOwnerAlive: `watch` duplicates the owner's watcher role
+// and must be refused while an owner is dial-able.
+func TestWatchRefusedWhenOwnerAlive(t *testing.T) {
+	vault := initTestVault(t)
+	startFakeOwner(t, vault, "")
+
+	err := watchLoop(context.Background(), vault)
+	if err == nil {
+		t.Fatal("watchLoop succeeded with a live owner; want refusal")
+	}
+	if !strings.Contains(err.Error(), "watch is redundant") {
+		t.Fatalf("watchLoop error = %v, want mention of 'watch is redundant'", err)
+	}
+}
+
+// TestIndexForceRefusedWhenOwnerAlive: `index --force` deletes embeddings.db
+// out from under the owner's open WAL connection and must be refused. A plain
+// index (no --force) stays allowed — WAL makes its writes safe.
+func TestIndexForceRefusedWhenOwnerAlive(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+	startFakeOwner(t, vault, "")
+
+	if code := run([]string{"index", "--force", "--dir", vault}); code != 1 {
+		t.Fatalf("index --force with live owner exit code = %d, want 1", code)
+	}
+	if code := run([]string{"index", "--dir", vault}); code != 0 {
+		t.Fatalf("plain index with live owner exit code = %d, want 0", code)
+	}
 }
 
 func TestServeCommandNoVault(t *testing.T) {
@@ -321,13 +529,23 @@ func TestWarrenListRefreshPropose(t *testing.T) {
 	marmotDir := filepath.Join(workspace, ".marmot")
 	warrenRoot := testWarrenRoot(t, "product-platform", "project-a")
 
-	// Empty list first.
-	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "No Warrens registered") {
-		t.Fatalf("warren list empty = %q code=%d", out, code)
+	// Read-only verbs are lazy (C5): before any mutating verb creates the
+	// workspace, list errors and must NOT fabricate a .marmot dir.
+	if _, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren list without a workspace exit code = %d, want 1", code)
+	}
+	if _, err := os.Stat(marmotDir); !os.IsNotExist(err) {
+		t.Fatalf("warren list must not create the workspace, stat err = %v", err)
 	}
 
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "product-platform", warrenRoot}); code != 0 {
 		t.Fatalf("register exit code = %d", code)
+	}
+
+	// Empty list renders once the workspace exists (registered warrens are
+	// listed below; unregister round-trip is covered elsewhere).
+	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "product-platform") {
+		t.Fatalf("warren list after register = %q code=%d", out, code)
 	}
 
 	if out, code := captureRun([]string{"warren", "list", "--dir", marmotDir}); code != 0 || !strings.Contains(out, "product-platform") {
@@ -339,15 +557,17 @@ func TestWarrenListRefreshPropose(t *testing.T) {
 	if code := run([]string{"warren", "refresh", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
 		t.Fatalf("warren refresh exit code = %d", code)
 	}
-	if code := run([]string{"warren", "propose", "--dir", marmotDir, "--warren", "product-platform"}); code != 0 {
-		t.Fatalf("warren propose exit code = %d", code)
+	// D3: propose is real git mechanics now, so the non-git warren fixture is
+	// refused (both with an explicit --warren and via auto-resolve).
+	if code := run([]string{"warren", "propose", "--dir", marmotDir, "--warren", "product-platform"}); code != 1 {
+		t.Fatalf("warren propose on non-git warren exit code = %d, want 1", code)
 	}
 	// refresh/propose resolve a single registered Warren without --warren.
 	if code := run([]string{"warren", "refresh", "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren refresh (auto-resolve) exit code = %d", code)
 	}
-	if code := run([]string{"warren", "propose", "--dir", marmotDir}); code != 0 {
-		t.Fatalf("warren propose (auto-resolve) exit code = %d", code)
+	if code := run([]string{"warren", "propose", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren propose (auto-resolve, non-git warren) exit code = %d, want 1", code)
 	}
 }
 
@@ -482,11 +702,7 @@ func TestBuildEngineClassifierNoKey(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			result, err := buildEngine(dir)
-			if err != nil {
-				t.Fatalf("buildEngine: %v", err)
-			}
-			result.Cleanup()
+			hermeticEngine(t, dir)
 		})
 	}
 }
@@ -508,6 +724,41 @@ func TestIndexErrorPaths(t *testing.T) {
 	vault := initTestVault(t)
 	if code := run([]string{"index", "--force", "--dir", vault}); code != 0 {
 		t.Fatalf("index --force exit code = %d, want 0", code)
+	}
+}
+
+// TestIndexForceRemovesWALSidecars verifies that index --force removes stale
+// WAL sidecar files alongside the embeddings DB, so an old -wal is never
+// replayed into the freshly created database.
+func TestIndexForceRemovesWALSidecars(t *testing.T) {
+	vault := initTestVault(t)
+	writeTestNode(t, vault, "node_a", "default")
+
+	dataDir := filepath.Join(vault, ".marmot-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "embeddings.db")
+	// Pre-create stale sidecars (garbage content from a hypothetical killed process).
+	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.WriteFile(sidecar, []byte("stale sidecar"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if code := run([]string{"index", "--force", "--dir", vault}); code != 0 {
+		t.Fatalf("index --force exit code = %d, want 0", code)
+	}
+
+	// The stale sidecars must be gone: --force removed them before indexing,
+	// and the clean close checkpoints/removes the fresh ones.
+	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if data, err := os.ReadFile(sidecar); err == nil && string(data) == "stale sidecar" {
+			t.Errorf("stale sidecar %s survived index --force", sidecar)
+		}
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Errorf("expected fresh embeddings.db after index --force: %v", err)
 	}
 }
 
@@ -683,17 +934,82 @@ func TestWarrenFormatAndRegisterErrors(t *testing.T) {
 	}
 }
 
+// TestWarrenLegacyFlagSpellingsRejected: the U2-era compat spellings
+// (--root, --aliases, and --id outside warren init) are gone; each now
+// errors as an unknown flag, and canonical spellings keep working silently.
+func TestWarrenLegacyFlagSpellingsRejected(t *testing.T) {
+	root := t.TempDir()
+	if code := run([]string{"warren", "init", "--warren-dir", root, "--id", "wp"}); code != 0 {
+		t.Fatalf("init exit code = %d", code)
+	}
+	cases := []struct {
+		args    []string
+		removed string
+	}{
+		{[]string{"warren", "init", "--root", t.TempDir(), "--id", "wq"}, "-root"},
+		{[]string{"warren", "project", "add", "billing", "--root", root}, "-root"},
+		{[]string{"warren", "project", "add", "billing", "--warren-dir", root, "--aliases", "pay,bill"}, "-aliases"},
+		{[]string{"warren", "project", "add", "--id", "ledger", "--warren-dir", root}, "-id"},
+		{[]string{"warren", "project", "import", "--id", "imported", "src", "--warren-dir", root}, "-id"},
+		{[]string{"warren", "burrow", "--warren", "wp", "--materialize", "billing"}, "-materialize"},
+	}
+	for _, tc := range cases {
+		_, stderr, code := captureRunBoth(t, tc.args)
+		if code != 1 {
+			t.Errorf("run(%v) exit code = %d, want 1 (unknown flag)", tc.args, code)
+		}
+		if !strings.Contains(stderr, "flag provided but not defined: "+tc.removed) {
+			t.Errorf("run(%v) stderr = %q, want unknown-flag error for %s", tc.args, stderr, tc.removed)
+		}
+	}
+	// A refused legacy invocation must not have registered anything.
+	out, code := captureRun([]string{"warren", "project", "list", "--warren-dir", root, "--json"})
+	if code != 0 || strings.Contains(out, "billing") || strings.Contains(out, "ledger") {
+		t.Fatalf("refused legacy invocation still registered a project: %s", out)
+	}
+
+	// Canonical spellings keep working silently.
+	_, stderr, code := captureRunBoth(t, []string{"warren", "project", "add", "reports", "--warren-dir", root, "--alias", "rep"})
+	if code != 0 {
+		t.Fatalf("canonical project add exit code = %d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stderr, "deprecated") || strings.Contains(stderr, "not defined") {
+		t.Fatalf("canonical spellings errored or warned: %q", stderr)
+	}
+}
+
+// TestWarrenUsageShowsOnlyCanonicalSpellings (U2): usage lines must never
+// advertise a deprecated spelling (--root, --aliases, or --id outside
+// warren init, where --id is the canonical form).
+func TestWarrenUsageShowsOnlyCanonicalSpellings(t *testing.T) {
+	data, err := os.ReadFile("warren.go")
+	if err != nil {
+		t.Fatalf("read warren.go: %v", err)
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		if !strings.Contains(line, "usage: marmot warren") {
+			continue
+		}
+		if strings.Contains(line, "--root") || strings.Contains(line, "--aliases") {
+			t.Errorf("warren.go:%d usage line advertises a deprecated spelling: %s", i+1, strings.TrimSpace(line))
+		}
+		if strings.Contains(line, "--id") && !strings.Contains(line, "warren init") {
+			t.Errorf("warren.go:%d usage line advertises --id outside warren init: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
 func TestWarrenInitPositionalID(t *testing.T) {
-	// Positional id form plus --root compatibility alias; interspersed flags
-	// are reordered, so the id may come before or after the flags.
-	if code := run([]string{"warren", "init", "--root", t.TempDir(), "myrepo"}); code != 0 {
+	// Positional id form; interspersed flags are reordered, so the id may
+	// come before or after the flags.
+	if code := run([]string{"warren", "init", "--warren-dir", t.TempDir(), "myrepo"}); code != 0 {
 		t.Fatalf("warren init positional exit code = %d, want 0", code)
 	}
-	if code := run([]string{"warren", "init", "myrepo", "--root", t.TempDir()}); code != 0 {
+	if code := run([]string{"warren", "init", "myrepo", "--warren-dir", t.TempDir()}); code != 0 {
 		t.Fatalf("warren init positional-first exit code = %d, want 0", code)
 	}
 	// A stray positional alongside --id is an error, not silently ignored.
-	if code := run([]string{"warren", "init", "--root", t.TempDir(), "--id", "myrepo", "stray"}); code != 1 {
+	if code := run([]string{"warren", "init", "--warren-dir", t.TempDir(), "--id", "myrepo", "stray"}); code != 1 {
 		t.Fatalf("warren init --id with stray positional exit code = %d, want 1", code)
 	}
 }
@@ -701,18 +1017,25 @@ func TestWarrenInitPositionalID(t *testing.T) {
 func TestWarrenInterspersedFlagsAfterPositionals(t *testing.T) {
 	workspace := t.TempDir()
 	marmotDir := filepath.Join(workspace, ".marmot")
-	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	// Two projects: project-b gets burrowed (positional-before-flags
+	// coverage), project-a stays a plain mount so it can become editable —
+	// editable + materialized is refused since the A4 correctness fix.
+	warrenRoot := testWarrenRoot(t, "wp", "project-a", "project-b")
 	if code := run([]string{"warren", "register", "wp", warrenRoot, "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren register positional-first exit code = %d, want 0", code)
 	}
-	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "project-a", "--materialize"}); code != 0 {
-		t.Fatalf("warren mount trailing --materialize exit code = %d, want 0", code)
+	if code := run([]string{"warren", "burrow", "project-b", "--dir", marmotDir, "--warren", "wp"}); code != 0 {
+		t.Fatalf("warren burrow positional-first exit code = %d, want 0", code)
 	}
 	if code := run([]string{"warren", "edit", "project-a", "--warren", "wp", "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren edit positional-first exit code = %d, want 0", code)
 	}
 	if code := run([]string{"warren", "edit", "project-a", "--off", "--warren", "wp", "--dir", marmotDir}); code != 0 {
 		t.Fatalf("warren edit --off positional-first exit code = %d, want 0", code)
+	}
+	// Editable on the burrowed project must now refuse.
+	if code := run([]string{"warren", "edit", "project-b", "--warren", "wp", "--dir", marmotDir}); code != 1 {
+		t.Fatalf("warren edit on burrowed project exit code = %d, want 1 (editable+materialized refusal)", code)
 	}
 }
 
@@ -817,9 +1140,13 @@ func TestWarrenMountAllProjects(t *testing.T) {
 	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
 		t.Fatalf("register exit code = %d", code)
 	}
-	// No positional projects -> mount all from the manifest.
-	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp"}); code != 0 {
-		t.Fatalf("warren mount-all exit code = %d, want 0", code)
+	// Bare zero-arg mount refuses (C3): nothing becomes queryable by accident.
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp"}); code != 1 {
+		t.Fatalf("warren bare mount exit code = %d, want 1", code)
+	}
+	// Explicit --all expands to every manifest project.
+	if code := run([]string{"warren", "mount", "--dir", marmotDir, "--warren", "wp", "--all"}); code != 0 {
+		t.Fatalf("warren mount --all exit code = %d, want 0", code)
 	}
 }
 
@@ -938,15 +1265,5 @@ func TestTruncateHashForDisplay(t *testing.T) {
 	}
 }
 
-func TestRuntimeBridgeKeyOrdering(t *testing.T) {
-	if runtimeBridgeKey("a", "b") != runtimeBridgeKey("b", "a") {
-		t.Fatal("runtimeBridgeKey should be order-independent")
-	}
-}
-
-func TestEmptyNamespaceManager(t *testing.T) {
-	mgr := emptyNamespaceManager("/tmp/vault")
-	if mgr.VaultDir != "/tmp/vault" || mgr.Namespaces == nil || mgr.Bridges == nil {
-		t.Fatalf("unexpected empty namespace manager: %+v", mgr)
-	}
-}
+// TestRuntimeBridgeKeyOrdering and TestEmptyNamespaceManager moved to
+// internal/mcp/warren_reload_test.go with their subjects (B2 extraction).

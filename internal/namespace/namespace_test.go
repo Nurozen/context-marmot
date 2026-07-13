@@ -494,6 +494,45 @@ func TestCreateCrossVaultBridge(t *testing.T) {
 	}
 }
 
+// TestCreateCrossVaultBridgeRefusesSelfBridge (R1.7): bridging a vault to a
+// copy of itself (same vault_id on both sides) would write a degenerate
+// @X--@X.md manifest and double-register X in the routing table, shadowing
+// the live vault — refuse with the distinct-vault_id remediation.
+func TestCreateCrossVaultBridgeRefusesSelfBridge(t *testing.T) {
+	routes.SetOverridePath(filepath.Join(t.TempDir(), "routes.yml"))
+	t.Cleanup(func() { routes.SetOverridePath("") })
+
+	localDir := t.TempDir()
+	remoteDir := t.TempDir()
+	cfg := "---\nversion: \"1\"\nvault_id: shared-vault\nnamespace: default\nembedding_provider: mock\n---\n"
+	for _, dir := range []string{localDir, remoteDir} {
+		if err := os.WriteFile(filepath.Join(dir, "_config.md"), []byte(cfg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := CreateCrossVaultBridge(localDir, remoteDir, []string{"references"})
+	if err == nil || !strings.Contains(err.Error(), "refusing to bridge a vault to itself") {
+		t.Fatalf("CreateCrossVaultBridge err = %v, want self-bridge refusal", err)
+	}
+	if !strings.Contains(err.Error(), ".marmot/_config.md") {
+		t.Fatalf("refusal must point at .marmot/_config.md for the distinct vault_id fix, got: %v", err)
+	}
+	// Nothing was written or routed on refusal.
+	for _, dir := range []string{localDir, remoteDir} {
+		if _, statErr := os.Stat(filepath.Join(dir, "_bridges")); !os.IsNotExist(statErr) {
+			t.Errorf("refused bridge left _bridges dir in %s", dir)
+		}
+	}
+	rt, loadErr := routes.Load()
+	if loadErr != nil {
+		t.Fatalf("routes.Load: %v", loadErr)
+	}
+	if _, ok := rt.Get("shared-vault"); ok {
+		t.Error("refused bridge registered a route for the shared vault ID")
+	}
+}
+
 func TestCreateCrossVaultBridge_MissingVaultID(t *testing.T) {
 	localDir := t.TempDir()
 	remoteDir := t.TempDir()

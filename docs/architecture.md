@@ -391,8 +391,19 @@ Warren nodes are exposed with cross-vault-style qualified IDs:
 Warren bridge policy is owned by the top-level Warren manifest. During engine
 startup, active and available Warren project bridge endpoints are converted from
 project IDs to vault IDs and fed into the same cross-vault validation and vault
-registry path used by ordinary cross-vault bridges. Dormant endpoints are kept
-out of the registry until mounted.
+registry path used by ordinary cross-vault bridges. Dormant foreign endpoints
+are kept out of the registry until mounted.
+
+A Warren project whose `vault_id` equals the live workspace vault's is
+**identified** with the workspace: the mount scan synthesizes it as an
+active endpoint for every registered Warren (mounted or not, so bridges
+involving it activate with only the other endpoint mounted), it is excluded
+from the vault registry entirely (the live vault is the sole answerer for
+its own ID — no route, no read-only copy, no staleness), its bridge
+endpoints resolve to the local `.marmot` directory instead of the Warren
+copy, and it can never be editable or materialized. `@<local-vault-id>/…`
+references resolve against the live in-memory graph at the engine layer,
+never through the registry.
 
 The read/write model is local-workspace controlled. Mounted projects are
 read-only by default, and `marmot warren edit --warren <id> <project-id>` enables

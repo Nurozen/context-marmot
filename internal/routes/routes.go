@@ -1,6 +1,11 @@
 // Package routes manages the global vault routing table at ~/.marmot/routes.yml.
 // It maps vault IDs to filesystem paths, enabling cross-vault resolution
 // independent of bridge manifest paths.
+//
+// The table location can be overridden with the MARMOT_ROUTES environment
+// variable: a path value redirects the table, while "off", "none", or "0"
+// disables the global table entirely (useful for hermetic tests and scratch
+// vaults that must not inherit the user's registered vaults).
 package routes
 
 import (
@@ -9,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/nurozen/context-marmot/internal/flock"
 	"gopkg.in/yaml.v3"
 )
 
@@ -40,9 +46,22 @@ func SetOverridePath(path string) {
 }
 
 // defaultPathLocked returns the routing table path (caller must hold mu).
+// Precedence: SetOverridePath > MARMOT_ROUTES env > ~/.marmot/routes.yml.
+// MARMOT_ROUTES=off|none|0 disables the global routing table entirely
+// (Load returns an empty table), which keeps hermetic tooling and fresh
+// scratch vaults from inheriting the user's global vault registry.
+// Any other non-empty MARMOT_ROUTES value is used as the routes file path.
 func defaultPathLocked() string {
 	if overridePath != "" {
 		return overridePath
+	}
+	switch env := os.Getenv("MARMOT_ROUTES"); env {
+	case "":
+		// fall through to the default location
+	case "off", "none", "0":
+		return ""
+	default:
+		return env
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -56,6 +75,11 @@ func DefaultPath() string {
 	mu.RLock()
 	defer mu.RUnlock()
 	return defaultPathLocked()
+}
+
+// EmptyTable returns a fresh routing table with no vaults registered.
+func EmptyTable() *RoutingTable {
+	return &RoutingTable{Vaults: make(map[string]VaultEntry)}
 }
 
 // Load reads the routing table from ~/.marmot/routes.yml.
@@ -102,9 +126,16 @@ func SaveTo(rt *RoutingTable, path string) error {
 	defer mu.Unlock()
 
 	if path == "" {
-		return fmt.Errorf("empty routing table path")
+		return fmt.Errorf("empty routing table path (routing disabled via MARMOT_ROUTES?)")
 	}
 
+	return writeTableAtomic(rt, path)
+}
+
+// writeTableAtomic marshals rt and writes it to path via a uniquely named
+// temp file + rename, so concurrent writers never collide on a shared tmp
+// name. Caller must hold mu.
+func writeTableAtomic(rt *RoutingTable, path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create routing table dir: %w", err)
@@ -115,66 +146,73 @@ func SaveTo(rt *RoutingTable, path string) error {
 		return fmt.Errorf("marshal routing table: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".routes-*.yml.tmp")
+	if err != nil {
+		return fmt.Errorf("create routing table tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	success := false
+	defer func() {
+		if !success {
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
 		return fmt.Errorf("write routing table tmp: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close routing table tmp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return fmt.Errorf("chmod routing table tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("commit routing table: %w", err)
 	}
+	success = true
 	return nil
 }
 
 // Update performs an atomic read-modify-write cycle on the routing table.
 // The provided function receives the current table and may modify it.
 // If fn returns nil, the modified table is saved atomically.
+//
+// The RMW cycle runs under an exclusive cross-process flock (sibling
+// routes.yml.lock file) inside the package mu, so concurrent marmot
+// processes cannot drop each other's route registrations. Lock ordering is
+// fixed (process mu, then file flock) — no inversion is possible.
 func Update(fn func(rt *RoutingTable) error) error {
 	mu.Lock()
 	defer mu.Unlock()
 
 	path := defaultPathLocked()
 	if path == "" {
-		return fmt.Errorf("empty routing table path")
+		return fmt.Errorf("empty routing table path (routing disabled via MARMOT_ROUTES?)")
 	}
 
-	// Read under lock (bypass LoadFrom which also takes lock)
-	rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
-	data, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read routing table: %w", err)
-	}
-	if err == nil {
-		if err := yaml.Unmarshal(data, rt); err != nil {
-			return fmt.Errorf("parse routing table: %w", err)
+	return flock.WithLock(path+".lock", func() error {
+		// Read under lock (bypass LoadFrom which also takes mu)
+		rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("read routing table: %w", err)
 		}
-		if rt.Vaults == nil {
-			rt.Vaults = make(map[string]VaultEntry)
+		if err == nil {
+			if err := yaml.Unmarshal(data, rt); err != nil {
+				return fmt.Errorf("parse routing table: %w", err)
+			}
+			if rt.Vaults == nil {
+				rt.Vaults = make(map[string]VaultEntry)
+			}
 		}
-	}
 
-	if err := fn(rt); err != nil {
-		return err
-	}
+		if err := fn(rt); err != nil {
+			return err
+		}
 
-	// Write under lock (bypass SaveTo which also takes lock)
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create routing table dir: %w", err)
-	}
-	out, err := yaml.Marshal(rt)
-	if err != nil {
-		return fmt.Errorf("marshal routing table: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o644); err != nil {
-		return fmt.Errorf("write routing table tmp: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit routing table: %w", err)
-	}
-	return nil
+		return writeTableAtomic(rt, path)
+	})
 }
 
 // Get returns the filesystem path for a vault ID, or ("", false) if not found.

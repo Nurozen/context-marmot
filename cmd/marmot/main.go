@@ -7,7 +7,7 @@
 //	marmot setup      [--dir .marmot]                            Generate MCP tool configs
 //	marmot index      [--dir .marmot] [--force] [<path>] [--incremental]  Index nodes or source code
 //	marmot query      --query "..." [flags]                      Query the knowledge graph
-//	marmot serve      [--dir .marmot]                            Start MCP server on stdio
+//	marmot serve      [--dir .marmot] [--no-daemon]               Start MCP server on stdio
 //	marmot verify     [--dir .marmot] [--namespace] [--staleness] [--bridges] Run integrity checks
 //	marmot status     [--dir .marmot]                            Show vault statistics
 //	marmot watch      [--dir .marmot]                            Watch for file changes and auto-reindex
@@ -18,7 +18,7 @@
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve]                         Manage vault routing table
 //	marmot warren     [init|project|bridge|doctor|format|register|mount|...] Manage Warrens
-//	marmot ui         [--dir .marmot] [--port 3274] [--no-open]    Start graph UI server
+//	marmot ui         [--dir .marmot] [--host 127.0.0.1] [--port 3274] [--no-open]    Start graph UI server
 //	marmot sdk        [--out <path>] [--base-url <url>]           Generate TypeScript SDK
 package main
 
@@ -314,6 +314,7 @@ func runQuery(dir, query string, depth, budget int) error {
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	noDaemon := fs.Bool("no-daemon", false, "serve standalone without daemon election (mirrors MARMOT_NO_DAEMON=1)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -321,19 +322,19 @@ func cmdServe(args []string) int {
 		*dir = discoverVault()
 	}
 
-	if err := runServe(*dir); err != nil {
+	if err := runServe(*dir, *noDaemon); err != nil {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func runServe(dir string) error {
+func runServe(dir string, noDaemon bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
 	}
 
-	return runServePipeline(dir)
+	return runServePipeline(dir, noDaemon)
 }
 
 // ---------------------------------------------------------------------------
@@ -529,6 +530,7 @@ func cmdReembed(args []string) int {
 func cmdUI(args []string) int {
 	fs := flag.NewFlagSet("ui", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	host := fs.String("host", "127.0.0.1", "interface to bind the HTTP server to (use 0.0.0.0 to expose on all interfaces)")
 	port := fs.Int("port", 3274, "HTTP server port")
 	noOpen := fs.Bool("no-open", false, "don't auto-open browser")
 	if err := fs.Parse(args); err != nil {
@@ -537,16 +539,16 @@ func cmdUI(args []string) int {
 	if *dir == "" {
 		*dir = discoverVault()
 	}
-	if err := runUI(*dir, *port, *noOpen); err != nil {
+	if err := runUI(*dir, *host, *port, *noOpen); err != nil {
 		fmt.Fprintf(os.Stderr, "ui: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func runUI(dir string, port int, noOpen bool) error {
+func runUI(dir, host string, port int, noOpen bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
 	}
-	return runUIPipeline(dir, port, noOpen)
+	return runUIPipeline(dir, host, port, noOpen)
 }

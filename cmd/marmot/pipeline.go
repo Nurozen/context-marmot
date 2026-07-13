@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -16,7 +20,9 @@ import (
 	"github.com/nurozen/context-marmot/internal/api"
 	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/daemon"
 	"github.com/nurozen/context-marmot/internal/embedding"
+	"github.com/nurozen/context-marmot/internal/flock"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/heatmap"
 	"github.com/nurozen/context-marmot/internal/indexer"
@@ -28,7 +34,6 @@ import (
 	"github.com/nurozen/context-marmot/internal/summary"
 	"github.com/nurozen/context-marmot/internal/update"
 	"github.com/nurozen/context-marmot/internal/verify"
-	"github.com/nurozen/context-marmot/internal/warren"
 	"github.com/nurozen/context-marmot/web"
 )
 
@@ -57,10 +62,32 @@ func runIndexPipeline(dir string, force bool) error {
 
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
 	if force {
-		// Remove existing embeddings DB to start fresh (model may have changed).
+		// Deleting the DB under a live owner's open WAL connection is not
+		// safe — the owner would keep writing into the unlinked file.
+		if info, alive := ownerAlive(dir); alive {
+			return fmt.Errorf("vault is served by marmot daemon (pid %d); index --force would delete the embeddings DB under its open connection — stop the daemon first", info.PID)
+		}
+		// A warren-mounting process in ANOTHER workspace can hold this DB
+		// open read-only (VaultRegistry advertises that with a shared flock
+		// on vault.read.lock); deleting it under that reader leaves the
+		// reader on an unlinked file. Held for the whole reindex so a
+		// reader cannot attach mid-rebuild.
+		release, ok, lockErr := flock.TryExclusive(filepath.Join(dir, ".marmot-data", "vault.read.lock"))
+		if lockErr != nil {
+			return fmt.Errorf("index --force: acquire vault read lock: %w", lockErr)
+		}
+		if !ok {
+			return fmt.Errorf("vault is open read-only by another marmot process (warren mount); close it or retry")
+		}
+		defer release()
+		// Remove existing embeddings DB (and WAL sidecars) to start fresh (model may have changed).
 		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
 	}
 
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
@@ -221,50 +248,37 @@ func buildEngine(dir string) (*engineResult, error) {
 		nsName = "default"
 	}
 
-	// Wire vault registry for cross-vault and Warren-mounted traversal.
-	rt, _ := routes.Load() // best-effort; nil is fine
-	if rt == nil {
-		rt = &routes.RoutingTable{Vaults: make(map[string]routes.VaultEntry)}
-	}
-	vaultID := vaultCfg.VaultID
-	warrenBridgeDeclarations := false
-	if mounts, mountErr := warren.ActiveMounts(dir); mountErr == nil {
-		for _, mount := range mounts {
-			if mount.VaultID != "" && mount.Available {
-				rt.Set(mount.VaultID, mount.Path)
-			}
-		}
-		if bridges, declared := warrenRuntimeBridges(dir, mounts); declared {
-			warrenBridgeDeclarations = true
-			if nsMgr == nil {
-				nsMgr = emptyNamespaceManager(dir)
-			}
-			nsMgr.CrossVaultBridges = append(nsMgr.CrossVaultBridges, bridges...)
-		}
-		if len(mounts) > 0 {
-			fmt.Fprintf(os.Stderr, "warren: %d active project mounts loaded\n", len(mounts))
-		}
-	}
-	if nsMgr != nil &&
-		(len(nsMgr.Namespaces) > 0 || len(nsMgr.Bridges) > 0 || len(nsMgr.CrossVaultBridges) > 0 || warrenBridgeDeclarations) {
+	// Attach the file-declared namespace manager when it has content; warren
+	// runtime bridges are merged in by ReloadWarrenState below (creating an
+	// empty manager on demand when only warren bridges exist).
+	if nsMgr != nil && (len(nsMgr.Namespaces) > 0 || len(nsMgr.Bridges) > 0 || len(nsMgr.CrossVaultBridges) > 0) {
 		engine.WithNamespaceManager(nsMgr)
-		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
-			len(nsMgr.Namespaces), len(nsMgr.Bridges), len(nsMgr.CrossVaultBridges))
-	}
-	hasCrossVaultBridges := nsMgr != nil && len(nsMgr.CrossVaultBridges) > 0
-	hasRoutes := rt != nil && len(rt.List()) > 0
-	if hasCrossVaultBridges || hasRoutes {
-		var bridges []*namespace.Bridge
-		if nsMgr != nil {
-			bridges = nsMgr.CrossVaultBridges
-		}
-		vr := namespace.NewVaultRegistry(vaultID, dir, bridges, rt)
-		engine.WithVaultRegistry(vr)
-		fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered\n", len(vr.KnownVaultIDs()))
 	}
 
+	// Always create the vault registry — a long-lived daemon owner must be
+	// able to pick up warren mounts and route changes made after startup via
+	// Engine.ReloadWarrenState (which does the actual routes/mount/bridge
+	// wiring, here and on every later reload trigger).
+	vr := namespace.NewVaultRegistry(vaultCfg.VaultID, dir, nil, routes.EmptyTable())
+	engine.WithVaultRegistry(vr)
+	if reloadErr := engine.ReloadWarrenState(); reloadErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: warren state load failed: %v\n", reloadErr)
+	}
+	if bridgeList, crossVault := engine.BridgeSnapshot(); bridgeList != nil {
+		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
+			len(engine.NamespaceNames()), len(bridgeList), len(crossVault))
+	}
+	fmt.Fprintf(os.Stderr, "vault registry: %d remote vaults registered (global routing table; MARMOT_ROUTES=off disables)\n", len(vr.KnownVaultIDs()))
+
+	// Detach the heat map when a live serve owner exists: it records heat for
+	// this vault itself, and a second attached map would clobber its saves
+	// (both the per-query save in HandleContextQuery and the Cleanup save are
+	// nil-gated, so skipping WithHeatMap suppresses both). Inert without a
+	// daemon owner — nothing publishes daemon.info.json then.
 	var hm *heatmap.HeatMap
-	if loaded, hmErr := heatmap.Load(dir, nsName); hmErr == nil {
+	if info, alive := ownerAlive(dir); alive {
+		fmt.Fprintf(os.Stderr, "heatmap: detached — vault owner (pid %d) records heat\n", info.PID)
+	} else if loaded, hmErr := heatmap.Load(dir, nsName); hmErr == nil {
 		hm = loaded
 		engine.WithHeatMap(hm)
 		fmt.Fprintf(os.Stderr, "heatmap: %d pairs loaded for %s\n", hm.PairCount(), nsName)
@@ -361,94 +375,86 @@ func buildEngine(dir string) (*engineResult, error) {
 	}, nil
 }
 
-func emptyNamespaceManager(dir string) *namespace.Manager {
-	return &namespace.Manager{
-		VaultDir:   dir,
-		Namespaces: make(map[string]*namespace.Namespace),
-		Bridges:    make(map[string]*namespace.Bridge),
-	}
-}
+// ownerWedgeWait bounds how long a serve process retries while the flock is
+// held but no owner is reachable — daemon.info.json missing (owner wedged
+// between winning the flock and listening) OR readable but pointing at a
+// socket that refuses the dial (stale info from a SIGKILLed predecessor, a
+// reaped tmp socket, a wedged accept loop). Either way the election must
+// yield a clear error, not a silent 50ms spin (plan 2.11). A var so tests
+// can shrink it.
+var ownerWedgeWait = 10 * time.Second
 
-func warrenRuntimeBridges(marmotDir string, mounts []warren.ProjectStatus) ([]*namespace.Bridge, bool) {
-	state, _, err := warren.LoadWorkspaceStateFromMarmot(marmotDir)
-	if err != nil {
-		return nil, false
-	}
-
-	active := make(map[string]map[string]warren.ProjectStatus)
-	for _, mount := range mounts {
-		if !mount.Active || !mount.Available || mount.VaultID == "" {
-			continue
-		}
-		projects := active[mount.WarrenID]
-		if projects == nil {
-			projects = make(map[string]warren.ProjectStatus)
-			active[mount.WarrenID] = projects
-		}
-		projects[mount.ProjectID] = mount
+// runServePipeline starts the MCP server on stdio. By default it runs the
+// single-owner daemon election — the first serve per vault wins the flock and
+// owns the engine; every other serve relays its stdio session to the owner
+// over a unix socket. It serves standalone only on an explicit opt-out
+// (--no-daemon or MARMOT_NO_DAEMON=1) or on Windows, where flock does not
+// exist.
+func runServePipeline(dir string, noDaemon bool) error {
+	if noDaemon || os.Getenv("MARMOT_NO_DAEMON") == "1" || runtime.GOOS == "windows" {
+		return runServeStandalone(dir)
 	}
 
-	declared := false
-	merged := make(map[string]*namespace.Bridge)
-	relationSets := make(map[string]map[string]bool)
-	for warrenID, entry := range state.Warrens {
-		manifest, _, err := warren.LoadManifest(entry.Path)
-		if err != nil {
-			continue
-		}
-		if len(manifest.Bridges) > 0 {
-			declared = true
-		}
-		activeProjects := active[warrenID]
-		if len(activeProjects) == 0 {
-			continue
-		}
-		for _, bridge := range manifest.Bridges {
-			source, sourceOK := activeProjects[bridge.Source]
-			target, targetOK := activeProjects[bridge.Target]
-			if !sourceOK || !targetOK || source.VaultID == "" || target.VaultID == "" {
-				continue
-			}
-			key := runtimeBridgeKey(source.VaultID, target.VaultID)
-			runtimeBridge, ok := merged[key]
-			if !ok {
-				runtimeBridge = &namespace.Bridge{
-					Source:          bridge.Source,
-					Target:          bridge.Target,
-					SourceVaultID:   source.VaultID,
-					TargetVaultID:   target.VaultID,
-					SourceVaultPath: source.Path,
-					TargetVaultPath: target.Path,
-				}
-				merged[key] = runtimeBridge
-				relationSets[key] = make(map[string]bool)
-			}
-			for _, relation := range bridge.Relations {
-				if relation == "" || relationSets[key][relation] {
+	daemon.Version = version
+	dataDir := filepath.Join(dir, ".marmot-data")
+	// One ClientSession per process: exactly one goroutine ever reads stdin,
+	// so switching roles (proxy re-entry, owner promotion) can never leave a
+	// competing reader behind to steal a client line. It also carries the
+	// recorded MCP handshake across proxy re-entries.
+	client := daemon.NewClientSession(os.Stdin)
+	var wedgedSince time.Time
+	for {
+		lock, err := daemon.TryAcquire(dataDir)
+		switch {
+		case err == nil:
+			return runServeOwner(dir, lock, client)
+		case errors.Is(err, daemon.ErrHeld):
+			// cause is the reason no owner is reachable this iteration.
+			var cause error
+			info, ierr := daemon.ReadInfo(dataDir)
+			if ierr != nil {
+				// Owner mid-startup: the flock is held but daemon.info.json
+				// is not published yet.
+				cause = ierr
+			} else {
+				perr := daemon.RunProxySession(client, os.Stdout, info.Socket)
+				switch {
+				case errors.Is(perr, daemon.ErrNoOwner):
+					// Stale info.json / wedged owner: the socket never
+					// accepted the dial, so no progress was made — this
+					// counts toward the wedge bound below. (Checked before
+					// ErrOwnerGone, which ErrNoOwner wraps.)
+					cause = perr
+				case errors.Is(perr, daemon.ErrOwnerGone):
+					// We were attached to a live owner and it died: real
+					// progress, so reset the wedge clock and re-elect.
+					wedgedSince = time.Time{}
+					time.Sleep(50 * time.Millisecond)
 					continue
+				default:
+					// Client EOF (nil), MARMOT_PROXY_NO_RESUME exit
+					// (ErrNoResume, nonzero so the MCP client restarts
+					// serve), or a fatal relay error.
+					return perr
 				}
-				relationSets[key][relation] = true
-				runtimeBridge.AllowedRelations = append(runtimeBridge.AllowedRelations, relation)
 			}
+			// Flock held but no reachable owner: bound the retry so a wedged
+			// or stale owner yields a clear error instead of a silent spin.
+			if wedgedSince.IsZero() {
+				wedgedSince = time.Now()
+			} else if time.Since(wedgedSince) > ownerWedgeWait {
+				return fmt.Errorf("daemon lock is held but no reachable owner appeared within %s: %w", ownerWedgeWait, cause)
+			}
+			time.Sleep(50 * time.Millisecond)
+		default:
+			return err
 		}
 	}
-
-	bridges := make([]*namespace.Bridge, 0, len(merged))
-	for _, bridge := range merged {
-		bridges = append(bridges, bridge)
-	}
-	return bridges, declared
 }
 
-func runtimeBridgeKey(a, b string) string {
-	if a > b {
-		a, b = b, a
-	}
-	return a + "\x00" + b
-}
-
-// runServePipeline starts the MCP server on stdio.
-func runServePipeline(dir string) error {
+// runServeStandalone starts the MCP server on stdio without daemon election —
+// the opt-out (--no-daemon/MARMOT_NO_DAEMON=1) and Windows path.
+func runServeStandalone(dir string) error {
 	result, err := buildEngine(dir)
 	if err != nil {
 		return err
@@ -465,8 +471,122 @@ func runServePipeline(dir string) error {
 	return srv.ListenStdio(ctx, os.Stdin, os.Stdout)
 }
 
-// runUIPipeline starts the HTTP UI server backed by the shared engine.
-func runUIPipeline(dir string, port int, noOpen bool) error {
+// runServeOwner runs the elected owner: the single engine, summary scheduler,
+// and graph watcher for the vault, serving its own MCP client on stdin (the
+// process's ClientSession, so a defeated proxy's read-ahead is preserved
+// across promotion) and every proxy over the unix socket (fresh
+// mcpserver.Server per connection, one shared Engine). After its own client
+// disconnects it lingers until the last proxy session ends, then tears down
+// in strict order — Owner.Close (stop accepting, remove socket) runs before
+// the shared engine closes (so no session executes against a closed DB) and
+// before lock.Release (so a late proxy either fails the dial or gets a clean
+// drop and re-enters the election), never a half-served session.
+func runServeOwner(dir string, lock *daemon.Lock, stdin io.Reader) error {
+	result, err := buildEngine(dir)
+	if err != nil {
+		_ = lock.Release()
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Scoped signal registration (unregistered on return) so SIGTERM/SIGINT
+	// take the same graceful shutdown path as client EOF.
+	sigCtx, sigStop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer sigStop()
+
+	if result.Scheduler != nil {
+		result.Scheduler.Start(ctx) // the vault's single scheduler
+	}
+	stopWatch, watchErr := daemon.StartGraphWatcher(dir, result.Engine)
+	if watchErr != nil {
+		// Non-fatal: the owner still serves, but won't see external node writes.
+		fmt.Fprintf(os.Stderr, "daemon: graph watcher failed to start: %v\n", watchErr)
+		stopWatch = func() {}
+	}
+
+	dataDir := filepath.Join(dir, ".marmot-data")
+	own := daemon.NewOwner(dataDir, lock, func(c net.Conn) error {
+		// Fresh Server per connection over the shared, concurrency-safe Engine.
+		srv := mcpserver.NewServer(result.Engine)
+		return srv.ListenStdio(sigCtx, c, c)
+	})
+	if err := own.Listen(); err != nil {
+		cancel()
+		stopWatch()
+		daemon.BoundedStop(result.Scheduler, 3*time.Second)
+		saveHeatmapAndClose(dir, result)
+		_ = lock.Release()
+		return err
+	}
+
+	// Serve our own MCP client on stdio.
+	ownSrv := mcpserver.NewServer(result.Engine)
+	fmt.Fprintln(os.Stderr, "ContextMarmot MCP server ready on stdio (vault owner)")
+	stdioErr := ownSrv.ListenStdio(sigCtx, stdin, os.Stdout) // returns on client EOF
+
+	// Linger headless: our client is gone, but proxies may still be attached.
+	// On SIGINT/SIGTERM this returns immediately with sessions possibly still
+	// active — the bounded drain below covers them.
+	own.WaitIdle(sigCtx)
+
+	// Stop accepting and remove the socket BEFORE tearing anything down, so a
+	// late proxy fails the dial (and re-elects) instead of reaching a closing
+	// owner; then give in-flight sessions a bounded window to finish against
+	// the still-open engine. On the client-EOF path WaitIdle already drained
+	// to zero, so both steps are instant; the bound only bites on the signal
+	// path, where sigCtx's cancellation is already winding the sessions down.
+	if cerr := own.Close(); cerr != nil { // before lock.Release — see doc comment
+		fmt.Fprintf(os.Stderr, "daemon: close owner: %v\n", cerr)
+	}
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	own.WaitIdle(drainCtx)
+	drainCancel()
+
+	cancel()
+	stopWatch()
+	daemon.BoundedStop(result.Scheduler, 3*time.Second)
+	saveHeatmapAndClose(dir, result)
+	if rerr := lock.Release(); rerr != nil {
+		fmt.Fprintf(os.Stderr, "daemon: release lock: %v\n", rerr)
+	}
+	return stdioErr
+}
+
+// saveHeatmapAndClose persists the heat map (when attached) and closes the
+// engine — the non-scheduler tail of engineResult.Cleanup. The owner path
+// calls it directly so the scheduler stop can be bounded separately and the
+// heatmap save never waits on an in-flight LLM regeneration.
+func saveHeatmapAndClose(dir string, result *engineResult) {
+	if result.HeatMap != nil {
+		if saveErr := heatmap.Save(dir, result.HeatMap); saveErr != nil {
+			fmt.Fprintf(os.Stderr, "heatmap: save error: %v\n", saveErr)
+		}
+	}
+	_ = result.Engine.Close()
+}
+
+// ownerAlive reports whether a live `marmot serve` owner is attached to the
+// vault: daemon.info.json is readable and its socket accepts a connection. A
+// stale info file (owner SIGKILLed before cleanup) fails the dial and reads
+// as "no owner", so standalone behavior is unchanged by leftovers.
+func ownerAlive(dir string) (daemon.Info, bool) {
+	info, err := daemon.ReadInfo(filepath.Join(dir, ".marmot-data"))
+	if err != nil {
+		return daemon.Info{}, false
+	}
+	conn, err := net.Dial("unix", info.Socket)
+	if err != nil {
+		return daemon.Info{}, false
+	}
+	_ = conn.Close()
+	return info, true
+}
+
+// runUIPipeline starts the HTTP UI server backed by the shared engine. The
+// server binds host (loopback by default — the API carries workspace-state
+// mutation, so exposing it beyond the machine is an explicit --host opt-in).
+func runUIPipeline(dir, host string, port int, noOpen bool) error {
 	result, err := buildEngine(dir)
 	if err != nil {
 		return err
@@ -476,12 +596,21 @@ func runUIPipeline(dir string, port int, noOpen bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Suppress the summary scheduler when a live serve owner exists — it runs
+	// the vault's single scheduler, and a second one would duplicate LLM calls
+	// and race _summary.md writes. UI keeps its scheduler when it is the only
+	// marmot process.
 	if result.Scheduler != nil {
-		result.Scheduler.Start(ctx)
+		if info, alive := ownerAlive(dir); alive {
+			fmt.Fprintf(os.Stderr, "summary: scheduler suppressed — vault owner (pid %d) runs it\n", info.PID)
+		} else {
+			result.Scheduler.Start(ctx)
+		}
 	}
 
 	// Create API server with embedded frontend assets.
 	apiServer := api.NewServer(result.Engine, web.Assets)
+	apiServer.WithAppVersion(version)
 
 	// Wire the Graph Curator chat provider. Both OpenAI and Anthropic providers
 	// implement llm.ChatProvider; reuse whichever was configured for the
@@ -502,8 +631,15 @@ func runUIPipeline(dir string, port int, noOpen bool) error {
 		fmt.Fprintln(os.Stderr, "live-reload: watching vault for changes")
 	}
 
-	addr := fmt.Sprintf(":%d", port)
-	url := fmt.Sprintf("http://localhost:%d", port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	// Wildcard and loopback binds are both reachable via localhost; only a
+	// specific non-loopback --host needs its own name in the printed URL.
+	urlHost := host
+	switch host {
+	case "", "0.0.0.0", "::":
+		urlHost = "localhost"
+	}
+	url := fmt.Sprintf("http://%s", net.JoinHostPort(urlHost, strconv.Itoa(port)))
 	fmt.Fprintf(os.Stderr, "ContextMarmot UI server starting at %s\n", url)
 
 	// Auto-open browser (best-effort).
@@ -765,6 +901,8 @@ func runStatusPipeline(dir string) error {
 	// Check embedding store.
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
 	var embeddingCount int
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	if embStore, err := embedding.NewStore(dbPath); err == nil {
 		embeddingCount = embStore.Count()
 		_ = embStore.Close()
@@ -849,6 +987,12 @@ func watchLoop(ctx context.Context, dir string) error {
 		return fmt.Errorf("vault directory %q does not exist", dir)
 	}
 
+	// A live serve owner already watches the vault and reindexes on change;
+	// a second watcher is a strict duplicate of that role.
+	if info, alive := ownerAlive(dir); alive {
+		return fmt.Errorf("vault is served by marmot daemon (pid %d); watch is redundant", info.PID)
+	}
+
 	store := node.NewStore(dir)
 	g, err := graph.LoadGraph(store)
 	if err != nil {
@@ -856,6 +1000,8 @@ func watchLoop(ctx context.Context, dir string) error {
 	}
 
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
@@ -1060,6 +1206,8 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 
 	// 4. Open embedding store.
 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+	// Local vault store: read-write open is intentional (remote vaults go
+	// through VaultRegistry, which opens read-only).
 	embStore, err := embedding.NewStore(dbPath)
 	if err != nil {
 		return fmt.Errorf("open embedding store: %w", err)
@@ -1144,7 +1292,10 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 		return fmt.Errorf("indexer run: %w", err)
 	}
 
-	// 12. Print results.
+	// 12. Print results, with a diagnostic line for every counted error.
+	for _, detail := range result.ErrorDetails {
+		fmt.Fprintf(os.Stderr, "index error: %s\n", detail)
+	}
 	fmt.Printf("Static analysis complete: %s\n", result)
 	return nil
 }

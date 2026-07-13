@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"container/heap"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ncruces/go-sqlite3"
-	_ "github.com/ncruces/go-sqlite3/embed"
 )
 
 // ScoredResult represents a search result with its similarity score.
@@ -32,16 +33,41 @@ type ScoredResult struct {
 // go-sqlite3 ABI, this can be upgraded to use the vec0 virtual table
 // for hardware-accelerated search.
 type Store struct {
-	db *sqlite3.Conn
-	mu sync.Mutex // sqlite3.Conn is not safe for concurrent use
+	db       *sqlite3.Conn
+	mu       sync.Mutex // sqlite3.Conn is not safe for concurrent use
+	readOnly bool       // opened via NewStoreReadOnly; all writes rejected
+	closed   bool       // Close ran; all use returns ErrStoreClosed instead of panicking
 }
+
+// ErrStoreClosed is returned by every Store method after Close. It exists so
+// a search racing a registry Refresh/Rebuild (which swap the cached store
+// and close the old handle after their lock is released) fails loudly with a
+// gateable error instead of panicking inside the SQLite bindings.
+var ErrStoreClosed = errors.New("embedding store is closed")
 
 // NewStore opens (or creates) an embedding store at the given path.
 // Use ":memory:" for an in-memory database.
+//
+// File-backed stores are opened in WAL mode with a 5s busy timeout so that
+// multiple marmot processes can share one embeddings.db: readers never block
+// the writer, and a busy writer retries instead of failing with
+// "database is locked". For ":memory:" the WAL pragma is a harmless no-op
+// (journal_mode stays "memory").
 func NewStore(dbPath string) (*Store, error) {
 	db, err := sqlite3.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	// Order matters: set the busy timeout first so the journal-mode switch
+	// itself retries if another process holds the lock.
+	if err := db.BusyTimeout(5 * time.Second); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	if err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
 
 	s := &Store{db: db}
@@ -49,8 +75,38 @@ func NewStore(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-
 	return s, nil
+}
+
+// NewStoreReadOnly opens an existing embeddings DB without mutating it in
+// any way: no WAL pragma (which would flip the journal mode of someone
+// else's checkout), no schema init, no migration, and a missing file is an
+// error rather than an empty database created in a remote vault. Only
+// busy_timeout is set so reads retry politely against a concurrent writer.
+//
+// Caveat: SQLite requires the -shm index to read a WAL-mode database, so a
+// read-only open of an already-WAL DB still creates empty, inert -wal/-shm
+// sidecars next to it (and needs create permission for them). Remote vaults
+// are local git checkouts today, so this holds; the sidecars carry no data
+// and the main database file is never modified. If vaults ever live on
+// read-only network mounts, an immutable=1 URI open is the escape hatch
+// (unsafe against concurrent writers, hence not the default).
+func NewStoreReadOnly(dbPath string) (*Store, error) {
+	db, err := sqlite3.OpenFlags(dbPath, sqlite3.OPEN_READONLY)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite read-only: %w", err)
+	}
+	if err := db.BusyTimeout(5 * time.Second); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	return &Store{db: db, readOnly: true}, nil
+}
+
+// errReadOnly is the uniform rejection for write methods on read-only stores,
+// surfaced instead of a raw SQLITE_READONLY at Exec time.
+func errReadOnly(op string) error {
+	return fmt.Errorf("%s: embedding store opened read-only", op)
 }
 
 func (s *Store) initSchema() error {
@@ -106,7 +162,12 @@ func (s *Store) StoredDimension() (int, error) {
 }
 
 // storedDimensionLocked returns the dimension of existing embeddings (caller must hold mu).
+// As the first db touch on every read/write path it also carries the
+// closed-store guard for its callers (Upsert/Search/SearchActive/FindSimilar).
 func (s *Store) storedDimensionLocked() (int, error) {
+	if s.closed {
+		return 0, ErrStoreClosed
+	}
 	stmt, _, err := s.db.Prepare(`SELECT embedding FROM embeddings LIMIT 1`)
 	if err != nil {
 		return 0, fmt.Errorf("prepare stored dimension: %w", err)
@@ -127,6 +188,10 @@ func (s *Store) storedDimensionLocked() (int, error) {
 func (s *Store) Upsert(nodeID string, embedding []float32, summaryHash string, model string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return errReadOnly("upsert")
+	}
 
 	if len(embedding) == 0 {
 		return fmt.Errorf("embedding must not be empty")
@@ -286,6 +351,13 @@ func (s *Store) checkModel(model string) (bool, error) {
 func (s *Store) UpdateStatus(nodeID, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return errReadOnly("update status")
+	}
+	if s.closed {
+		return ErrStoreClosed
+	}
 
 	stmt, _, err := s.db.Prepare(`UPDATE embeddings SET status = ? WHERE node_id = ?`)
 	if err != nil {
@@ -471,6 +543,13 @@ func (s *Store) Delete(nodeID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.readOnly {
+		return errReadOnly("delete")
+	}
+	if s.closed {
+		return ErrStoreClosed
+	}
+
 	stmt, _, err := s.db.Prepare(`DELETE FROM embeddings WHERE node_id = ?`)
 	if err != nil {
 		return fmt.Errorf("prepare delete: %w", err)
@@ -492,6 +571,10 @@ func (s *Store) Delete(nodeID string) error {
 func (s *Store) StaleCheck(nodeID string, currentHash string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.closed {
+		return false, ErrStoreClosed
+	}
 
 	stmt, _, err := s.db.Prepare(`SELECT summary_hash FROM embeddings WHERE node_id = ?`)
 	if err != nil {
@@ -515,6 +598,10 @@ func (s *Store) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		return 0
+	}
+
 	stmt, _, err := s.db.Prepare(`SELECT COUNT(*) FROM embeddings`)
 	if err != nil {
 		return 0
@@ -527,10 +614,88 @@ func (s *Store) Count() int {
 	return stmt.ColumnInt(0)
 }
 
-// Close closes the underlying SQLite connection.
+// Models returns the distinct embedding model names stored in the database,
+// sorted. It is read-only-safe (a plain SELECT), so warren doctor can call it
+// on remote vault DBs opened via NewStoreReadOnly to detect cross-project
+// model skew: SearchActive filters WHERE model = ?, so projects indexed with
+// different models silently return no cross-project results.
+func (s *Store) Models() ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrStoreClosed
+	}
+	stmt, _, err := s.db.Prepare(`SELECT DISTINCT model FROM embeddings ORDER BY model`)
+	if err != nil {
+		return nil, fmt.Errorf("prepare models: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	var models []string
+	for stmt.Step() {
+		models = append(models, stmt.ColumnText(0))
+	}
+	if err := stmt.Err(); err != nil {
+		return nil, fmt.Errorf("scan models: %w", err)
+	}
+	return models, nil
+}
+
+// HasStatusColumn reports whether the embeddings table carries the status
+// column added by the soft-delete migration. Read-only-safe (PRAGMA
+// table_info never writes): a pre-migration DB opened read-only cannot be
+// migrated in place and fails SearchActive, so warren doctor uses this to
+// tell the owner to re-import instead of leaving the failure silent.
+func (s *Store) HasStatusColumn() (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, ErrStoreClosed
+	}
+	stmt, _, err := s.db.Prepare(`PRAGMA table_info(embeddings)`)
+	if err != nil {
+		return false, fmt.Errorf("prepare table_info: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for stmt.Step() {
+		if stmt.ColumnText(1) == "status" {
+			return true, nil
+		}
+	}
+	if err := stmt.Err(); err != nil {
+		return false, fmt.Errorf("scan table_info: %w", err)
+	}
+	return false, nil
+}
+
+// Checkpoint flushes the WAL into the main database file
+// (PRAGMA wal_checkpoint(TRUNCATE)) so a byte-level copy of embeddings.db
+// alone — with the -wal/-shm sidecars excluded — is complete and consistent.
+// A checkpoint is a write-side operation, so it errors on read-only stores
+// (callers never checkpoint an RO store). Under a persistent concurrent
+// reader the checkpoint retries for the 5s busy timeout, then returns
+// SQLITE_BUSY.
+func (s *Store) Checkpoint() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readOnly {
+		return errReadOnly("checkpoint")
+	}
+	if s.closed {
+		return ErrStoreClosed
+	}
+	return s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+}
+
+// Close closes the underlying SQLite connection. It is idempotent, and any
+// method called after Close returns ErrStoreClosed (an in-flight call that
+// already holds the mutex finishes against the open connection first).
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	return s.db.Close()
 }
 

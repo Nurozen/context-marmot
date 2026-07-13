@@ -90,7 +90,8 @@ EDGE GUIDELINES:
 - Prefer specific relations: 'calls' over 'references' when one function invokes another; 'contains' for parent-child module relationships.
 
 When referencing nodes in other namespaces, use qualified IDs (e.g., 'other-namespace/node/path'). Cross-namespace edges require a bridge manifest with the relation type whitelisted.
-When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vault edges require a cross-vault bridge with the relation type whitelisted.`),
+When referencing nodes in other vaults, use @vault-id/node-id format. Cross-vault edges require a cross-vault bridge with the relation type whitelisted.
+Writing with an @vault-id/node-id ID updates that existing node in an active *editable* FOREIGN warren mount (summary/context/tags only; the write lands in the mounted project's own checkout). Read-only or unmounted vaults reject @-writes, and so does this workspace's own vault ID (identified projects are read-through views of the live vault — write such nodes locally without the @ prefix).`),
 		mcp.WithString("id",
 			mcp.Required(),
 			mcp.Description("Hierarchical node ID using '/' separators mirroring project structure. When using a non-default namespace, prefix the ID with the namespace (e.g., 'my-ns/auth/login'). If you omit the namespace prefix, it will be added automatically. Examples: 'auth/login', 'db/users', 'my-namespace/render/api-client'. Must not contain '..' or start with '/'"),
@@ -243,10 +244,24 @@ Use this when an agent needs to intentionally create, inspect, update, diagnose,
 	s.mcpServer.AddTool(namespaceTool, s.engine.HandleContextNamespace)
 }
 
+// newStdioServer builds the stdio transport for this server. Tool calls are
+// processed by a single worker so requests within one session execute
+// strictly in arrival order: context_write persists and embeds synchronously
+// before it acks, so a context_query pipelined after a write in the same
+// session is guaranteed to see the written node (read-your-writes). The
+// default mcp-go pool of 5 workers can reorder pipelined tool calls.
+// Separate sessions (e.g. daemon proxy connections) still run concurrently —
+// each gets its own StdioServer.
+func (s *Server) newStdioServer() *server.StdioServer {
+	stdio := server.NewStdioServer(s.mcpServer)
+	server.WithWorkerPoolSize(1)(stdio)
+	return stdio
+}
+
 // ListenStdio starts the MCP server on stdin/stdout. It blocks until the
 // context is cancelled or the input stream closes.
 func (s *Server) ListenStdio(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
-	stdio := server.NewStdioServer(s.mcpServer)
+	stdio := s.newStdioServer()
 	stdio.SetErrorLogger(log.New(io.Discard, "", 0))
 	return stdio.Listen(ctx, stdin, stdout)
 }
@@ -254,6 +269,6 @@ func (s *Server) ListenStdio(ctx context.Context, stdin io.Reader, stdout io.Wri
 // Serve starts the MCP server on os.Stdin/os.Stdout. Convenience wrapper
 // for the common CLI use case.
 func (s *Server) Serve(ctx context.Context) error {
-	stdio := server.NewStdioServer(s.mcpServer)
+	stdio := s.newStdioServer()
 	return stdio.Listen(ctx, nil, nil)
 }

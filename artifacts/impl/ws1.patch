@@ -1,0 +1,345 @@
+diff --git a/cmd/marmot/pipeline.go b/cmd/marmot/pipeline.go
+index ba9d57b..8ecb4f7 100644
+--- a/cmd/marmot/pipeline.go
++++ b/cmd/marmot/pipeline.go
+@@ -57,8 +57,10 @@ func runIndexPipeline(dir string, force bool) error {
+ 
+ 	dbPath := filepath.Join(dir, ".marmot-data", "embeddings.db")
+ 	if force {
+-		// Remove existing embeddings DB to start fresh (model may have changed).
++		// Remove existing embeddings DB (and WAL sidecars) to start fresh (model may have changed).
+ 		_ = os.Remove(dbPath)
++		_ = os.Remove(dbPath + "-wal")
++		_ = os.Remove(dbPath + "-shm")
+ 	}
+ 
+ 	embStore, err := embedding.NewStore(dbPath)
+diff --git a/cmd/marmot/surface_coverage_test.go b/cmd/marmot/surface_coverage_test.go
+index 200a58e..4b1996d 100644
+--- a/cmd/marmot/surface_coverage_test.go
++++ b/cmd/marmot/surface_coverage_test.go
+@@ -511,6 +511,41 @@ func TestIndexErrorPaths(t *testing.T) {
+ 	}
+ }
+ 
++// TestIndexForceRemovesWALSidecars verifies that index --force removes stale
++// WAL sidecar files alongside the embeddings DB, so an old -wal is never
++// replayed into the freshly created database.
++func TestIndexForceRemovesWALSidecars(t *testing.T) {
++	vault := initTestVault(t)
++	writeTestNode(t, vault, "node_a", "default")
++
++	dataDir := filepath.Join(vault, ".marmot-data")
++	if err := os.MkdirAll(dataDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	dbPath := filepath.Join(dataDir, "embeddings.db")
++	// Pre-create stale sidecars (garbage content from a hypothetical killed process).
++	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
++		if err := os.WriteFile(sidecar, []byte("stale sidecar"), 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	if code := run([]string{"index", "--force", "--dir", vault}); code != 0 {
++		t.Fatalf("index --force exit code = %d, want 0", code)
++	}
++
++	// The stale sidecars must be gone: --force removed them before indexing,
++	// and the clean close checkpoints/removes the fresh ones.
++	for _, sidecar := range []string{dbPath + "-wal", dbPath + "-shm"} {
++		if data, err := os.ReadFile(sidecar); err == nil && string(data) == "stale sidecar" {
++			t.Errorf("stale sidecar %s survived index --force", sidecar)
++		}
++	}
++	if _, err := os.Stat(dbPath); err != nil {
++		t.Errorf("expected fresh embeddings.db after index --force: %v", err)
++	}
++}
++
+ func TestStaticIndexNonexistentSource(t *testing.T) {
+ 	vault := initTestVault(t)
+ 	if code := run([]string{"index", filepath.Join(t.TempDir(), "no-src"), "--dir", vault}); code != 1 {
+diff --git a/go.mod b/go.mod
+index a1e6091..463456a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -6,7 +6,7 @@ require (
+ 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
+ 	github.com/fsnotify/fsnotify v1.9.0
+ 	github.com/mark3labs/mcp-go v0.46.0
+-	github.com/ncruces/go-sqlite3 v0.17.1
++	github.com/ncruces/go-sqlite3 v0.33.2
+ 	golang.org/x/term v0.41.0
+ 	gopkg.in/yaml.v3 v3.0.1
+ )
+@@ -17,10 +17,10 @@ require (
+ 	github.com/google/jsonschema-go v0.4.2 // indirect
+ 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
+ 	github.com/google/uuid v1.6.0 // indirect
++	github.com/ncruces/go-sqlite3-wasm v1.0.4-0.20260329114232-2491c387476c // indirect
+ 	github.com/ncruces/julianday v1.0.0 // indirect
+ 	github.com/spf13/cast v1.7.1 // indirect
+-	github.com/tetratelabs/wazero v1.7.3 // indirect
+ 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
+ 	golang.org/x/sys v0.42.0 // indirect
+-	golang.org/x/text v0.16.0 // indirect
++	golang.org/x/text v0.34.0 // indirect
+ )
+diff --git a/go.sum b/go.sum
+index cc2557e..eb78817 100644
+--- a/go.sum
++++ b/go.sum
+@@ -26,8 +26,10 @@ github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
+ github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
+ github.com/mark3labs/mcp-go v0.46.0 h1:8KRibF4wcKejbLsHxCA/QBVUr5fQ9nwz/n8lGqmaALo=
+ github.com/mark3labs/mcp-go v0.46.0/go.mod h1:JKTC7R2LLVagkEWK7Kwu7DbmA6iIvnNAod6yrHiQMag=
+-github.com/ncruces/go-sqlite3 v0.17.1 h1:VxTjDpCn87FaFlKMaAYC1jP7ND0d4UNj+6G4IQDHbgI=
+-github.com/ncruces/go-sqlite3 v0.17.1/go.mod h1:FnCyui8SlDoL0mQZ5dTouNo7s7jXS0kJv9lBt1GlM9w=
++github.com/ncruces/go-sqlite3 v0.33.2 h1:bzzdlEsURPqyQNU9OGKhYrL0k/9tEXrDCtNwa6n1aA0=
++github.com/ncruces/go-sqlite3 v0.33.2/go.mod h1:xhwGW9DTCj/XvJQAOn1oyodYFYN7/nsw5bTH+Y9wPyE=
++github.com/ncruces/go-sqlite3-wasm v1.0.4-0.20260329114232-2491c387476c h1:Fnw6J6r2trodoTlRk7mDo+ZXEnBSJFPmorGV7urtgvI=
++github.com/ncruces/go-sqlite3-wasm v1.0.4-0.20260329114232-2491c387476c/go.mod h1:eewd1iQhpv/1qDXP83cfDk06Bpbhmt3EspN/0krcy70=
+ github.com/ncruces/julianday v1.0.0 h1:fH0OKwa7NWvniGQtxdJRxAgkBMolni2BjDHaWTxqt7M=
+ github.com/ncruces/julianday v1.0.0/go.mod h1:Dusn2KvZrrovOMJuOt0TNXL6tB7U2E8kvza5fFc9G7g=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+@@ -38,16 +40,14 @@ github.com/spf13/cast v1.7.1 h1:cuNEagBQEHWN1FnbGEjCXL2szYEXqfJPbP2HNUaca9Y=
+ github.com/spf13/cast v1.7.1/go.mod h1:ancEpBxwJDODSW/UG4rDrAqiKolqNNh2DX3mk86cAdo=
+ github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
+ github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
+-github.com/tetratelabs/wazero v1.7.3 h1:PBH5KVahrt3S2AHgEjKu4u+LlDbbk+nsGE3KLucy6Rw=
+-github.com/tetratelabs/wazero v1.7.3/go.mod h1:ytl6Zuh20R/eROuyDaGPkp82O9C/DJfXAwJfQ3X6/7Y=
+ github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
+ github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
+ golang.org/x/sys v0.42.0 h1:omrd2nAlyT5ESRdCLYdm3+fMfNFE/+Rf4bDIQImRJeo=
+ golang.org/x/sys v0.42.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+ golang.org/x/term v0.41.0 h1:QCgPso/Q3RTJx2Th4bDLqML4W6iJiaXFq2/ftQF13YU=
+ golang.org/x/term v0.41.0/go.mod h1:3pfBgksrReYfZ5lvYM0kSO0LIkAl4Yl2bXOkKP7Ec2A=
+-golang.org/x/text v0.16.0 h1:a94ExnEXNtEwYLGJSIUxnWoxoRz/ZcCsV63ROupILh4=
+-golang.org/x/text v0.16.0/go.mod h1:GhwF1Be+LQoKShO3cGOHzqOgRrGaYc9AvblQOmPVHnI=
++golang.org/x/text v0.34.0 h1:oL/Qq0Kdaqxa1KbNeMKwQq0reLCCaFtqu2eNuSeNHbk=
++golang.org/x/text v0.34.0/go.mod h1:homfLqTYRFyVYemLBFl5GgL/DWEiH5wcsQ5gSh1yziA=
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
+diff --git a/internal/embedding/store.go b/internal/embedding/store.go
+index cce290d..c0f5acf 100644
+--- a/internal/embedding/store.go
++++ b/internal/embedding/store.go
+@@ -8,9 +8,9 @@ import (
+ 	"math"
+ 	"sort"
+ 	"sync"
++	"time"
+ 
+ 	"github.com/ncruces/go-sqlite3"
+-	_ "github.com/ncruces/go-sqlite3/embed"
+ )
+ 
+ // ScoredResult represents a search result with its similarity score.
+@@ -38,18 +38,34 @@ type Store struct {
+ 
+ // NewStore opens (or creates) an embedding store at the given path.
+ // Use ":memory:" for an in-memory database.
++//
++// File-backed stores are opened in WAL mode with a 5s busy timeout so that
++// multiple marmot processes can share one embeddings.db: readers never block
++// the writer, and a busy writer retries instead of failing with
++// "database is locked". For ":memory:" the WAL pragma is a harmless no-op
++// (journal_mode stays "memory").
+ func NewStore(dbPath string) (*Store, error) {
+ 	db, err := sqlite3.Open(dbPath)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("open sqlite: %w", err)
+ 	}
+ 
++	// Order matters: set the busy timeout first so the journal-mode switch
++	// itself retries if another process holds the lock.
++	if err := db.BusyTimeout(5 * time.Second); err != nil {
++		_ = db.Close()
++		return nil, fmt.Errorf("set busy_timeout: %w", err)
++	}
++	if err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
++		_ = db.Close()
++		return nil, fmt.Errorf("enable WAL: %w", err)
++	}
++
+ 	s := &Store{db: db}
+ 	if err := s.initSchema(); err != nil {
+ 		_ = db.Close()
+ 		return nil, fmt.Errorf("init schema: %w", err)
+ 	}
+-
+ 	return s, nil
+ }
+ 
+diff --git a/internal/embedding/store_wal_test.go b/internal/embedding/store_wal_test.go
+new file mode 100644
+index 0000000..fc44e8e
+--- /dev/null
++++ b/internal/embedding/store_wal_test.go
+@@ -0,0 +1,164 @@
++package embedding
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"sync"
++	"testing"
++	"time"
++)
++
++// journalMode returns the active journal_mode of the store's connection.
++func journalMode(t *testing.T, s *Store) string {
++	t.Helper()
++	stmt, _, err := s.db.Prepare(`PRAGMA journal_mode`)
++	if err != nil {
++		t.Fatalf("prepare journal_mode pragma: %v", err)
++	}
++	defer func() { _ = stmt.Close() }()
++	if !stmt.Step() {
++		t.Fatalf("journal_mode pragma returned no row: %v", stmt.Err())
++	}
++	return stmt.ColumnText(0)
++}
++
++func TestNewStore_WALEnabled(t *testing.T) {
++	dbPath := filepath.Join(t.TempDir(), "embeddings.db")
++	store, err := NewStore(dbPath)
++	if err != nil {
++		t.Fatalf("NewStore(%q): %v", dbPath, err)
++	}
++
++	if mode := journalMode(t, store); mode != "wal" {
++		t.Errorf("journal_mode = %q, want %q", mode, "wal")
++	}
++
++	// The -wal sidecar should appear once a write hits the database.
++	emb := NewMockEmbedder("test-model")
++	vec, _ := emb.Embed("wal sidecar node")
++	if err := store.Upsert("wal/node", vec, "hash1", "test-model"); err != nil {
++		t.Fatalf("Upsert: %v", err)
++	}
++	if _, err := os.Stat(dbPath + "-wal"); err != nil {
++		t.Errorf("expected -wal sidecar after Upsert: %v", err)
++	}
++
++	if err := store.Close(); err != nil {
++		t.Fatalf("Close: %v", err)
++	}
++
++	// Reopen: the WAL flip is persisted in the DB header and data survives.
++	reopened, err := NewStore(dbPath)
++	if err != nil {
++		t.Fatalf("reopen NewStore(%q): %v", dbPath, err)
++	}
++	defer reopened.Close()
++
++	if mode := journalMode(t, reopened); mode != "wal" {
++		t.Errorf("journal_mode after reopen = %q, want %q", mode, "wal")
++	}
++	if got := reopened.Count(); got != 1 {
++		t.Errorf("Count after reopen = %d, want 1", got)
++	}
++}
++
++func TestNewStore_MemoryStillWorks(t *testing.T) {
++	store, err := NewStore(":memory:")
++	if err != nil {
++		t.Fatalf("NewStore(:memory:): %v", err)
++	}
++	defer store.Close()
++
++	// The WAL pragma is a no-op for in-memory databases.
++	if mode := journalMode(t, store); mode != "memory" {
++		t.Errorf("journal_mode = %q, want %q", mode, "memory")
++	}
++
++	// Upsert/Search round-trip still works.
++	emb := NewMockEmbedder("test-model")
++	vec, _ := emb.Embed("in-memory node")
++	if err := store.Upsert("mem/node", vec, "hash1", "test-model"); err != nil {
++		t.Fatalf("Upsert: %v", err)
++	}
++	query, _ := emb.Embed("in-memory node")
++	results, err := store.Search(query, 1, "test-model")
++	if err != nil {
++		t.Fatalf("Search: %v", err)
++	}
++	if len(results) != 1 || results[0].NodeID != "mem/node" {
++		t.Errorf("Search results = %+v, want single mem/node", results)
++	}
++}
++
++// TestNewStore_ConcurrentConns is the regression test for the multi-process
++// failure modes: two Stores on one file are two OS-level connections, so this
++// exercises the real OFD/shm locking path. A writer loop and a reader loop run
++// concurrently for ~2s; with WAL + busy_timeout neither side may ever see
++// "database is locked".
++func TestNewStore_ConcurrentConns(t *testing.T) {
++	dbPath := filepath.Join(t.TempDir(), "embeddings.db")
++
++	writerStore, err := NewStore(dbPath)
++	if err != nil {
++		t.Fatalf("NewStore (writer): %v", err)
++	}
++	defer writerStore.Close()
++
++	readerStore, err := NewStore(dbPath)
++	if err != nil {
++		t.Fatalf("NewStore (reader): %v", err)
++	}
++	defer readerStore.Close()
++
++	emb := NewMockEmbedder("test-model")
++	// Seed one row so reader queries validate against a stored dimension.
++	seed, _ := emb.Embed("seed node")
++	if err := writerStore.Upsert("seed", seed, "hash-seed", "test-model"); err != nil {
++		t.Fatalf("seed Upsert: %v", err)
++	}
++	query, _ := emb.Embed("seed node")
++
++	deadline := time.Now().Add(2 * time.Second)
++	var (
++		mu   sync.Mutex
++		errs []error
++	)
++	record := func(op string, err error) {
++		mu.Lock()
++		defer mu.Unlock()
++		errs = append(errs, fmt.Errorf("%s: %w", op, err))
++	}
++
++	var wg sync.WaitGroup
++	wg.Add(2)
++
++	// Writer: upsert in a tight loop on connection 1.
++	go func() {
++		defer wg.Done()
++		for i := 0; time.Now().Before(deadline); i++ {
++			vec, _ := emb.Embed(fmt.Sprintf("node %d", i%10))
++			if err := writerStore.Upsert(fmt.Sprintf("node/%d", i%10), vec, fmt.Sprintf("hash%d", i), "test-model"); err != nil {
++				record("Upsert", err)
++			}
++		}
++	}()
++
++	// Reader: search in a tight loop on connection 2.
++	go func() {
++		defer wg.Done()
++		for time.Now().Before(deadline) {
++			if _, err := readerStore.SearchActive(query, 5, "test-model"); err != nil {
++				record("SearchActive", err)
++			}
++		}
++	}()
++
++	wg.Wait()
++
++	// No error of any kind is expected; "database is locked" in particular
++	// would reproduce the pre-WAL failure mode.
++	for _, err := range errs {
++		t.Errorf("concurrent access error: %v", err)
++	}
++}
