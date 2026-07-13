@@ -74,6 +74,8 @@ export interface WorkspaceWarren {
   materialized_projects?: string[];
   /** Computed: projects whose vault_id matches this workspace (served live; never mounted). */
   identified_projects?: string[];
+  /** Computed: whether the registered checkout directory still exists (CLI REACHABLE). */
+  reachable?: boolean;
 }
 
 export interface WarrensResponse {

@@ -106,6 +106,11 @@ type WarrenEntry struct {
 	// The on-disk workspace-state YAML shape is unaffected.
 	ActiveProjects     []string `json:"active_projects"`
 	IdentifiedProjects []string `json:"identified_projects,omitempty"`
+	// Reachable reports whether the registered checkout directory still
+	// exists — the same computation as the CLI's 'warren list' REACHABLE
+	// column (additive) — so UIs can badge moved/deleted warrens even when
+	// nothing is mounted.
+	Reachable bool `json:"reachable"`
 }
 
 // WarrenStatusResponse describes a registered Warren in this workspace.

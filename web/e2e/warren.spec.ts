@@ -273,6 +273,14 @@ test('unreachable warren graph surfaces skipped projects instead of a silent emp
   await expect(toast).toContainText('ghost');
   await expect(toast).toContainText('unreachable');
 
+  // The zero-node canvas renders a persistent empty-state (the toast is
+  // transient) instead of fully blank space.
+  const emptyState = page.locator('#graph-empty-state');
+  await expect(emptyState).toBeVisible();
+  await expect(emptyState).toContainText('1 project(s) skipped');
+  await expect(emptyState).toContainText('unreachable');
+  await expect(emptyState).toContainText('Warrens panel');
+
   // The panel row carries the skip-reason tooltip fed by the graph load.
   await page.locator('#warren-toggle').click();
   const ghostRow = page.locator('#warren-panel tr[data-project="ghost"]');
@@ -281,9 +289,21 @@ test('unreachable warren graph surfaces skipped projects instead of a silent emp
   const title = await ghostRow.getAttribute('title');
   expect(title).toContain('unreachable');
 
-  // Selecting a valid namespace recovers cleanly.
+  // The wgone block header badges the unreachable registration and shows
+  // the dead path; the healthy wui block carries no badge.
+  const wgoneBlock = page.locator('#warren-panel .warren-block[data-warren="wgone"]');
+  await expect(wgoneBlock.locator('.warren-unreachable-badge')).toHaveText('UNREACHABLE');
+  await expect(wgoneBlock.locator('.warren-block-path')).toContainText('warren-gone');
+  const wuiBlock = page.locator('#warren-panel .warren-block[data-warren="wui"]');
+  await expect(wuiBlock.locator('.warren-unreachable-badge')).toHaveCount(0);
+
+  // The doctor section reports the unreachable registration as a warning.
+  await expect(page.locator('#warren-panel .warren-doctor')).toContainText('warren_unreachable');
+
+  // Selecting a valid namespace recovers cleanly (empty-state included).
   await page.locator('#namespace-select').selectOption('default');
   await expect(page.locator('#graph-svg g.node')).toHaveCount(4, { timeout: 15_000 });
+  await expect(page.locator('#graph-empty-state')).toHaveCount(0);
 });
 
 test.describe('mobile 390x844', () => {

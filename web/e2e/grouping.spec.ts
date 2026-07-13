@@ -88,6 +88,58 @@ test('folder grouping strips vault prefixes and qualifies cross-vault folders', 
   }
 });
 
+test('warren watermark labels render once per group and never stack at the origin', async ({
+  page,
+}) => {
+  const errors = trackErrors(page);
+
+  await page.goto('/');
+  await waitForLocalGraph(page);
+
+  // Warren view, then churn group modes and views twice each — the exact
+  // sequence that used to leave every namespace watermark parked at (0,0),
+  // overprinting them into garbled ghost text over the background.
+  await page.locator('#namespace-select').selectOption('_warren/wui');
+  await expect(page.locator('#graph-svg g.node')).toHaveCount(5, { timeout: 15_000 });
+  await page.locator('#groupby-select').selectOption('project');
+  await expect(page.locator('#graph-svg .folder-hull')).toHaveCount(2, { timeout: 10_000 });
+  await page.locator('#groupby-select').selectOption('namespace');
+  await page.locator('#namespace-select').selectOption('default');
+  await waitForLocalGraph(page);
+  await page.locator('#namespace-select').selectOption('_warren/wui');
+  await expect(page.locator('#graph-svg g.node')).toHaveCount(5, { timeout: 15_000 });
+  await page.locator('#groupby-select').selectOption('project');
+  await expect(page.locator('#graph-svg .folder-hull')).toHaveCount(2, { timeout: 10_000 });
+
+  // Exactly ONE label text element per group, for both label layers.
+  expect((await hullLabels(page)).sort()).toEqual(['local (e2e-web-vault)', 'other-vault']);
+  const nsLabels = page.locator('#graph-svg .ns-label');
+  await expect(nsLabels).toHaveCount(2);
+  expect((await nsLabels.allTextContents()).sort()).toEqual(['other:default', 'self:default']);
+
+  // Every watermark must sit at its group centroid — never at the
+  // unresolved (0,0) fallback, and never stacked on another label.
+  const readPositions = () =>
+    page
+      .locator('#graph-svg .ns-label')
+      .evaluateAll((els) => els.map((el) => `${el.getAttribute('x')},${el.getAttribute('y')}`));
+  await expect
+    .poll(
+      async () => {
+        const positions = await readPositions();
+        return (
+          positions.length === 2 &&
+          !positions.some((p) => p === '0,0' || p === 'null,null') &&
+          new Set(positions).size === positions.length
+        );
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(true);
+
+  expect(errors).toEqual([]);
+});
+
 test('All warrens option aggregates local + warren graphs and degrades on unreachable warrens', async ({
   page,
 }) => {

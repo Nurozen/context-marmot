@@ -2936,6 +2936,25 @@ textarea:focus-visible {
   color: var(--text-primary);
 }
 
+.warren-unreachable-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  color: var(--color-danger, #c45d4b);
+  border: 1px solid var(--color-danger, #c45d4b);
+  text-transform: uppercase;
+}
+
+.warren-block-path {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  margin: -4px 0 8px;
+  word-break: break-all;
+}
+
 .warren-refresh {
   width: 22px;
   height: 22px;
@@ -3165,6 +3184,26 @@ table.warren-projects .warren-project-id {
   text-decoration: none;
   pointer-events: none;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+
+/* ── Graph empty-state (zero-node views) ─────────────────────── */
+#graph-empty-state {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(480px, calc(100% - 48px));
+  padding: 16px 20px;
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border-medium);
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  user-select: none;
+  z-index: 5;
 }
 
 /* ── Toasts — transient operation feedback ───────────────────── */

@@ -990,8 +990,39 @@ func DoctorWorkspace(workspaceMarmotDir, workspaceRoot string) (DoctorReport, er
 			Message:  fmt.Sprintf("vault ID %q is claimed by %s; queries resolve to one of them arbitrarily — unmount or re-import with distinct vault IDs", vaultID, strings.Join(names, " and ")),
 		})
 	}
+	report.Issues = append(report.Issues, unreachableWarrenIssues(state)...)
 	report.Issues = append(report.Issues, localRouteMismatchIssue(workspaceMarmotDir, local)...)
 	return report, nil
+}
+
+// unreachableWarrenIssues warns for every REGISTERED warren whose manifest
+// cannot be read (checkout moved, deleted, or corrupted) — including warrens
+// with zero active projects, which previously surfaced nowhere: the graph
+// view's skip toasts only fire for mounted projects, so an idle registration
+// pointing at a vanished checkout was completely silent in both the UI and
+// doctor. Warning, not error: nothing is broken until the user tries to use
+// the warren, and the escape hatches are named in the message.
+func unreachableWarrenIssues(state *WorkspaceState) []DoctorIssue {
+	ids := make([]string, 0, len(state.Warrens))
+	for id := range state.Warrens {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var issues []DoctorIssue
+	for _, id := range ids {
+		entry := state.Warrens[id]
+		if _, _, err := LoadManifest(entry.Path); err != nil {
+			issues = append(issues, DoctorIssue{
+				Severity: "warning",
+				Code:     "warren_unreachable",
+				Message: fmt.Sprintf(
+					"warren %q is unreachable at %s (%v) — if the checkout moved, re-run 'marmot warren register %s <new-path>'; to drop it, 'marmot warren unregister --warren %s'",
+					id, entry.Path, err, id, id),
+				Path: entry.Path,
+			})
+		}
+	}
+	return issues
 }
 
 // localRouteMismatchIssue warns when the global routing table maps the local

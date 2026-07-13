@@ -884,6 +884,7 @@ func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
 			WorkspaceWarren:    entry,
 			ActiveProjects:     active,
 			IdentifiedProjects: identified[id],
+			Reachable:          dirExists(entry.Path),
 		}
 	}
 	writeJSON(w, http.StatusOK, WarrensResponse{
@@ -1074,6 +1075,13 @@ func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 		"warren_id": id,
 		"status":    "reloaded",
 	})
+}
+
+// dirExists mirrors the CLI 'warren list' REACHABLE computation: the
+// registered checkout directory exists on disk.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
 }
 
 // markSkipped records a Warren graph skip with its reason (the same reason

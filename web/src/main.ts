@@ -346,6 +346,10 @@ async function loadGraph(): Promise<void> {
     /* Render graph (update() auto-sets groupBy='namespace' for multi-ns data) */
     graphView?.update(currentData);
 
+    /* Zero-node views (e.g. every project of a warren skipped as
+       unreachable) render an explicit empty-state instead of blank space. */
+    updateGraphEmptyState(currentData);
+
     /* Sync the group-by dropdown UI for the aggregate views */
     if (currentNamespace === '_all' || currentNamespace.startsWith('_warren/')) {
       const groupBySelect = document.getElementById('groupby-select') as HTMLSelectElement;
@@ -370,6 +374,39 @@ async function loadGraph(): Promise<void> {
     const detail = err instanceof Error ? err.message : String(err);
     showToast(`Failed to load graph for "${currentNamespace}": ${detail}`, 'error');
     console.error('Failed to load graph:', err);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Empty-state overlay                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Shows (or removes) the graph-area empty-state message. A warren whose
+ * every project is skipped (unreachable checkout, unreadable graph) comes
+ * back as a 200 with zero nodes — without this the canvas is fully blank
+ * and only the transient toast hints at why.
+ */
+function updateGraphEmptyState(data: GraphResponse): void {
+  const container = document.getElementById('graph-container');
+  if (!container) return;
+  let el = document.getElementById('graph-empty-state');
+  if (data.nodes.length > 0) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'graph-empty-state';
+    container.appendChild(el);
+  }
+  const skipped = data.skipped ?? [];
+  if (skipped.length > 0) {
+    const reasons = data.skipped_reasons ?? {};
+    const summary = [...new Set(skipped.map((p) => reasons[p] ?? 'skipped'))].join('; ');
+    el.textContent = `No nodes: ${skipped.length} project(s) skipped — ${summary}. See the Warrens panel.`;
+  } else {
+    el.textContent = 'No nodes in this view.';
   }
 }
 

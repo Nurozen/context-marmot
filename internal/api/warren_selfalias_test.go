@@ -333,6 +333,51 @@ func TestWarrensResponseEmptyActiveProjectsShape(t *testing.T) {
 	}
 }
 
+// TestWarrensResponseReachable: GET /api/warrens carries the additive
+// per-warren "reachable" field — the CLI 'warren list' REACHABLE computation
+// (registered checkout directory exists) — so the UI can badge a moved or
+// deleted warren even when it has zero active projects.
+func TestWarrensResponseReachable(t *testing.T) {
+	server, engine := newTestServer(t)
+	setupSelfAliasWarren(t, engine)
+
+	// Register a second warren, then vaporize its checkout: the exact
+	// zero-active-projects unreachable case that used to be invisible.
+	workspaceRoot := filepath.Dir(engine.MarmotDir)
+	gonePath := filepath.Join(t.TempDir(), "moved-away")
+	state, _, err := warrenpkg.LoadWorkspaceState(workspaceRoot)
+	if err != nil {
+		t.Fatalf("LoadWorkspaceState: %v", err)
+	}
+	state.Warrens["w-gone"] = warrenpkg.WorkspaceWarren{Path: gonePath}
+	if err := warrenpkg.SaveWorkspaceState(workspaceRoot, state, ""); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
+	}
+
+	rec := doRequest(t, server.Handler(), "GET", "/api/warrens", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/warrens = %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp WarrensResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode warrens response: %v", err)
+	}
+	ok, found := resp.Warrens["wp"]
+	if !found {
+		t.Fatalf("warren wp missing from response: %+v", resp.Warrens)
+	}
+	if !ok.Reachable {
+		t.Errorf("wp reachable = false, want true (checkout exists)")
+	}
+	gone, found := resp.Warrens["w-gone"]
+	if !found {
+		t.Fatalf("warren w-gone missing from response: %+v", resp.Warrens)
+	}
+	if gone.Reachable {
+		t.Errorf("w-gone reachable = true, want false (checkout gone)")
+	}
+}
+
 // TestWarrenWriteSelfAliasRefusalEquivalence: the third refusal case of the
 // write-equivalence matrix — both the HTTP API and MCP @-write paths refuse a
 // self-alias vault ID with the write-locally remediation, even when legacy

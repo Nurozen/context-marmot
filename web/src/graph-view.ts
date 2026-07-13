@@ -11,6 +11,12 @@ import { HeatOverlay } from './heat-overlay';
 interface SimNode extends d3.SimulationNodeDatum {
   id: string;
   type: string;
+  /** Namespace group key. Matches the entries of GraphResponse.namespaces:
+      warren views prefix each namespace with the owning project
+      ("proj-c:default") while local views use the raw namespace. Keeping
+      the node key aligned with the label key is what positions the
+      watermark labels — a mismatch parks every label at (0,0), overprinting
+      them into garbled ghost text. */
   namespace: string;
   status: string;
   summary: string;
@@ -207,7 +213,12 @@ export class GraphView {
       return {
         id: n.id,
         type: n.type,
-        namespace: n.namespace,
+        // Warren-served nodes carry provenance; compose the same
+        // "<project>:<namespace>" key the server puts in data.namespaces so
+        // label centroids and namespace grouping resolve (see SimNode docs).
+        namespace: n.provenance?.project_id
+          ? `${n.provenance.project_id}:${n.namespace}`
+          : n.namespace,
         status: n.status,
         summary: n.summary,
         context: n.context,
@@ -592,6 +603,9 @@ export class GraphView {
       .enter()
       .append('text')
       .attr('class', 'ns-label')
+      // Hidden until the first tick positions it — otherwise every new
+      // label renders one frame stacked at (0,0).
+      .attr('display', 'none')
       .text((d) => d);
     /* Positions are set during tick() via updateNsLabelPositions */
   }
@@ -616,6 +630,10 @@ export class GraphView {
 
     this.nsLabelGroup
       .selectAll<SVGTextElement, string>('.ns-label')
+      // A label with no matching nodes (e.g. every node of that namespace
+      // was deduped away in an aggregate view) must hide rather than fall
+      // back to (0,0), where all such labels stack into garbled ghost text.
+      .attr('display', (d) => (nsCentroids.has(d) ? null : 'none'))
       .attr('x', (d) => {
         const c = nsCentroids.get(d);
         return c && c.count > 0 ? c.sx / c.count : 0;

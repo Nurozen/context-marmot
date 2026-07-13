@@ -8,7 +8,7 @@ import {
   unmountWarrenProjects,
 } from './api';
 import { showToast } from './toast';
-import type { BridgeInfo, DoctorReport, ProjectStatus } from './types';
+import type { BridgeInfo, DoctorReport, ProjectStatus, WorkspaceWarren } from './types';
 
 /**
  * Warren management panel (U5b): lists every registered warren's projects
@@ -28,6 +28,8 @@ export class WarrenPanel {
   private onStateChange: () => Promise<void>;
 
   private warrenIds: string[] = [];
+  /** warrenId -> registration entry (path, reachable, …) from /api/warrens. */
+  private warrenEntries = new Map<string, WorkspaceWarren>();
   /** warrenId -> projectId -> skip reason, from the latest warren graph fetch. */
   private skippedReasons = new Map<string, Record<string, string>>();
 
@@ -46,7 +48,7 @@ export class WarrenPanel {
   async init(): Promise<void> {
     try {
       const data = await fetchWarrens();
-      this.warrenIds = Object.keys(data.warrens ?? {}).sort((a, b) => a.localeCompare(b));
+      this.setWarrens(data.warrens ?? {});
     } catch {
       this.warrenIds = [];
     }
@@ -85,6 +87,12 @@ export class WarrenPanel {
     showToast(message, 'error');
   }
 
+  /** Stores the /api/warrens registration map (IDs sorted for stable render order). */
+  private setWarrens(warrens: Record<string, WorkspaceWarren>): void {
+    this.warrenIds = Object.keys(warrens).sort((a, b) => a.localeCompare(b));
+    this.warrenEntries = new Map(Object.entries(warrens));
+  }
+
   /** Called by main.ts after a warren graph load so rows can carry skip tooltips. */
   setSkippedReasons(warrenId: string, reasons: Record<string, string>): void {
     this.skippedReasons.set(warrenId, reasons);
@@ -121,6 +129,14 @@ export class WarrenPanel {
     let bridges: BridgeInfo[] = [];
     const statuses = new Map<string, ProjectStatus[]>();
     const loadErrors: string[] = [];
+
+    // Refresh the registration map first so reachability badges (and the
+    // warren list itself) track the current on-disk state.
+    try {
+      this.setWarrens((await fetchWarrens()).warrens ?? {});
+    } catch (err) {
+      loadErrors.push(`warrens: ${err instanceof Error ? err.message : String(err)}`);
+    }
 
     const results = await Promise.allSettled([
       this.updateDoctorBadge(),
@@ -169,6 +185,21 @@ export class WarrenPanel {
     name.textContent = warrenId;
     title.appendChild(name);
 
+    // Unreachable checkout (moved/deleted after registration): badge the
+    // header and show the dead path — previously a warren with zero active
+    // projects vanished silently everywhere in the UI.
+    const entry = this.warrenEntries.get(warrenId);
+    const unreachable = entry?.reachable === false;
+    if (unreachable) {
+      const badge = document.createElement('span');
+      badge.className = 'warren-unreachable-badge';
+      badge.textContent = 'UNREACHABLE';
+      badge.title =
+        `Warren checkout not found at ${entry?.path ?? 'its registered path'} — ` +
+        're-register it with a new path or unregister it.';
+      title.appendChild(badge);
+    }
+
     const refreshBtn = document.createElement('button');
     refreshBtn.className = 'warren-refresh';
     refreshBtn.title = 'Reload warren state from disk';
@@ -182,6 +213,13 @@ export class WarrenPanel {
     });
     title.appendChild(refreshBtn);
     block.appendChild(title);
+
+    if (unreachable && entry?.path) {
+      const path = document.createElement('div');
+      path.className = 'warren-block-path';
+      path.textContent = entry.path;
+      block.appendChild(path);
+    }
 
     const table = document.createElement('table');
     table.className = 'warren-projects';

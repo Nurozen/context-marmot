@@ -504,6 +504,65 @@ func TestDoctorWorkspaceVaultIDCollision(t *testing.T) {
 	}
 }
 
+// TestDoctorWorkspaceWarrenUnreachable: a registered warren whose checkout
+// vanished warns even with ZERO active projects — previously such a warren
+// surfaced nowhere (graph skip toasts only fire for mounted projects).
+// Reachable warrens stay silent, and the warning names both escape hatches.
+func TestDoctorWorkspaceWarrenUnreachable(t *testing.T) {
+	workspace := t.TempDir()
+	marmotDir := workspaceMarmotDir(workspace)
+	warrenOK := t.TempDir()
+	writeWarrenFixture(t, warrenOK, "warren-ok", "project-x")
+	gonePath := filepath.Join(t.TempDir(), "moved-away")
+	state := &WorkspaceState{Warrens: map[string]WorkspaceWarren{
+		"w-ok": {Path: warrenOK, ActiveProjects: []string{"project-x"}},
+		// Zero active projects: the exact previously-silent case.
+		"w-gone": {Path: gonePath},
+	}}
+	if err := SaveWorkspaceState(workspace, state, ""); err != nil {
+		t.Fatalf("SaveWorkspaceState: %v", err)
+	}
+
+	report, err := DoctorWorkspace(marmotDir, workspace)
+	if err != nil {
+		t.Fatalf("DoctorWorkspace: %v", err)
+	}
+	var unreachable []DoctorIssue
+	for _, issue := range report.Issues {
+		if issue.Code == "warren_unreachable" {
+			unreachable = append(unreachable, issue)
+		}
+	}
+	if len(unreachable) != 1 {
+		t.Fatalf("warren_unreachable issues = %+v, want exactly one (reachable warrens must not warn)", report.Issues)
+	}
+	issue := unreachable[0]
+	if issue.Severity != "warning" {
+		t.Errorf("severity = %q, want warning", issue.Severity)
+	}
+	if issue.Path != gonePath {
+		t.Errorf("path = %q, want %q", issue.Path, gonePath)
+	}
+	for _, want := range []string{`"w-gone"`, gonePath, "warren register w-gone", "warren unregister --warren w-gone"} {
+		if !strings.Contains(issue.Message, want) {
+			t.Errorf("message = %q, want it to contain %q", issue.Message, want)
+		}
+	}
+	if !report.OK() {
+		t.Error("warren_unreachable must be a warning, not an error")
+	}
+
+	// Restoring the checkout heals the warning.
+	writeWarrenFixture(t, gonePath, "w-gone")
+	report, err = DoctorWorkspace(marmotDir, workspace)
+	if err != nil {
+		t.Fatalf("DoctorWorkspace after restore: %v", err)
+	}
+	if found := findIssue(report, "warren_unreachable"); found != nil {
+		t.Fatalf("restored warren still warns: %+v", found)
+	}
+}
+
 func findIssue(report DoctorReport, code string) *DoctorIssue {
 	for i := range report.Issues {
 		if report.Issues[i].Code == code {
