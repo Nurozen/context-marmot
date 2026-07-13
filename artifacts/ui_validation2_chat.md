@@ -1,77 +1,65 @@
 # UI Validation 2 — Graph Curator Chat (NL + slash commands)
 
-Date: 2026-07-13
-Target: http://localhost:3311 (marmot ui pid 20783, workspace `ui-validate2`, 16 nodes, mock embeddings)
-Method: codex exec computer-use session (log: `scratchpad/ui-validate2/logs/codex-chat1.log`), all crash/behavior claims re-verified with direct Playwright input and direct `curl` against the API. Backend log: `scratchpad/ui-validate2/logs/ui.log`.
+Date: 2026-07-13 (updated same day after OpenAI quota was restored and the UI restarted with the new key — pid 72294)
+Target: http://localhost:3311 (marmot ui, workspace `ui-validate2`, 16 nodes, mock embeddings, classifier openai/gpt-5.5)
+Method: two codex exec computer-use sessions (logs: `scratchpad/ui-validate2/logs/codex-chat1.log`, `codex-chat2.log`), all behavior/mutation claims re-verified with direct Playwright input and direct `curl` against the API. Backend log: `scratchpad/ui-validate2/logs/ui.log`.
 
-## Headline: NL chat is hard-blocked by OpenAI quota exhaustion
+## History note
 
-Every natural-language message fails with:
-
-```
-LLM error (phase 1): openai: chat API error (429): You exceeded your current quota,
-please check your plan and billing details. ...
-```
-
-Diagnosis performed (per instructions):
-- `OPENAI_API_KEY` **does** reach the process (verified via `ps eww -p 20783`: `OPENAI_API_KEY=sk-proj-...`).
-- Provider **is** wired: ui.log shows `classifier: using openai/gpt-5.5` and `chat: curator LLM provider wired`; per-turn log lines show `turn start, model=gpt-5.5`.
-- Key is **valid** (not a 401): `GET https://api.openai.com/v1/models` with the same key succeeds (125 models) and `gpt-5.5` is in the list.
-- The 429 is **`insufficient_quota`** (account/billing), not a transient rate limit: persistent across retries 20+ seconds apart and across 8+ requests over the session. Phase-1 fails in ~0.7–1.9 s.
-
-Conclusion: not a code or config bug — the OpenAI account backing the key has no remaining quota/billing. Requires human action (fund/switch the OpenAI account, or reconfigure to Anthropic). Steps 1, 2, 3 (LLM half), and 7 are BLOCKED, not failed; UI-side behavior around the failure was still validated.
+The first run was hard-blocked: the original `OPENAI_API_KEY` account had exhausted its quota (persistent 429 `insufficient_quota`; key valid, env reached the process, model `gpt-5.5` exists — full diagnosis retained in Issue 4 below). The user funded a new key, the UI was restarted with it, and steps 1, 2, 3, and 7 were re-run successfully. Results below are the final, unblocked results; UI behaviors validated during the outage (error surfacing, slash commands, hygiene) were re-confirmed where relevant.
 
 ## Per-step results
 
-### 1. NL query: "what does the auth module do in this project?"
-- Expected: real LLM answer grounded in the graph, with progress indicator; latency noted.
-- Observed (codex + Playwright re-verified): progress indicator (three "thinking" dots) shown, input/send disabled while pending; after ~0.7–1.9 s a **visible error bubble** rendered in the chat:
-  `Chat request failed (500): LLM error (phase 1): openai: chat API error (429): You exceeded your current quota...`
-  Input re-enabled and usable afterwards.
-- Note: the workspace has no auth module (nodes are `go/store`, `ts/client`, etc.), so even a working LLM should have answered "no auth module found".
-- Verdict: **BLOCKED (quota)** for the LLM answer; **PASS** for UI behavior (progress indicator works, error is visible not silent, no wedge).
+### 1. NL query: "what does the auth module do in this project?" — PASS
+- Expected: real LLM answer grounded in the graph; progress indicator; latency noted.
+- Observed: progress indicator shown (thinking dots, then `working...` with elapsed seconds and a Cancel button). Reply in ~17.9 s (server log: phase 1 2.5 s + phase 2 15.4 s). Answer verbatim (excerpt):
+  > "I don't see an actual auth module in the search results. The closest matching cluster is a small TypeScript user API flow: it fetches a user, formats that user, and exposes a higher-level describeUser function. api — module ... Summary: Module api.ts ... Provides describeUser(id) ..."
+- Grounded: correctly states no auth module exists and cites real nodes (`api`, `client`, `format`, `describeUser`, `fetchUser`, `formatUser`). A collapsible "Code" disclosure shows the sandbox code + result (code-mode transparency).
 
-### 2. NL curation: "tag the auth-related nodes with domain security"
-- Expected: curator executes/proposes/explains; graph change verified via API.
-- Observed: same visible 429 error. API cross-check `GET /api/graph/_all`: 16 nodes, **0 nodes tagged** before and after — no phantom mutation occurred. Sidebar still shows "No tags".
-- Verdict: **BLOCKED (quota)**; **PASS** on the safety property (failed request mutated nothing).
+### 2. NL curation: "tag the auth-related nodes with domain security" — PASS with a significant quality finding (Issue 3)
+- Observed: the curator **executed** (did not merely propose). Generated code: `client.search("auth authentication login session token password user")` → `client.tag(ids, ["domain","security"])`. Because the workspace uses mock embeddings, search returned **all 16 nodes**, and all 16 were tagged — despite no auth nodes existing (the model itself had just said so in step 1).
+- Mutation UX is good: a "Changes (1)" banner with per-mutation `Undo` and `Undo all` appeared; `tagged 16 node(s) with "domain, security"`; sidebar Tags updated live. API cross-check confirmed the real mutation (`GET /api/graph/_all`: 16/16 nodes tagged `['domain','security']`).
+- A control test "tag the store-related nodes with domain storage" behaved well: the generated code **did** apply an explicit relevance filter (`id/summary/context includes "store"`), tagged exactly 6 store-related nodes, and clicking the chat `Undo` reverted it (sidebar tag disappeared; verified).
+- Cleanup: the auth-mutation was reverted via `/untag domain` + `/untag security` over all 16 nodes through POST /api/chat (responses: `removed tag "domain" from 16 node(s)`, `removed tag "security" from 16 node(s)`); final API state verified **0 tagged nodes** — demo state left exactly as found.
+- Note: "domain security" was interpreted as two tags `domain` + `security`, not one `domain:security` tag — arguably reasonable given the phrasing, noted for awareness.
 
-### 3. Node-ref pills: "show me the login handler node"
-- Expected: node references in the LLM reply render as clickable pills; clicking focuses the node.
-- Observed: NL reply is the 429 error, so no chat-reply pills could be produced. However the pill component itself was exercised via the Issues tab: node pills (`go/main`, `go/render`, ...) render with pointer cursor, and clicking `go/main` (trusted Playwright click) opened the node detail panel (namespace, summary, source path+hash, edges 2 out/0 in, temporal info).
-- Verdict: **BLOCKED (quota)** for chat-reply pills; pill rendering + click-to-focus **PASS** where testable.
+### 3. Node-ref pills in chat replies — PASS
+- "show me the Store.Put node" (re-run with trusted Playwright input): reply is grounded (type `method`, namespace, status, summary, source path, lines 8–8, edges) and renders `Store.Put` / `Store` as clickable `.node-ref` chips (`data-node-id="go/store/Store.Put"`, pointer cursor, styled distinctly from plain text/code spans).
+- Clicking the pill (Playwright click) opened the node detail panel for `go/store/Store.Put` — namespace, summary, context (`func (s *Store) Put(k, v string) { s.m[k] = v }`), source+hash, edges (0 out / 2 in), temporal. PASS.
+- Pills in the Issues tab also work the same way (validated in the earlier session).
 
-### 4. Slash commands alongside NL
-- Expected: /help and /verify work with real backend counts.
-- Observed:
-  - Typing `/` opens an autocomplete menu: `/help /tag /untag /type /merge /delete /link /unlink` — **`/verify` is missing from the menu** though `/help` documents it and it executes fine (Issue 2).
-  - `/help`: full command list returned (9 commands incl. /verify).
-  - `/verify` (UI, codex, and curl all agree): `Health check complete: found 8 issue(s) across 16 node(s). See Issues tab.` Node count 16 matches `/api/graph/_all` exactly.
-  - Discrepancy: the Issues tab shows **2 issues** ("16 nodes · 2 issues", 88% curated — two "Small disconnected subgraph" suggestions, matching `GET /api/curator/suggestions`), while /verify reports **8**. Root cause (source-verified): `executeVerify` (internal/curator/commands.go:651) counts `verify.VerifyIntegrityScoped` integrity/staleness issues, a different set from the curator suggestions the Issues tab renders — yet the message says "See Issues tab", where those 8 issues are not visible anywhere (Issue 1).
-- Verdict: **PASS** (commands work, counts real), with the two issues noted.
+### 4. Slash commands alongside NL — PASS (unchanged from first run)
+- `/` opens autocomplete (`/help /tag /untag /type /merge /delete /link /unlink` — still missing `/verify`, Issue 2). `/help` lists all 9 commands. `/verify` returns real backend counts: `found 8 issue(s) across 16 node(s)`, node count matches the API exactly. Slash `/untag` with selected_nodes also verified working during cleanup. Count-vs-Issues-tab discrepancy remains (Issue 1).
 
-### 5. Error handling
-- Empty message + Enter: no-op — no request, no message, no error; input stays usable. PASS.
-- ~5000-char lorem message: request sent, UI did not freeze; visible 429 error returned. PASS.
-- Nonsense query ("xyzzy plugh frobnicate the quux"): visible 429 error (would have gone to the LLM). PASS (as testable).
-- After all cases the input still accepted typing; no crash/wedge (re-verified with Playwright: multiple sends in one session, panel and graph still responsive). **PASS**.
+### 5. Error handling — PASS (unchanged from first run)
+- Empty message: no-op. ~5000-char message: sent, no freeze. Nonsense query: handled. Backend errors (when they occurred) surfaced as visible chat error bubbles with the exact upstream message; input always recovered; no wedge or crash across both sessions.
 
-### 6. Console hygiene + key leakage
-- Console over the whole session: **zero warnings**, and the only errors are the expected `Failed to load resource: ... 500 ... /api/chat` entries corresponding 1:1 to the failed NL sends (codex saw 7× 500 for its 7 POSTs + one 404 from its own GET probe of /api/chat, which is POST-only; my Playwright session saw exactly 1 error for 1 NL send). No unexpected console errors. PASS.
-- API key: not present in either inspected `/api/chat` response body, in any same-origin network response codex scanned, or in the served JS/CSS bundles (`/assets/index-C_DvMRV3.js`, `index-BHfPWKUa.css` grepped for `sk-proj|sk-ant|OPENAI_API_KEY`: 0 hits). The 429 error text also does not echo the key. **PASS**.
+### 6. Console hygiene + key leakage — PASS
+- With the working key: **zero console errors and zero warnings** across the whole codex session and the Playwright session.
+- New key does not leak: no `sk-` string in any of 6 inspected `POST /api/chat` response bodies (codex) nor in my direct curl response; served JS/CSS bundles previously grepped clean.
 
-### 7. Cross-check OPENAI usage is real (two questions → different grounded answers)
-- Observed: cannot compare answer variance — every call fails at phase 1. What IS confirmed real: requests genuinely go to OpenAI (server-side per-turn logs `phase 1 done in 1.137s (err=...429...)`, error text is OpenAI's own quota message, and latency/behavior consistent with a live upstream call). No canned-response fakery detected — there are simply no successful responses to compare.
-- Verdict: **BLOCKED (quota)**.
+### 7. Varied grounded responses (OpenAI usage is real) — PASS
+- Different questions produce different, graph-grounded answers:
+  - "how many nodes and namespaces...?" → "16 nodes in 1 namespace (default)" (correct).
+  - "what does the auth module do?" → no-auth-module answer citing the ts user-API cluster.
+  - "which node has the most connections?" → "main, with 6 total connections: 5 outbound and 1 inbound", plus a correct runner-up list (store 4, client 4, api 3, Store 3).
+- Server log confirms real per-turn OpenAI calls (`turn start, model=gpt-5.5`, distinct phase timings/byte counts per turn). No canned responses.
+
+## Latency / quality
+
+- End-to-end per message: **5.6–17.9 s** (typical ~7–10 s). Phase 1 (code generation) 2.3–5.0 s; phase 2 (answer synthesis) 2.3–15.4 s; sandbox execution 2–15 ms. Progress indicator with elapsed time + Cancel covers the wait well.
+- Quality: answers are consistently grounded (real node IDs, correct counts/edges, honest "no auth module" negative), with the executed code inspectable via a collapsible disclosure. Main quality risk is Issue 3 (over-broad mutation).
 
 ## Issues found
 
-| # | Severity | Issue |
-|---|----------|-------|
-| 1 | Medium | `/verify` reports "found 8 issue(s)... See Issues tab" but the Issues tab shows a different, smaller set (2 curator suggestions). The 8 integrity issues are not viewable anywhere in the UI; the pointer to the Issues tab is misleading. (internal/curator/commands.go:651 vs /api/curator/suggestions) |
-| 2 | Low | Slash-command autocomplete menu omits `/verify` even though `/help` lists it and it executes successfully. |
-| 3 | Blocker (environment, not code) | OpenAI account behind `OPENAI_API_KEY` has exhausted its quota (persistent 429 `insufficient_quota`); all NL chat features untestable until the account is funded or the provider switched. Key is valid, env reaches the process, model `gpt-5.5` exists. |
-| 4 | Info | NL error surfacing itself is good: visible error bubble, exact backend message shown, input recovers, no silent failure, no key leakage in the error. |
+| # | Severity | Issue | Status |
+|---|----------|-------|--------|
+| 1 | Medium | `/verify` reports "found 8 issue(s)... See Issues tab" but the Issues tab shows a different, smaller set (2 curator suggestions). The 8 integrity issues are not viewable anywhere in the UI. (internal/curator/commands.go:651 vs /api/curator/suggestions) | Open |
+| 2 | Low | Slash-command autocomplete menu omits `/verify` even though `/help` lists it and it executes successfully. | Open |
+| 3 | Medium | **NL curation over-applies on unmatched queries**: "tag the auth-related nodes with domain security" silently tagged ALL 16 nodes because `client.search(...)` under mock embeddings returns everything and the generated code applied tags with no relevance filter or empty-result guard — even though the same model had just concluded no auth module exists. Mitigated by the Changes/Undo banner, and partly an artifact of mock embeddings, but the phase-1 prompt should instruct the model to filter search hits (as it spontaneously did for the "store" ask) or confirm before bulk-tagging >N nodes. | Open (new) |
+| 4 | Resolved | OpenAI account quota exhaustion (persistent 429 `insufficient_quota`) blocked all NL testing in the first run. Diagnosis: env var reached the process, provider wired, key valid (models list OK, gpt-5.5 present) — pure billing. Resolved 2026-07-13: user funded a new key, UI restarted, direct completion verified. | Resolved |
+| 5 | Info | NL error surfacing is good: visible error bubble with exact backend message, input recovers, no silent failure, no key leakage. "domain security" is interpreted as two tags (`domain`, `security`) rather than one. | — |
 
-## Human action required
-- [ ] Fund or replace the OpenAI account for `OPENAI_API_KEY` (or run `marmot configure` and switch the classifier provider to Anthropic), then re-run chat NL validation steps 1–3 and 7.
+## Cleanup / state
+
+All mutations caused by this validation were reverted and verified: storage tags undone via the chat Undo button; the 16-node domain/security tagging reverted via `/untag` slash commands through the API; final state `16 nodes, 0 tagged` (matches pre-validation baseline). UI left running (pid 72294). Repo `.marmot` and `marmot serve` processes untouched.
