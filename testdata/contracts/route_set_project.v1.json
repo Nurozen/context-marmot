@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "id": "my-den",
+  "from": "/home/user/spaces/active/task",
+  "to": "/home/user/spaces/.archive/task"
+}

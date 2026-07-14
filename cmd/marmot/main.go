@@ -16,7 +16,8 @@
 //	marmot namespace  [create|list|update|doctor|remove]         Manage namespace manifests
 //	marmot summarize  [--namespace ...] [--dir .marmot]          Regenerate namespace summary
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
-//	marmot route      [add|rm|resolve]                         Manage vault routing table
+//	marmot route      [add|rm|resolve|set-project|pointer]     Manage vault/project routing table
+//	marmot den        [create|status|destroy|list|adopt]         Manage dens (central context workspaces)
 //	marmot warren     [init|project|bridge|doctor|format|register|mount|...] Manage Warrens
 //	marmot ui         [--dir .marmot] [--host 127.0.0.1] [--port 3274] [--no-open]    Start graph UI server
 //	marmot sdk        [--out <path>] [--base-url <url>]           Generate TypeScript SDK
@@ -107,6 +108,8 @@ func run(args []string) int {
 		return cmdReembed(cmdArgs)
 	case "route":
 		return cmdRoute(cmdArgs)
+	case "den":
+		return cmdDen(cmdArgs)
 	case "warren":
 		return cmdWarren(cmdArgs)
 	case "ui":
@@ -122,7 +125,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, namespace, summarize, reembed, route, warren, ui, sdk")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, namespace, summarize, reembed, route, den, warren, ui, sdk")
 }
 
 // ---------------------------------------------------------------------------
@@ -223,7 +226,7 @@ func cmdIndex(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 
 	if fs.NArg() > 0 {
@@ -272,7 +275,7 @@ func cmdQuery(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 
 	if *query == "" {
@@ -314,15 +317,28 @@ func runQuery(dir, query string, depth, budget int) error {
 func cmdServe(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	denID := fs.String("den", "", "serve the identity vault of a central den by id (stave space-local MCP)")
 	noDaemon := fs.Bool("no-daemon", false, "serve standalone without daemon election (mirrors MARMOT_NO_DAEMON=1)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
-	if *dir == "" {
-		*dir = discoverVault()
+	if *denID != "" && *dir != "" {
+		fmt.Fprintln(os.Stderr, "serve: --den and --dir are mutually exclusive")
+		return 1
+	}
+	resolved := *dir
+	if *denID != "" {
+		p, err := resolveDenID(*denID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "serve: %v\n", err)
+			return 1
+		}
+		resolved = p
+	} else if resolved == "" {
+		resolved = resolveVaultDir("")
 	}
 
-	if err := runServe(*dir, *noDaemon); err != nil {
+	if err := runServe(resolved, *noDaemon); err != nil {
 		fmt.Fprintf(os.Stderr, "serve: %v\n", err)
 		return 1
 	}
@@ -331,7 +347,9 @@ func cmdServe(args []string) int {
 
 func runServe(dir string, noDaemon bool) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("vault directory %q does not exist; run 'marmot init' first", dir)
+		// Empty-vault serve is a P1a goal for warrens-only; until then give a
+		// dens-aware hint when nothing resolves.
+		return fmt.Errorf("vault directory %q does not exist; create a den (marmot den create …) or run 'marmot init'", dir)
 	}
 
 	return runServePipeline(dir, noDaemon)
@@ -351,7 +369,7 @@ func cmdVerify(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 
 	if err := runVerifyEnhanced(*dir, *ns, *staleness, *bridges); err != nil {
@@ -372,7 +390,7 @@ func cmdStatus(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if err := runStatusPipeline(*dir); err != nil {
 		fmt.Fprintf(os.Stderr, "status: %v\n", err)
@@ -392,7 +410,7 @@ func cmdWatch(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if err := runWatchPipeline(*dir); err != nil {
 		fmt.Fprintf(os.Stderr, "watch: %v\n", err)
@@ -421,7 +439,7 @@ func cmdBridge(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	remaining := fs.Args()
 
@@ -490,7 +508,7 @@ func cmdSummarize(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if err := runSummarizePipeline(*dir, *ns); err != nil {
 		fmt.Fprintf(os.Stderr, "summarize: %v\n", err)
@@ -511,7 +529,7 @@ func cmdReembed(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if *ns != "" {
 		fmt.Fprintf(os.Stderr, "reembed: --namespace flag is reserved for future use; rebuilding all embeddings\n")
@@ -537,7 +555,7 @@ func cmdUI(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if err := runUI(*dir, *host, *port, *noOpen); err != nil {
 		fmt.Fprintf(os.Stderr, "ui: %v\n", err)

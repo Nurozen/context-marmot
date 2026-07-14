@@ -59,7 +59,7 @@ func cmdSetup(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 
 	// Collect explicitly requested targets.

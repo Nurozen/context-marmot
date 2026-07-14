@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "error": {
+    "code": "den_create_failed",
+    "message": "den \"already-there\" already exists at /home/user/.marmot/dens/already-there",
+    "hint": "marmot den create already-there --lifetime task --project /path --json"
+  }
+}

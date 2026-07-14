@@ -5,6 +5,11 @@ several repositories belong to the same product, platform, or organization and
 agents need cross-project context without cloning every codebase into one
 repository.
 
+> **Dens (shipped P1b/S2):** central dens under `$MARMOT_HOME` coexist with warrens.
+> Use dens for per-project identity vaults and reverse routes; keep warrens for
+> multi-project graph mounts. See [dens.md](./dens.md).
+> (design target; not implemented yet). Everything below is the **shipping** warren model.
+
 Warrens are mounted explicitly. Registered projects stay dormant until activated
 with `marmot warren mount`, so large company graphs do not become queryable by
 accident.

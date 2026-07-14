@@ -342,6 +342,7 @@ See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan
 | [Architecture](docs/architecture.md) | Full system design and component interactions |
 | [Bridges](docs/bridges.md) | Namespace and cross-vault bridge configuration |
 | [Warrens](docs/warrens.md) | Git-backed multi-project graph mounting and edit policy |
+| [Dens](docs/dens.md) | Central dens under `$MARMOT_HOME` (P1b/S2: create, routes, discovery, JSON) |
 | [Embedding Providers](docs/embedding-providers.md) | Embedding provider setup and fallback behavior |
 | [CRUD Classifier](docs/crud-classifier.md) | Write classification (ADD/UPDATE/SUPERSEDE/NOOP) |
 | [TypeScript SDK](docs/typescript-sdk.md) | Type-safe SDK generation and usage |

@@ -359,6 +359,125 @@ func TestServeCommandNoVault(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// den create/status/destroy/list (P1b)
+// ---------------------------------------------------------------------------
+
+func TestDenCommands(t *testing.T) {
+	homeRoot := t.TempDir()
+	t.Setenv("MARMOT_HOME", homeRoot)
+	routesFile := filepath.Join(homeRoot, "routes.yml")
+	routes.SetOverridePath(routesFile)
+	defer routes.SetOverridePath("")
+
+	// Capability probe: den --help exits 0.
+	if code := run([]string{"den", "--help"}); code != 0 {
+		t.Fatalf("den --help exit code = %d, want 0", code)
+	}
+	if code := run([]string{"den"}); code != 0 {
+		t.Fatalf("den (no args) exit code = %d, want 0", code)
+	}
+
+	proj := t.TempDir()
+
+	// create --no-pointer --json
+	out, code := captureRun([]string{
+		"den", "create", "demo-space",
+		"--lifetime", "task",
+		"--project", proj,
+		"--no-pointer",
+		"--json",
+	})
+	if code != 0 {
+		t.Fatalf("den create exit code = %d out=%s", code, out)
+	}
+	if !strings.Contains(out, `"schema": 1`) && !strings.Contains(out, `"schema":1`) {
+		t.Fatalf("den create --json missing schema: %s", out)
+	}
+	if !strings.Contains(out, `"pointer_written": false`) && !strings.Contains(out, `"pointer_written":false`) {
+		t.Fatalf("den create --no-pointer must set pointer_written false: %s", out)
+	}
+	if !strings.Contains(out, `"den_id": "demo-space"`) && !strings.Contains(out, `"den_id":"demo-space"`) {
+		t.Fatalf("den create missing den_id: %s", out)
+	}
+
+	// status --json
+	out, code = captureRun([]string{"den", "status", "demo-space", "--json"})
+	if code != 0 {
+		t.Fatalf("den status exit code = %d out=%s", code, out)
+	}
+	if !strings.Contains(out, `"lifetime"`) {
+		t.Fatalf("den status missing lifetime: %s", out)
+	}
+
+	// list
+	out, code = captureRun([]string{"den", "list"})
+	if code != 0 || !strings.Contains(out, "demo-space") {
+		t.Fatalf("den list = %q code=%d", out, code)
+	}
+
+	// destroy --json
+	out, code = captureRun([]string{"den", "destroy", "demo-space", "--json"})
+	if code != 0 {
+		t.Fatalf("den destroy exit code = %d out=%s", code, out)
+	}
+	if !strings.Contains(out, `"destroyed": true`) && !strings.Contains(out, `"destroyed":true`) {
+		t.Fatalf("den destroy missing destroyed: %s", out)
+	}
+
+	// status missing → structured error
+	out, code = captureRun([]string{"den", "status", "missing-id", "--json"})
+	if code == 0 {
+		t.Fatalf("den status missing should fail, out=%s", out)
+	}
+	if !strings.Contains(out, `"code"`) || !strings.Contains(out, "den_not_found") {
+		t.Fatalf("den status error envelope: %s", out)
+	}
+
+	// create with pointer
+	proj2 := t.TempDir()
+	out, code = captureRun([]string{
+		"den", "create", "with-ptr",
+		"--lifetime", "durable",
+		"--project", proj2,
+		"--json",
+	})
+	if code != 0 {
+		t.Fatalf("den create with pointer exit = %d out=%s", code, out)
+	}
+	if !strings.Contains(out, `"pointer_written": true`) && !strings.Contains(out, `"pointer_written":true`) {
+		t.Fatalf("expected pointer_written true: %s", out)
+	}
+
+	// dry-run
+	out, code = captureRun([]string{
+		"den", "create", "dry-den",
+		"--project", t.TempDir(),
+		"--dry-run", "--json",
+	})
+	if code != 0 {
+		t.Fatalf("den create dry-run exit = %d out=%s", code, out)
+	}
+	if !strings.Contains(out, `"dry_run": true`) && !strings.Contains(out, `"dry_run":true`) {
+		t.Fatalf("dry-run envelope: %s", out)
+	}
+
+	// route project verbs
+	if code := run([]string{"route", "add", "--project", proj2, "with-ptr"}); code != 0 {
+		t.Fatalf("route add --project exit = %d", code)
+	}
+	archived := filepath.Join(t.TempDir(), ".archive", "moved")
+	if err := os.MkdirAll(archived, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"route", "set-project", "--from", proj2, "--to", archived}); code != 0 {
+		t.Fatalf("route set-project exit = %d", code)
+	}
+	if code := run([]string{"route", "rm", "--project", archived}); code != 0 {
+		t.Fatalf("route rm --project exit = %d", code)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // route (entire file was 0%; isolate storage via SetOverridePath)
 // ---------------------------------------------------------------------------
 

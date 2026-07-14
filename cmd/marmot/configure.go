@@ -46,7 +46,7 @@ func cmdConfigure(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 
 	if *vaultID != "" {

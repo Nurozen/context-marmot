@@ -410,7 +410,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 
 		// Convert absolute source.path to relative (relative to project root).
 		if source.Path != "" && filepath.IsAbs(source.Path) {
-			projectRoot := filepath.Dir(e.MarmotDir)
+			projectRoot := e.EffectiveProjectRoot()
 			if rel, err := filepath.Rel(projectRoot, source.Path); err == nil && !strings.HasPrefix(rel, "..") {
 				source.Path = rel
 			}
@@ -420,7 +420,7 @@ func (e *Engine) HandleContextWrite(ctx context.Context, req mcp.CallToolRequest
 		// baseline. Leave it empty if the file can't be read — the integrity
 		// check reports missing sources separately.
 		if source.Path != "" && source.Hash == "" {
-			resolved := verify.ResolveSourcePath(source.Path, filepath.Dir(e.MarmotDir))
+			resolved := verify.ResolveSourcePath(source.Path, e.EffectiveProjectRoot())
 			if h, err := verify.ComputeSourceHash(resolved, source.Lines); err == nil {
 				source.Hash = h
 			}
@@ -771,7 +771,7 @@ func (e *Engine) HandleContextVerify(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	var issues []VerifyIssue
-	projectRoot := filepath.Dir(e.MarmotDir)
+	projectRoot := e.EffectiveProjectRoot()
 
 	// Run integrity check (dangling edges, structural cycles).
 	if check == "integrity" || check == "all" {

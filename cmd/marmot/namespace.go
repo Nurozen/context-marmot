@@ -50,7 +50,7 @@ func cmdNamespaceCreate(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "namespace create: requires namespace name")
@@ -78,7 +78,7 @@ func cmdNamespaceList(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	items, err := nsconfig.Inventory(*dir)
 	if err != nil {
@@ -116,7 +116,7 @@ func cmdNamespaceUpdate(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "namespace update: requires namespace name")
@@ -149,7 +149,7 @@ func cmdNamespaceDoctor(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	issues, err := nsconfig.Doctor(*dir)
 	if err != nil {
@@ -179,7 +179,7 @@ func cmdNamespaceRemove(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "namespace remove: requires namespace name")

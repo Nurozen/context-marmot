@@ -229,6 +229,12 @@ func buildEngine(dir string) (*engineResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create engine: %w", err)
 	}
+	// Dens: when serving dens/<id>/vault, set ProjectRoot from the den
+	// manifest so source.path resolution uses the registered project, not
+	// filepath.Dir(vault) (which would be the den directory).
+	if pr := projectRootForVaultDir(dir); pr != "" {
+		engine.ProjectRoot = pr
+	}
 
 	// Load namespace manager (best-effort — missing namespaces are fine).
 	// It is attached after Warren bridge discovery so runtime Warren bridges

@@ -41,7 +41,11 @@ web/dist/
 # Coverage
 coverage.out
 coverage.html
-testdata/
+# Runtime/test scratch under testdata/ — except versioned JSON contract fixtures
+# (stave OQ15 SoT). Parent dir must not be fully ignored or re-include fails.
+testdata/*
+!testdata/contracts/
+!testdata/contracts/**
 test_rig/
 .env
 /marmot-eval
@@ -61,7 +65,11 @@ web/playwright-report/
 # Session task-scratch file (see user workflow)
 human.md
 
-# Raw per-folder scan findings are working artifacts, not repo docs
-artifacts/findings/
-artifacts/warren_findings/
-artifacts/warren_identity_findings/
+
+# Accidental project pointer written into repo cwd during dens tests
+.marmot-vault
+**/.marmot-vault
+
+# Local validation / alignment scratch (never commit)
+artifacts/
+scratchpad/

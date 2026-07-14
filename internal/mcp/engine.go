@@ -39,9 +39,15 @@ type Engine struct {
 	UpdateEngine     *update.Engine           // optional; nil = no update detection
 	SummaryScheduler *summary.Scheduler       // optional; nil = no async summaries
 	VaultRegistry    *namespace.VaultRegistry // optional; nil = single-vault mode
-	// MarmotDir is the root .marmot directory.
-	MarmotDir    string
-	LocalVaultID string   // cached from config; avoids repeated disk reads in handlers
+	// MarmotDir is the root .marmot directory (or den vault path).
+	MarmotDir string
+	// ProjectRoot is the source-code root used for relative source.path
+	// resolution and staleness. When empty, handlers fall back to
+	// filepath.Dir(MarmotDir) (legacy in-repo .marmot layout). For dens,
+	// set this to the registered project path so MCP does not treat the
+	// den directory as the project root.
+	ProjectRoot  string
+	LocalVaultID string // cached from config; avoids repeated disk reads in handlers
 	nsMu         sync.Map // map[string]*sync.Mutex — per-namespace write locks
 	nsMgrMu      sync.RWMutex
 	// fileCrossVaultBridges snapshots the manager's file-declared cross-vault
@@ -103,6 +109,20 @@ func (e *Engine) warnVaultOnce(vaultID, format string, args ...any) {
 func (e *Engine) NamespaceLock(namespace string) *sync.Mutex {
 	v, _ := e.nsMu.LoadOrStore(namespace, &sync.Mutex{})
 	return v.(*sync.Mutex)
+}
+
+// EffectiveProjectRoot returns the project root for source resolution.
+func (e *Engine) EffectiveProjectRoot() string {
+	if e == nil {
+		return ""
+	}
+	if e.ProjectRoot != "" {
+		return e.ProjectRoot
+	}
+	if e.MarmotDir == "" {
+		return ""
+	}
+	return filepath.Dir(e.MarmotDir)
 }
 
 // defaultTokenBudget returns the token budget from the vault config, falling

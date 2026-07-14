@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "error": {
+    "code": "den_create_failed",
+    "message": "project \"/home/user/src/app\" is already registered to \"other-den\"; relocate or destroy that den first (or route rm --project)",
+    "hint": "marmot den create my-den --lifetime task --project /path --json"
+  }
+}

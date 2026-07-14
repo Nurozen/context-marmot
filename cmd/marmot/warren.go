@@ -721,7 +721,7 @@ func warrenRegister(args []string) int {
 		return 1
 	}
 	if *dir == "" {
-		*dir = discoverVault()
+		*dir = resolveVaultDir("")
 	}
 	// ensureWorkspace nudges when it fabricates a vault_id-less config; the
 	// pre-existing-config case is nudged below, so track which one this is.
@@ -1557,7 +1557,7 @@ func warrenPropose(args []string) int {
 // planting a vault there.
 func locateWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error) {
 	if dirFlag == "" {
-		dirFlag = discoverVault()
+		dirFlag = resolveVaultDir("")
 	}
 	if fi, statErr := os.Stat(dirFlag); statErr != nil || !fi.IsDir() {
 		return "", "", fmt.Errorf("no marmot workspace at %s (run a mutating warren command, or marmot init, to create one)", dirFlag)
@@ -1567,7 +1567,7 @@ func locateWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error
 
 func ensureWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error) {
 	if dirFlag == "" {
-		dirFlag = discoverVault()
+		dirFlag = resolveVaultDir("")
 	}
 	marmotDir = dirFlag
 	workspaceRoot = filepath.Dir(marmotDir)

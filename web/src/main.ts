@@ -242,6 +242,7 @@ async function init(): Promise<void> {
         }
       }
       await loadGraph();
+      await refreshNamespaceSelectorLabels();
       await refreshWarrenSelectorLabels();
     })();
   });
@@ -272,11 +273,17 @@ async function init(): Promise<void> {
   const evtSource = new EventSource('/api/events');
   evtSource.addEventListener('graph-changed', () => {
     console.log('[live-reload] graph changed on disk, refreshing…');
-    void loadGraph();
+    void (async () => {
+      await loadGraph();
+      await refreshNamespaceSelectorLabels();
+    })();
   });
   evtSource.addEventListener('open', () => {
     // On reconnect, reload graph in case changes were missed
-    void loadGraph();
+    void (async () => {
+      await loadGraph();
+      await refreshNamespaceSelectorLabels();
+    })();
   });
   // Deliberate page teardown (reload/navigation) aborts the EventSource,
   // which used to log a scary "connection lost" warning plus an
@@ -528,6 +535,43 @@ function allWarrensOptionLabel(warrens: Record<string, WorkspaceWarren>): string
     0,
   );
   return `All warrens (${totalActive} active)`;
+}
+
+/**
+ * Re-fetches /api/namespaces and updates plain-namespace option labels so
+ * node counts track live-reload (graph can gain nodes while the badge
+ * would otherwise stay at the initial count).
+ */
+async function refreshNamespaceSelectorLabels(): Promise<void> {
+  const select = document.getElementById('namespace-select') as HTMLSelectElement | null;
+  if (!select) return;
+  let namespaces: Awaited<ReturnType<typeof fetchNamespaces>>;
+  try {
+    namespaces = await fetchNamespaces();
+  } catch {
+    return;
+  }
+  const counts = new Map(namespaces.map((ns) => [ns.name, ns.node_count]));
+  let total = 0;
+  for (const n of namespaces) total += n.node_count;
+  for (const opt of Array.from(select.options)) {
+    if (opt.value === '_all') {
+      opt.textContent = `All namespaces (${total})`;
+      continue;
+    }
+    // Skip warren aggregate / divider / warren entries
+    if (
+      opt.value === '_warrens' ||
+      opt.value.startsWith('_warren/') ||
+      opt.disabled
+    ) {
+      continue;
+    }
+    const count = counts.get(opt.value);
+    if (count !== undefined) {
+      opt.textContent = `${opt.value} (${count})`;
+    }
+  }
 }
 
 /**

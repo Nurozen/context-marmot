@@ -1,11 +1,15 @@
 // Package routes manages the global vault routing table at ~/.marmot/routes.yml.
 // It maps vault IDs to filesystem paths, enabling cross-vault resolution
-// independent of bridge manifest paths.
+// independent of bridge manifest paths. It also maps project paths to
+// den-or-vault ids (projects: reverse table).
 //
 // The table location can be overridden with the MARMOT_ROUTES environment
 // variable: a path value redirects the table, while "off", "none", or "0"
 // disables the global table entirely (useful for hermetic tests and scratch
 // vaults that must not inherit the user's registered vaults).
+//
+// When MARMOT_ROUTES is unset, the default path is $MARMOT_HOME/routes.yml
+// (default MARMOT_HOME = ~/.marmot).
 package routes
 
 import (
@@ -15,6 +19,7 @@ import (
 	"sync"
 
 	"github.com/nurozen/context-marmot/internal/flock"
+	"github.com/nurozen/context-marmot/internal/home"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,11 +28,12 @@ type VaultEntry struct {
 	Path string `yaml:"path"`
 }
 
-// RoutingTable maps vault IDs to their filesystem locations.
-// All exported methods are safe for concurrent use.
+// RoutingTable maps vault IDs to their filesystem locations and project
+// paths to den-or-vault ids. All exported methods are safe for concurrent use.
 type RoutingTable struct {
-	mu     sync.RWMutex
-	Vaults map[string]VaultEntry `yaml:"vaults"`
+	mu       sync.RWMutex
+	Vaults   map[string]VaultEntry `yaml:"vaults"`
+	Projects map[string]string     `yaml:"projects"` // abs project path → den-or-vault id
 }
 
 // mu protects Load/Save within a single process. Inter-process safety
@@ -46,7 +52,7 @@ func SetOverridePath(path string) {
 }
 
 // defaultPathLocked returns the routing table path (caller must hold mu).
-// Precedence: SetOverridePath > MARMOT_ROUTES env > ~/.marmot/routes.yml.
+// Precedence: SetOverridePath > MARMOT_ROUTES env > $MARMOT_HOME/routes.yml.
 // MARMOT_ROUTES=off|none|0 disables the global routing table entirely
 // (Load returns an empty table), which keeps hermetic tooling and fresh
 // scratch vaults from inheriting the user's global vault registry.
@@ -57,32 +63,42 @@ func defaultPathLocked() string {
 	}
 	switch env := os.Getenv("MARMOT_ROUTES"); env {
 	case "":
-		// fall through to the default location
+		// fall through to the default location under MARMOT_HOME
 	case "off", "none", "0":
 		return ""
 	default:
 		return env
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".marmot", "routes.yml")
+	return home.RoutesPath()
 }
 
-// DefaultPath returns ~/.marmot/routes.yml (or the override if set).
+// DefaultPath returns $MARMOT_HOME/routes.yml (or the override if set).
 func DefaultPath() string {
 	mu.RLock()
 	defer mu.RUnlock()
 	return defaultPathLocked()
 }
 
-// EmptyTable returns a fresh routing table with no vaults registered.
-func EmptyTable() *RoutingTable {
-	return &RoutingTable{Vaults: make(map[string]VaultEntry)}
+// normalize ensures Vaults and Projects maps are non-nil.
+// Called after every unmarshal path so new maps cannot be forgotten.
+func (rt *RoutingTable) normalize() {
+	if rt.Vaults == nil {
+		rt.Vaults = make(map[string]VaultEntry)
+	}
+	if rt.Projects == nil {
+		rt.Projects = make(map[string]string)
+	}
 }
 
-// Load reads the routing table from ~/.marmot/routes.yml.
+// EmptyTable returns a fresh routing table with no vaults or projects registered.
+func EmptyTable() *RoutingTable {
+	return &RoutingTable{
+		Vaults:   make(map[string]VaultEntry),
+		Projects: make(map[string]string),
+	}
+}
+
+// Load reads the routing table from $MARMOT_HOME/routes.yml.
 // Returns an empty table if the file does not exist.
 func Load() (*RoutingTable, error) {
 	return LoadFrom(DefaultPath())
@@ -93,7 +109,7 @@ func LoadFrom(path string) (*RoutingTable, error) {
 	mu.RLock()
 	defer mu.RUnlock()
 
-	rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
+	rt := EmptyTable()
 	if path == "" {
 		return rt, nil
 	}
@@ -109,13 +125,11 @@ func LoadFrom(path string) (*RoutingTable, error) {
 	if err := yaml.Unmarshal(data, rt); err != nil {
 		return nil, fmt.Errorf("parse routing table: %w", err)
 	}
-	if rt.Vaults == nil {
-		rt.Vaults = make(map[string]VaultEntry)
-	}
+	rt.normalize()
 	return rt, nil
 }
 
-// Save writes the routing table to ~/.marmot/routes.yml atomically.
+// Save writes the routing table to $MARMOT_HOME/routes.yml atomically.
 func Save(rt *RoutingTable) error {
 	return SaveTo(rt, DefaultPath())
 }
@@ -141,6 +155,9 @@ func writeTableAtomic(rt *RoutingTable, path string) error {
 		return fmt.Errorf("create routing table dir: %w", err)
 	}
 
+	if rt != nil {
+		rt.normalize()
+	}
 	data, err := yaml.Marshal(rt)
 	if err != nil {
 		return fmt.Errorf("marshal routing table: %w", err)
@@ -193,7 +210,7 @@ func Update(fn func(rt *RoutingTable) error) error {
 
 	return flock.WithLock(path+".lock", func() error {
 		// Read under lock (bypass LoadFrom which also takes mu)
-		rt := &RoutingTable{Vaults: make(map[string]VaultEntry)}
+		rt := EmptyTable()
 		data, err := os.ReadFile(path)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("read routing table: %w", err)
@@ -202,9 +219,7 @@ func Update(fn func(rt *RoutingTable) error) error {
 			if err := yaml.Unmarshal(data, rt); err != nil {
 				return fmt.Errorf("parse routing table: %w", err)
 			}
-			if rt.Vaults == nil {
-				rt.Vaults = make(map[string]VaultEntry)
-			}
+			rt.normalize()
 		}
 
 		if err := fn(rt); err != nil {
@@ -261,6 +276,87 @@ func (rt *RoutingTable) List() map[string]string {
 	result := make(map[string]string, len(rt.Vaults))
 	for id, entry := range rt.Vaults {
 		result[id] = entry.Path
+	}
+	return result
+}
+
+// NormalizeProjectKey canonicalizes a project path for routes write AND lookup.
+// Clean + Abs + EvalSymlinks (when possible). Falls back to Clean+Abs if
+// EvalSymlinks fails (e.g. path does not exist yet).
+func NormalizeProjectKey(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("empty project path")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve project path: %w", err)
+	}
+	abs = filepath.Clean(abs)
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	// Path may not exist yet (den create before mkdir of project); still store Clean abs.
+	return abs, nil
+}
+
+// GetProject returns the den-or-vault id for a project path, or ("", false).
+// The path is normalized via NormalizeProjectKey before lookup.
+func (rt *RoutingTable) GetProject(projectPath string) (string, bool) {
+	if rt == nil {
+		return "", false
+	}
+	key, err := NormalizeProjectKey(projectPath)
+	if err != nil {
+		return "", false
+	}
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	if rt.Projects == nil {
+		return "", false
+	}
+	id, ok := rt.Projects[key]
+	return id, ok
+}
+
+// SetProject registers or updates a project path → den-or-vault id mapping.
+// The path is normalized via NormalizeProjectKey.
+func (rt *RoutingTable) SetProject(projectPath, denOrVaultID string) {
+	key, err := NormalizeProjectKey(projectPath)
+	if err != nil {
+		// Best-effort: store cleaned input so callers that already Abs'd still work.
+		key = filepath.Clean(projectPath)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.Projects == nil {
+		rt.Projects = make(map[string]string)
+	}
+	rt.Projects[key] = denOrVaultID
+}
+
+// RemoveProject deletes a project path entry. Returns true if it existed.
+func (rt *RoutingTable) RemoveProject(projectPath string) bool {
+	key, err := NormalizeProjectKey(projectPath)
+	if err != nil {
+		key = filepath.Clean(projectPath)
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.Projects == nil {
+		return false
+	}
+	_, existed := rt.Projects[key]
+	delete(rt.Projects, key)
+	return existed
+}
+
+// ListProjects returns a copy of all project_path -> den-or-vault-id mappings.
+func (rt *RoutingTable) ListProjects() map[string]string {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	result := make(map[string]string, len(rt.Projects))
+	for p, id := range rt.Projects {
+		result[p] = id
 	}
 	return result
 }
