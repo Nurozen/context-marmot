@@ -225,9 +225,9 @@ func TestDenCreateStatusDestroyBranches(t *testing.T) {
 	if code != 0 {
 		t.Fatal(code)
 	}
-	if !strings.Contains(out, "No dens") && strings.TrimSpace(out) != "" {
-		// may still have dens from parallel? hermetic home so empty
-		// if empty message
+	// Hermetic MARMOT_HOME: after destroying throwaway dens the list is empty.
+	if !strings.Contains(out, "No dens") {
+		t.Fatalf("den list after cleanup = %q, want empty-state message", out)
 	}
 }
 

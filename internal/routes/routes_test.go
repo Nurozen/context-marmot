@@ -424,10 +424,9 @@ func TestSetRemoveProjectNilMapsAndFallback(t *testing.T) {
 			}
 		}
 	}
-	// Remove via same fallback
-	if !rt.RemoveProject("") {
-		// may still return true if key matched
-	}
+	// Remove via same fallback path (empty input normalizes to a clean key).
+	// Either removes a matched entry or reports not found — must not panic.
+	_ = rt.RemoveProject("")
 }
 
 func TestSetNilVaultsMap(t *testing.T) {
