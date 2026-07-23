@@ -151,6 +151,35 @@ marmot setup --vscode
 marmot setup --cursor
 ```
 
+### Global setup (one config for every project)
+
+`marmot setup --global` writes **user-scope** MCP configs instead of
+project-local ones. The registered command is a bare `marmot serve` with no
+vault path embedded — the vault is resolved per-project at serve time via the
+reverse-route table and `.marmot-vault` pointer (see
+[Vault discovery](docs/dens.md#vault-discovery--resolution-order)), so one
+global entry covers every registered project on the machine:
+
+```bash
+marmot setup --global              # auto-detect installed tools
+marmot setup --global --claude     # target specific tools
+marmot setup --global --dry-run    # print target files + payloads, write nothing
+```
+
+Target files per harness:
+
+| Harness | User-scope file |
+|---------|-----------------|
+| Claude Code | `~/.claude.json` (`mcpServers` key) |
+| Codex | `~/.codex/config.toml` (`[mcp_servers.context-marmot]`, idempotent append) |
+| Cursor | `~/.cursor/mcp.json` (`mcpServers` key) |
+| VS Code | user `settings.json` (`mcp.servers` key; macOS `~/Library/Application Support/Code/User/settings.json`, Linux `~/.config/Code/User/settings.json`, Windows `%APPDATA%\Code\User\settings.json`) |
+
+Existing files are merged non-destructively (unrelated keys and sibling MCP
+servers are preserved). If a target file exists but cannot be parsed as JSON
+(including VS Code JSONC settings with comments), setup refuses with an error
+instead of clobbering it — fix the file or add the server manually.
+
 > **Codex CLI users:** Codex (observed with v0.143) gates MCP servers behind its
 > own approval/trust model. In headless runs (`codex exec`), project-level
 > `.codex/config.toml` MCP servers may be hidden, and MCP tool calls are
@@ -179,6 +208,10 @@ marmot warren doctor
 # From your local project or virtual monorepo
 marmot warren register product-platform /path/to/product-warren
 marmot warren mount --warren product-platform project-a project-b
+
+# Or consume from a git URL via the shared cache (register-free; see docs/warrens.md)
+marmot warren add https://github.com/acme/product-warren --id product-platform
+marmot warren sync product-platform
 
 # Make one mounted project editable in this workspace
 marmot warren edit --warren product-platform project-a
@@ -255,7 +288,7 @@ path all join the same election.
 |---------|-------------|
 | `marmot init [--dir .marmot]` | Create a new vault, run configure, then setup |
 | `marmot configure [--dir .marmot]` | Interactive prompt for embedding provider, model, API key, and CRUD classifier |
-| `marmot setup [--dir .marmot] [--claude] [--codex] [--vscode] [--cursor]` | Generate MCP configs for detected (or specified) tools |
+| `marmot setup [--dir .marmot] [--global] [--dry-run] [--claude] [--codex] [--vscode] [--cursor]` | Generate MCP configs for detected (or specified) tools. `--global` writes user-scope configs with bare `marmot serve` (no vault path); `--dry-run` previews without writing. |
 | `marmot index [--dir .marmot] [--force] [<path>] [--incremental]` | Index node files or run static analysis on source code. `--force` rebuilds all embeddings. |
 | `marmot query --query "..." [--dir .marmot] [--depth 2] [--budget 4096]` | Query the knowledge graph |
 | `marmot verify [--dir .marmot]` | Run integrity and staleness checks |
@@ -342,7 +375,7 @@ See [docs/implementation_plan.md](docs/implementation_plan.md) for the full plan
 | [Architecture](docs/architecture.md) | Full system design and component interactions |
 | [Bridges](docs/bridges.md) | Namespace and cross-vault bridge configuration |
 | [Warrens](docs/warrens.md) | Git-backed multi-project graph mounting and edit policy |
-| [Dens](docs/dens.md) | Central dens under `$MARMOT_HOME` (P1b/S2: create, routes, discovery, JSON) |
+| [Dens](docs/dens.md) | Central dens under `$MARMOT_HOME`: create/adopt, routes, discovery, link modes (edit/pinned/live), contribute, bridges, schema:1 JSON |
 | [Embedding Providers](docs/embedding-providers.md) | Embedding provider setup and fallback behavior |
 | [CRUD Classifier](docs/crud-classifier.md) | Write classification (ADD/UPDATE/SUPERSEDE/NOOP) |
 | [TypeScript SDK](docs/typescript-sdk.md) | Type-safe SDK generation and usage |

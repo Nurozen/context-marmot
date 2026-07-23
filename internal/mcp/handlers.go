@@ -74,8 +74,16 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultText(emptyXML), nil
 	}
 
-	// Step 2b: If cross-vault bridges exist, also search remote vault embeddings.
+	// Step 2b: If cross-vault bridges or den links exist, also search remote
+	// vault embeddings. Each remote vault is searched with a query vector in
+	// its own embedding model (per-link federation): the local vector is
+	// reused when the models match, otherwise the vault's embedder (den link
+	// override or its _config.md) re-embeds the query — see remoteQueryVector.
 	if e.VaultRegistry != nil {
+		remoteState := &remoteQueryState{
+			vecs:      map[string][]float32{e.Embedder.Model(): queryVec},
+			embedders: make(map[string]embedding.Embedder),
+		}
 		for _, vid := range e.VaultRegistry.KnownVaultIDs() {
 			if vid == "" || vid == e.LocalVaultID {
 				continue
@@ -87,12 +95,16 @@ func (e *Engine) HandleContextQuery(ctx context.Context, req mcp.CallToolRequest
 				e.warnVaultOnce(vid, "warren vault %q embedding store unavailable, excluded from context_query: %v", vid, err)
 				continue
 			}
+			searchVec, searchModel, ok := e.remoteQueryVector(ctx, vid, remoteStore, query, remoteState)
+			if !ok {
+				continue // already warned (model mismatch / embedder failure)
+			}
 			var remoteResults []embedding.ScoredResult
 			var searchErr error
 			if includeSuperseded {
-				remoteResults, searchErr = remoteStore.Search(queryVec, 3, e.Embedder.Model())
+				remoteResults, searchErr = remoteStore.Search(searchVec, 3, searchModel)
 			} else {
-				remoteResults, searchErr = remoteStore.SearchActive(queryVec, 3, e.Embedder.Model())
+				remoteResults, searchErr = remoteStore.SearchActive(searchVec, 3, searchModel)
 			}
 			if searchErr != nil {
 				e.warnVaultOnce(vid, "warren vault %q search failed, excluded from context_query: %v", vid, searchErr)
@@ -609,8 +621,17 @@ func (e *Engine) handleWarrenContextWrite(req mcp.CallToolRequest, qualifiedID s
 			break
 		}
 	}
-	if !found || !mount.Editable {
-		return mcp.NewToolResultError(fmt.Sprintf("vault %q is not an editable warren mount in this workspace; run 'marmot warren edit --warren <id> <project>'", vaultID)), nil
+	// Rejected-write copy (plan §9.3): name the mode and the den verb.
+	// Legacy `marmot warren edit` is no longer the remediation — dens mount
+	// warren projects through `den link --edit`.
+	if !found {
+		return mcp.NewToolResultError(fmt.Sprintf("write rejected: vault %q is not an editable warren mount in this workspace — read-only and live den links reject writes; link it editable: 'marmot den link %s --edit <warren>/<project>', or record the insight in your own vault", vaultID, e.denRefForCopy())), nil
+	}
+	if !mount.Editable {
+		if warrenAuthorReadOnly(mount) {
+			return mcp.NewToolResultError(fmt.Sprintf("write rejected: the warren author marked project %q read-only (readonly: true in the warren manifest) — author veto, edits must go through the warren repository itself", mount.ProjectID)), nil
+		}
+		return mcp.NewToolResultError(fmt.Sprintf("write rejected: vault %q is a read-only warren mount in this workspace — link it editable: 'marmot den link %s --edit %s/%s'", vaultID, e.denRefForCopy(), mount.WarrenID, mount.ProjectID)), nil
 	}
 	if err := node.ValidateNodeID(localID); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid node ID: %v", err)), nil
@@ -1058,4 +1079,33 @@ func matchNamespace(nodeNS, requested string) bool {
 func sha256Hex(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+// warrenAuthorReadOnly reports whether the warren manifest marks the mount's
+// project readonly (the author veto). Best-effort for error-copy selection
+// only — an unreadable manifest returns false here; enforcement stays with
+// WriteEditableNode's fail-closed backstop.
+func warrenAuthorReadOnly(mount warren.ProjectStatus) bool {
+	if mount.WarrenPath == "" {
+		return false
+	}
+	manifest, _, err := warren.LoadManifest(mount.WarrenPath)
+	if err != nil {
+		return false
+	}
+	for _, p := range manifest.Projects {
+		if p.ProjectID == mount.ProjectID && p.ReadOnly {
+			return true
+		}
+	}
+	return false
+}
+
+// denRefForCopy names the served den in remediation copy ("<den>" when the
+// serve is not den-shaped, so the command stays copy-adaptable).
+func (e *Engine) denRefForCopy() string {
+	if m := denManifestFor(e.MarmotDir); m != nil && m.DenID != "" {
+		return m.DenID
+	}
+	return "<den>"
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/nurozen/context-marmot/internal/curator"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
+	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	nspkg "github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/sdkgen"
@@ -414,8 +415,15 @@ func (s *Server) handleWarrenNodeUpdate(w http.ResponseWriter, id string, req No
 		writeError(w, http.StatusNotFound, "Warren mount not found for vault: "+vaultID)
 		return
 	}
+	// Rejected-write copy (plan §9.3, same wording family as the MCP path):
+	// name the mode and the den verb; author read-only is a veto with no
+	// remediation.
 	if !mount.Editable {
-		writeError(w, http.StatusForbidden, fmt.Sprintf("Warren project is read-only in this workspace: %s — enable writes with 'marmot warren edit %s --warren %s' (unless the warren author marked it read-only)", mount.ProjectID, mount.ProjectID, mount.WarrenID))
+		if warrenAuthorReadOnly(mount) {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("write rejected: the warren author marked project %q read-only (readonly: true in the warren manifest) — author veto, edits must go through the warren repository itself", mount.ProjectID))
+			return
+		}
+		writeError(w, http.StatusForbidden, fmt.Sprintf("write rejected: vault %q is a read-only warren mount in this workspace — link it editable: 'marmot den link <den> --edit %s/%s'", vaultID, mount.WarrenID, mount.ProjectID))
 		return
 	}
 
@@ -536,7 +544,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		// Graceful degradation: empty results on model mismatch or empty store.
 		results = []embedding.ScoredResult{}
 	}
-	results = append(results, s.searchMountedVaults(vec, ns, limit)...)
+	results = append(results, s.searchMountedVaults(r.Context(), query, vec, ns, limit)...)
+	results = append(results, s.searchDenLinkedVaults(r.Context(), query, vec, ns, limit)...)
 	results = dedupeAndRankSearchResults(results, limit)
 
 	resp := SearchResponse{Results: make([]SearchResult, 0, len(results))}
@@ -565,7 +574,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embedding.ScoredResult {
+// searchMountedVaults fans a warren-scoped search across mounted vaults.
+// Remote vaults are searched with a query vector in THAT vault's embedding
+// model (per-vault-model federation, mirroring context_query): the local
+// vector is reused when models match, otherwise the vault's own embedder
+// re-embeds the query, so a den-link vault built with a different model no
+// longer silently returns nothing. The seeded local vector is used directly
+// for the local self-alias store (it always carries the local model).
+func (s *Server) searchMountedVaults(ctx context.Context, query string, vec []float32, ns string, limit int) []embedding.ScoredResult {
 	if s.engine.VaultRegistry == nil {
 		return nil
 	}
@@ -590,6 +606,8 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 	if len(mountByVault) == 0 {
 		return nil
 	}
+
+	remoteState := s.engine.NewRemoteQueryState(vec)
 
 	var results []embedding.ScoredResult
 	for vaultID, mount := range mountByVault {
@@ -623,9 +641,58 @@ func (s *Server) searchMountedVaults(vec []float32, ns string, limit int) []embe
 			s.warnVaultOnce(vaultID, "warren vault %q embedding store unavailable, excluded from search: %v", vaultID, err)
 			continue
 		}
-		remoteResults, err := remoteStore.SearchActive(vec, limit, s.engine.Embedder.Model())
+		searchVec, searchModel, ok := s.engine.RemoteQueryVector(ctx, vaultID, remoteStore, query, remoteState)
+		if !ok {
+			continue // already warned (model mismatch / embedder failure)
+		}
+		remoteResults, err := remoteStore.SearchActive(searchVec, limit, searchModel)
 		if err != nil {
 			s.warnVaultOnce(vaultID, "warren vault %q search failed, excluded from results: %v", vaultID, err)
+			continue
+		}
+		for _, result := range remoteResults {
+			results = append(results, embedding.ScoredResult{
+				NodeID: "@" + vaultID + "/" + result.NodeID,
+				Score:  result.Score,
+			})
+		}
+	}
+	return results
+}
+
+// searchDenLinkedVaults fans the search across the served den's resolved
+// _den.md link vaults, mirroring context_query's federation (the MCP path
+// searches every registry vault; /api/search previously only reached remote
+// vaults under an explicit _warren/ scope, so den-linked results were silently
+// missing from the UI). Warren-scoped searches (ns=_warren/…) are excluded —
+// that scope means "this warren's mounts", which searchMountedVaults covers.
+// Per-vault-model federation is identical to the mount path: the local vector
+// is reused when models match, otherwise the vault's own embedder re-embeds.
+func (s *Server) searchDenLinkedVaults(ctx context.Context, query string, vec []float32, ns string, limit int) []embedding.ScoredResult {
+	if s.engine.VaultRegistry == nil || strings.HasPrefix(ns, "_warren/") {
+		return nil
+	}
+	vaultIDs := s.engine.DenLinkedVaultIDs()
+	if len(vaultIDs) == 0 {
+		return nil
+	}
+	remoteState := s.engine.NewRemoteQueryState(vec)
+	var results []embedding.ScoredResult
+	for _, vaultID := range vaultIDs {
+		remoteStore, err := s.engine.VaultRegistry.ResolveEmbeddingStore(vaultID)
+		if err != nil {
+			// Best-effort: local results still return, but the degradation is
+			// visible (once per vault) instead of silently vanishing.
+			s.warnVaultOnce(vaultID, "den-linked vault %q embedding store unavailable, excluded from search: %v", vaultID, err)
+			continue
+		}
+		searchVec, searchModel, ok := s.engine.RemoteQueryVector(ctx, vaultID, remoteStore, query, remoteState)
+		if !ok {
+			continue // already warned (model mismatch / embedder failure)
+		}
+		remoteResults, err := remoteStore.SearchActive(searchVec, limit, searchModel)
+		if err != nil {
+			s.warnVaultOnce(vaultID, "den-linked vault %q search failed, excluded from results: %v", vaultID, err)
 			continue
 		}
 		for _, result := range remoteResults {
@@ -887,9 +954,15 @@ func (s *Server) handleWarrens(w http.ResponseWriter, r *http.Request) {
 			Reachable:          dirExists(entry.Path),
 		}
 	}
+	denLinks := s.engine.DenLinkStatuses()
+	if denLinks == nil {
+		// JSON shape stability: always an array, never null/absent.
+		denLinks = []mcpserver.DenLinkStatus{}
+	}
 	writeJSON(w, http.StatusOK, WarrensResponse{
 		Warrens:      warrens,
 		LocalVaultID: s.engine.LocalVaultID,
+		DenLinks:     denLinks,
 	})
 }
 
@@ -1067,7 +1140,7 @@ func (s *Server) handleWarrenRefresh(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "Warren not registered: "+id)
 		return
 	}
-	if err := s.engine.ReloadWarrenState(); err != nil {
+	if err := s.engine.ReloadWarrenAndDenState(); err != nil {
 		writeError(w, http.StatusInternalServerError, "warren refresh: "+err.Error())
 		return
 	}
@@ -1173,7 +1246,7 @@ func (s *Server) handleWarrenMountChange(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.engine.ReloadWarrenState(); err != nil {
+	if err := s.engine.ReloadWarrenAndDenState(); err != nil {
 		writeError(w, http.StatusInternalServerError, "warren reload after "+action+": "+err.Error())
 		return
 	}
@@ -1636,4 +1709,24 @@ func (s *Server) collectIntegrityIssues(ns string) ([]IntegrityIssueAPI, int) {
 		})
 	}
 	return out, len(nodes)
+}
+
+// warrenAuthorReadOnly reports whether the warren manifest marks the mount's
+// project readonly (the author veto). Best-effort for error-copy selection
+// only — an unreadable manifest returns false; enforcement stays with
+// warren.WriteEditableNode's fail-closed backstop.
+func warrenAuthorReadOnly(mount warren.ProjectStatus) bool {
+	if mount.WarrenPath == "" {
+		return false
+	}
+	manifest, _, err := warren.LoadManifest(mount.WarrenPath)
+	if err != nil {
+		return false
+	}
+	for _, p := range manifest.Projects {
+		if p.ProjectID == mount.ProjectID && p.ReadOnly {
+			return true
+		}
+	}
+	return false
 }

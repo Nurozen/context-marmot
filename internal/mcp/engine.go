@@ -14,6 +14,7 @@ import (
 
 	"github.com/nurozen/context-marmot/internal/classifier"
 	"github.com/nurozen/context-marmot/internal/config"
+	"github.com/nurozen/context-marmot/internal/den"
 	"github.com/nurozen/context-marmot/internal/embedding"
 	"github.com/nurozen/context-marmot/internal/graph"
 	"github.com/nurozen/context-marmot/internal/heatmap"
@@ -57,6 +58,12 @@ type Engine struct {
 	// repeated reloads never duplicate. Both guarded by nsMgrMu.
 	fileCrossVaultBridges []*namespace.Bridge
 	warrenBridges         []*namespace.Bridge
+	// denBridges holds cross-vault bridges declared in the served den's
+	// _bridges/ dir (LoadDenBridges), merged into NSManager.CrossVaultBridges
+	// after fileCrossVaultBridges and warrenBridges. Set once at serve time and
+	// re-appended by setWarrenBridges so they survive later warren reloads.
+	// Guarded by nsMgrMu.
+	denBridges []*namespace.Bridge
 	// reloadMu serializes ReloadWarrenState: it is invoked concurrently from
 	// HTTP handler goroutines (the refresh endpoint) and the daemon owner's
 	// _warren.md watcher, and each reload is a read-state-then-apply cycle.
@@ -65,6 +72,20 @@ type Engine struct {
 	// e.g. an unmounted vault routable until the next reload, with NSManager
 	// bridges and the registry routing table from two different snapshots.
 	reloadMu sync.Mutex
+	// denLinkEmbeddings maps a den-linked vault id to its per-link embedding
+	// override; denLinkResolutions maps a den link key (denLinkKey) to the
+	// vault id the link resolved to (unresolved links are simply absent).
+	// Both are populated by LoadDenLinks and read by the query path and the
+	// instructions builder. Guarded by denLinksMu.
+	denLinksMu         sync.RWMutex
+	denLinkEmbeddings  map[string]den.LinkEmbedding
+	denLinkResolutions map[string]string
+	// denIdentity caches the served den's id (denManifestFor probe) as the
+	// local-identity fallback for links-only dens: no identity vault means no
+	// _config.md vault_id, so LocalVaultID stays empty and cross-vault edge
+	// validation would silently disengage. Resolved once on first use.
+	denIdentityOnce sync.Once
+	denIdentity     string
 	// warnedVaults dedupes best-effort cross-vault degradation warnings so a
 	// broken remote vault warns once per vault per process, not per query.
 	warnedVaults  sync.Map       // map[string]bool
@@ -305,21 +326,41 @@ func (e *Engine) validateCrossNamespaceEdges(edges []node.Edge, currentNamespace
 func (e *Engine) validateCrossVaultEdges(edges []node.Edge, currentNamespace string) error {
 	e.nsMgrMu.RLock()
 	defer e.nsMgrMu.RUnlock()
-	if e.NSManager == nil || e.VaultRegistry == nil || e.LocalVaultID == "" {
+	// Local identity: the config-cached vault id, or — for links-only dens,
+	// which have no identity vault and therefore no vault_id — the den id
+	// itself, so den-bridge validation (@<den-id>--@<remote> manifests) still
+	// gates cross-vault edges instead of silently disengaging.
+	local := e.localIdentity()
+	if e.NSManager == nil || e.VaultRegistry == nil || local == "" {
 		return nil
 	}
 	for _, edge := range edges {
 		qid := e.NSManager.ParseQualifiedID(edge.Target, currentNamespace)
-		// A "@<LocalVaultID>/x" target is a local edge wearing a costume:
+		// A "@<local>/x" target is a local edge wearing a costume:
 		// it resolves against the live vault, so it needs no
-		// LocalVaultID<->LocalVaultID bridge.
-		if qid.VaultID != "" && qid.VaultID != e.LocalVaultID {
-			if err := e.NSManager.ValidateCrossVaultEdge(e.LocalVaultID, qid.VaultID, string(edge.Relation)); err != nil {
+		// local<->local bridge.
+		if qid.VaultID != "" && qid.VaultID != local {
+			if err := e.NSManager.ValidateCrossVaultEdge(local, qid.VaultID, string(edge.Relation)); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// localIdentity returns the engine's local vault identity for cross-vault
+// policy checks: LocalVaultID when the served dir has one, else the served
+// den's id (links-only dens). "" when neither resolves.
+func (e *Engine) localIdentity() string {
+	if e.LocalVaultID != "" {
+		return e.LocalVaultID
+	}
+	e.denIdentityOnce.Do(func() {
+		if m := denManifestFor(e.MarmotDir); m != nil {
+			e.denIdentity = m.DenID
+		}
+	})
+	return e.denIdentity
 }
 
 // WithLLMClassifier wires up a CRUD classifier on the engine using the

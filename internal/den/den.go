@@ -4,12 +4,14 @@
 package den
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/flock"
 	"github.com/nurozen/context-marmot/internal/home"
 	"github.com/nurozen/context-marmot/internal/routes"
@@ -76,6 +78,13 @@ type CreateOptions struct {
 	NoPointer bool
 	// DryRun skips all persistence and returns planned ops.
 	DryRun bool
+	// EmbeddingProvider sets the identity vault's embedding_provider
+	// ("mock" when empty). §18.4: a den vault must be creatable with a real
+	// provider without hand-editing _config.md.
+	EmbeddingProvider string
+	// EmbeddingModel sets the identity vault's embedding_model (provider
+	// default when empty).
+	EmbeddingModel string
 }
 
 // CreateResult is the outcome of Create (used by CLI JSON envelopes).
@@ -101,10 +110,10 @@ type StatusInfo struct {
 
 // DestroyResult is the outcome of Destroy.
 type DestroyResult struct {
-	DenID    string
+	DenID     string
 	Destroyed bool
-	Kept     bool
-	Ops      []string
+	Kept      bool
+	Ops       []string
 }
 
 // DensRoot returns $MARMOT_HOME/dens.
@@ -160,6 +169,14 @@ func LoadManifest(denID string) (*Manifest, string, error) {
 	return loadManifestAt(ManifestPath(denID))
 }
 
+// LoadManifestAt reads a den manifest at an explicit filesystem path. Used
+// by callers that discover _den.md relative to a served vault directory
+// (e.g. the MCP instructions builder) instead of resolving by den id under
+// $MARMOT_HOME/dens.
+func LoadManifestAt(path string) (*Manifest, string, error) {
+	return loadManifestAt(path)
+}
+
 func loadManifestAt(path string) (*Manifest, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -169,6 +186,12 @@ func loadManifestAt(path string) (*Manifest, string, error) {
 }
 
 // SaveManifest writes _den.md atomically under flock.
+//
+// NOTE: SaveManifest only serializes the WRITE. A Load→mutate→Save caller
+// still races a concurrent mutator (lost update: both load the same links,
+// each saves its own copy, one link vanishes). Mutations of an existing
+// manifest must go through UpdateManifest, which holds the flock across the
+// whole read-modify-write cycle.
 func SaveManifest(denID string, m *Manifest, body string) error {
 	if err := ValidateDenID(denID); err != nil {
 		return err
@@ -178,6 +201,32 @@ func SaveManifest(denID string, m *Manifest, body string) error {
 	}
 	path := ManifestPath(denID)
 	return flock.WithLock(path+".lock", func() error {
+		return writeManifestAtomic(path, m, body)
+	})
+}
+
+// UpdateManifest performs a read-modify-write of the den manifest with the
+// WHOLE cycle under the manifest flock (mirroring
+// warren.UpdateWorkspaceStateInMarmot), so concurrent mutators — e.g. two
+// `den link` processes appending different links — cannot drop each other's
+// writes the way Load→mutate→Save callers could. fn mutates the loaded
+// manifest in place and returns write=false to skip persisting (no-op
+// mutations leave the file untouched); any fn error aborts without writing.
+// The manifest body is preserved verbatim.
+func UpdateManifest(denID string, fn func(m *Manifest) (write bool, err error)) error {
+	if err := ValidateDenID(denID); err != nil {
+		return err
+	}
+	path := ManifestPath(denID)
+	return flock.WithLock(path+".lock", func() error {
+		m, body, err := loadManifestAt(path)
+		if err != nil {
+			return err
+		}
+		write, err := fn(m)
+		if err != nil || !write {
+			return err
+		}
 		return writeManifestAtomic(path, m, body)
 	})
 }
@@ -238,6 +287,10 @@ func Create(denID string, opts CreateOptions) (*CreateResult, error) {
 		return nil, err
 	}
 	lifetime, err := NormalizeLifetime(opts.Lifetime)
+	if err != nil {
+		return nil, err
+	}
+	embProvider, err := normalizeEmbeddingProvider(opts.EmbeddingProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +370,7 @@ func Create(denID string, opts CreateOptions) (*CreateResult, error) {
 	}
 
 	if !opts.NoVault {
-		if err := writeIdentityVault(denPath, denID); err != nil {
+		if err := writeIdentityVault(denPath, denID, embProvider, opts.EmbeddingModel); err != nil {
 			_ = os.RemoveAll(denPath)
 			return nil, err
 		}
@@ -372,23 +425,40 @@ func Create(denID string, opts CreateOptions) (*CreateResult, error) {
 	return res, nil
 }
 
-func writeIdentityVault(denPath, denID string) error {
+// normalizeEmbeddingProvider validates a den-create embedding provider
+// override. The allowlist mirrors embedding.NewEmbedder: writing an unknown
+// provider into _config.md would only break the vault at serve time.
+func normalizeEmbeddingProvider(p string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "", "mock":
+		return "mock", nil
+	case "openai":
+		return "openai", nil
+	default:
+		return "", fmt.Errorf("unknown embedding provider %q (supported: openai, mock)", p)
+	}
+}
+
+func writeIdentityVault(denPath, denID, embProvider, embModel string) error {
 	vaultDir := filepath.Join(denPath, VaultDirName)
 	if err := os.MkdirAll(filepath.Join(vaultDir, DataDirName), 0o755); err != nil {
 		return fmt.Errorf("create vault data dir: %w", err)
+	}
+	if embProvider == "" {
+		embProvider = "mock"
 	}
 	configContent := fmt.Sprintf(`---
 version: "1"
 vault_id: %s
 namespace: default
-embedding_provider: mock
-embedding_model: ""
+embedding_provider: %s
+embedding_model: %q
 token_budget: 4096
 ---
 # Den identity vault
 
 Lightweight identity vault for den %q.
-`, denID, denID)
+`, denID, embProvider, embModel, denID)
 	if err := os.WriteFile(filepath.Join(vaultDir, "_config.md"), []byte(configContent), 0o644); err != nil {
 		return fmt.Errorf("write vault _config.md: %w", err)
 	}
@@ -513,52 +583,54 @@ func RelocateProject(fromPath, toPath string) (denOrVaultID string, err error) {
 	return denOrVaultID, nil
 }
 
-// rewriteManifestProject replaces fromKey with toKey in the den's project list.
+// rewriteManifestProject replaces fromKey with toKey in the den's project
+// list, with the whole read-modify-write under the manifest flock
+// (UpdateManifest) so a concurrent link mutation is never lost.
 func rewriteManifestProject(denID, fromKey, toKey string) error {
-	m, body, err := LoadManifest(denID)
-	if err != nil {
-		return err
-	}
-	fromSlash := filepath.ToSlash(fromKey)
-	toSlash := filepath.ToSlash(toKey)
-	found := false
-	out := make([]string, 0, len(m.Projects))
-	for _, p := range m.Projects {
-		// m.Projects are OS-form after parse; compare via slash + normalize.
-		key := p
-		if nk, nerr := routes.NormalizeProjectKey(p); nerr == nil {
-			key = nk
+	return UpdateManifest(denID, func(m *Manifest) (bool, error) {
+		fromSlash := filepath.ToSlash(fromKey)
+		toSlash := filepath.ToSlash(toKey)
+		found := false
+		out := make([]string, 0, len(m.Projects))
+		for _, p := range m.Projects {
+			// m.Projects are OS-form after parse; compare via slash + normalize.
+			key := p
+			if nk, nerr := routes.NormalizeProjectKey(p); nerr == nil {
+				key = nk
+			}
+			if filepath.ToSlash(key) == fromSlash || key == fromKey || p == fromKey {
+				out = append(out, toSlash)
+				found = true
+				continue
+			}
+			out = append(out, filepath.ToSlash(key))
 		}
-		if filepath.ToSlash(key) == fromSlash || key == fromKey || p == fromKey {
+		if !found {
+			// Manifest lag / partial state: still record the new path so status
+			// and destroy see it.
 			out = append(out, toSlash)
-			found = true
-			continue
 		}
-		out = append(out, filepath.ToSlash(key))
-	}
-	if !found {
-		// Manifest lag / partial state: still record the new path so status
-		// and destroy see it.
-		out = append(out, toSlash)
-	}
-	// Dedupe.
-	seen := map[string]bool{}
-	deduped := make([]string, 0, len(out))
-	for _, p := range out {
-		if seen[p] {
-			continue
+		// Dedupe.
+		seen := map[string]bool{}
+		deduped := make([]string, 0, len(out))
+		for _, p := range out {
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			deduped = append(deduped, p)
 		}
-		seen[p] = true
-		deduped = append(deduped, p)
-	}
-	m.Projects = deduped
-	m.Version = CurrentManifestVersion
-	return SaveManifest(denID, m, body)
+		m.Projects = deduped
+		m.Version = CurrentManifestVersion
+		return true, nil
+	})
 }
 
 // Destroy removes a den directory and cleans reverse routes / pointers.
-// force is reserved for unpushed-edit refusal (P4); in P1b it only skips
-// the "den not found" soft path when true is unused beyond existence.
+// force is accepted for signature stability but unused here: the
+// unpushed-edit refusal (and edit-worktree removal) for cache-backed edit
+// links lives in the CLI layer, which owns all git execution — internal
+// packages stay exec-free.
 //
 // Cleanup removes every reverse-route entry that currently points at this
 // den (not only paths listed in the manifest), so a set-project move that
@@ -713,30 +785,54 @@ func RemovePointer(projectPath string) error {
 	return nil
 }
 
-// AdoptOptions controls minimal den adopt (P1b skeleton).
+// AdoptOptions controls den adopt (migrate an in-repo .marmot vault into a den).
 type AdoptOptions struct {
 	// From is the project path containing an in-repo .marmot/ vault.
 	From string
-	// DenID overrides the derived den id (default: vault_id or basename).
+	// DenID overrides the derived den id (default: source vault_id, else basename).
 	DenID string
 	// DryRun skips persistence.
 	DryRun bool
-	// Apply is reserved for MCP config rewrites (OQ13); ignored in skeleton.
-	Apply bool
+	// NoPointer skips writing the .marmot-vault pointer into the project root
+	// (OQ3: adopt writes the pointer by default).
+	NoPointer bool
 }
 
-// AdoptResult is a minimal adopt outcome.
+// AdoptResult is the adopt outcome.
 type AdoptResult struct {
 	DenID   string
 	DenPath string
 	From    string
-	Ops     []string
-	// Note explains skeleton limitations.
-	Note string
+	// VaultMoved is true when the in-repo .marmot moved into the den.
+	VaultMoved bool
+	// PointerWritten is true when .marmot-vault was written into the project.
+	PointerWritten bool
+	Ops            []string
+	Warnings       []string
 }
 
-// Adopt is a minimal P1b skeleton: creates a den pointing at the project
-// without moving the in-repo vault yet (full migrate is later).
+// AdoptRefusal is a structured adopt failure. The CLI maps Code straight onto
+// the schema:1 error envelope's error.code.
+type AdoptRefusal struct {
+	Code    string // "not_a_vault" | "den_vault_exists" | "move_failed"
+	Message string
+	Hint    string
+}
+
+func (e *AdoptRefusal) Error() string { return e.Message }
+
+// SourceVaultPath returns the in-repo vault an adopt of projectKey would move.
+func SourceVaultPath(projectKey string) string {
+	return filepath.Join(projectKey, ".marmot")
+}
+
+// Adopt migrates a project's in-repo .marmot/ vault into
+// $MARMOT_HOME/dens/<id>/vault/ (the layouts are byte-identical per OQ1):
+// creates the den (no fresh identity vault — the moved one IS the identity
+// vault), moves the vault (same-filesystem rename when possible, else
+// copy+verify+remove; .marmot-data/embeddings.db travels with it), registers
+// the reverse route, and writes the .marmot-vault pointer unless NoPointer.
+// MCP config rewrites live in the CLI layer (exec-free package rule).
 func Adopt(opts AdoptOptions) (*AdoptResult, error) {
 	from := opts.From
 	if from == "" {
@@ -750,37 +846,185 @@ func Adopt(opts AdoptOptions) (*AdoptResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	srcVault := SourceVaultPath(key)
+	if _, err := os.Stat(filepath.Join(srcVault, "_config.md")); err != nil {
+		return nil, &AdoptRefusal{
+			Code:    "not_a_vault",
+			Message: fmt.Sprintf("%s has no .marmot/_config.md — nothing to adopt", key),
+			Hint:    "run 'marmot init' in the project first, or create a fresh den: marmot den create <id> --project " + key,
+		}
+	}
 	denID := opts.DenID
 	if denID == "" {
-		denID = filepath.Base(key)
+		// Prefer the source vault's declared vault_id, else the project basename.
+		if cfg, cerr := config.Load(srcVault); cerr == nil && cfg.VaultID != "" && ValidateDenID(cfg.VaultID) == nil {
+			denID = cfg.VaultID
+		} else {
+			denID = filepath.Base(key)
+		}
 	}
 	if err := ValidateDenID(denID); err != nil {
 		return nil, err
 	}
+	dstVault := VaultPath(denID)
+	if _, err := os.Stat(dstVault); err == nil {
+		return nil, &AdoptRefusal{
+			Code:    "den_vault_exists",
+			Message: fmt.Sprintf("den %q already has a vault at %s; refusing to overwrite it", denID, dstVault),
+			Hint:    "pick another id with --id, or destroy the existing den first: marmot den destroy " + denID,
+		}
+	}
+
 	res := &AdoptResult{
 		DenID:   denID,
 		DenPath: Path(denID),
 		From:    key,
-		Note:    "skeleton adopt: creates den + reverse route; does not move in-repo .marmot yet",
 		Ops: []string{
 			"mkdir " + Path(denID),
 			"write " + ManifestPath(denID),
+			fmt.Sprintf("move %s -> %s", srcVault, dstVault),
 			fmt.Sprintf("routes.SetProject %s -> %s", key, denID),
 		},
+		Warnings: []string{},
+	}
+	if !opts.NoPointer {
+		res.Ops = append(res.Ops, "write "+filepath.Join(key, PointerFileName))
 	}
 	if opts.DryRun {
 		return res, nil
 	}
+
+	// Create the den shell first (atomically claims the den dir; registers the
+	// reverse route). NoVault: the moved vault IS the identity vault. The
+	// pointer is written only AFTER a successful move so a failed adopt never
+	// leaves a pointer at an empty den.
 	cr, err := Create(denID, CreateOptions{
-		Lifetime: LifetimeDurable,
+		Lifetime:  LifetimeDurable,
 		Projects:  []string{key},
-		NoVault:   false,
-		NoPointer: false,
+		NoVault:   true,
+		NoPointer: true,
 	})
 	if err != nil {
 		return nil, err
 	}
 	res.DenPath = cr.DenPath
-	res.Ops = cr.Ops
+	res.Warnings = append(res.Warnings, cr.Warnings...)
+
+	srcLeftover, err := moveVaultDir(srcVault, dstVault)
+	if err != nil {
+		// Roll back the den shell (routes included) so a retry starts clean.
+		// moveVaultDir leaves the source vault intact on every error path.
+		if _, derr := Destroy(denID, false); derr != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("rollback of den %q failed: %v", denID, derr))
+		}
+		return nil, &AdoptRefusal{
+			Code:    "move_failed",
+			Message: fmt.Sprintf("moving %s to %s failed: %v", srcVault, dstVault, err),
+			Hint:    fmt.Sprintf("the source vault at %s is intact and the den was rolled back; fix the cause (permissions/disk space) and re-run marmot den adopt", srcVault),
+		}
+	}
+	res.VaultMoved = true
+	if srcLeftover != nil {
+		// The verified copy is already promoted into the den — never roll
+		// back here (that would destroy the only complete copy).
+		res.Warnings = append(res.Warnings, fmt.Sprintf("vault adopted, but the source under %s could not be fully removed: %v — remove the leftover manually", srcVault, srcLeftover))
+	}
+
+	if !opts.NoPointer {
+		if perr := WritePointer(key, denID); perr != nil {
+			res.Warnings = append(res.Warnings, fmt.Sprintf("pointer %s: %v", key, perr))
+		} else {
+			res.PointerWritten = true
+		}
+	}
 	return res, nil
+}
+
+// moveVaultDir moves src to dst: a same-filesystem rename when possible,
+// otherwise copy+verify+remove. On every err path the source is left intact
+// (partial copies are cleaned up); the source is only deleted after the copy
+// is fully verified AND promoted to dst. A source-removal failure at that
+// point is reported via srcLeftover, NOT err — the move itself succeeded and
+// the caller must never roll back the (only complete) den copy for it.
+func moveVaultDir(src, dst string) (srcLeftover, err error) {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(src, dst); err == nil {
+		return nil, nil
+	}
+	// Cross-device (or otherwise un-renameable): copy into a temp sibling of
+	// dst, verify byte-for-byte, promote, then remove the source.
+	tmp := dst + ".adopt-tmp"
+	_ = os.RemoveAll(tmp)
+	if err := copyTree(src, tmp); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, fmt.Errorf("copy: %w", err)
+	}
+	if err := verifyTree(src, tmp); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, fmt.Errorf("copy verification: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, err
+	}
+	if err := os.RemoveAll(src); err != nil {
+		return err, nil
+	}
+	return nil, nil
+}
+
+// copyTree copies the directory tree at src to dst, preserving file modes.
+func copyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm()|0o700)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s: unsupported non-regular file", path)
+		}
+		data, derr := os.ReadFile(path)
+		if derr != nil {
+			return derr
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+}
+
+// verifyTree checks that every regular file under src exists under dst with
+// identical bytes (the byte-identical guarantee behind copy+verify+remove).
+func verifyTree(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !info.Mode().IsRegular() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		want, werr := os.ReadFile(path)
+		if werr != nil {
+			return werr
+		}
+		got, gerr := os.ReadFile(filepath.Join(dst, rel))
+		if gerr != nil {
+			return gerr
+		}
+		if !bytes.Equal(want, got) {
+			return fmt.Errorf("%s differs after copy", rel)
+		}
+		return nil
+	})
 }

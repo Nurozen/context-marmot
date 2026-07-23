@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -266,6 +267,270 @@ func TestWarrenProposeRefusals(t *testing.T) {
 	}
 }
 
+// proposeJSONEnvelope mirrors the schema:1 propose contract for decoding in
+// tests (see testdata/contracts/warren_propose.v1.json).
+type proposeJSONEnvelope struct {
+	Schema           int      `json:"schema"`
+	WarrenID         string   `json:"warren_id"`
+	ProjectID        string   `json:"project_id"`
+	Branch           string   `json:"branch"`
+	Commit           string   `json:"commit"`
+	Committed        bool     `json:"committed"`
+	NothingToPropose bool     `json:"nothing_to_propose"`
+	PushCommand      string   `json:"push_command"`
+	Warnings         []string `json:"warnings"`
+	Error            *struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Hint    string `json:"hint"`
+	} `json:"error"`
+}
+
+func decodeProposeEnvelope(t *testing.T, stdout string) proposeJSONEnvelope {
+	t.Helper()
+	var env proposeJSONEnvelope
+	if err := json.Unmarshal([]byte(stdout), &env); err != nil {
+		t.Fatalf("stdout is not a JSON envelope: %v\nstdout: %q", err, stdout)
+	}
+	if env.Schema != 1 {
+		t.Fatalf("schema = %d, want 1\nstdout: %q", env.Schema, stdout)
+	}
+	return env
+}
+
+// TestWarrenProposeJSONSuccess (--json): a committed proposal emits the full
+// schema:1 success envelope on stdout with a real sha and push command, and
+// a subsequent clean run is nothing_to_propose SUCCESS (exit 0), never an
+// error — stave treats propose failure as fatal.
+func TestWarrenProposeJSONSuccess(t *testing.T) {
+	gitTestEnv(t)
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	gitInitCommit(t, warrenRoot)
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatal("register failed")
+	}
+	if code := run([]string{"warren", "edit", "--dir", marmotDir, "--warren", "wp", "project-a"}); code != 0 {
+		t.Fatal("edit failed")
+	}
+	if err := os.WriteFile(filepath.Join(warrenRoot, "projects", "project-a", ".marmot", "notes.md"), []byte("proposed edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json"})
+	if code != 0 {
+		t.Fatalf("propose --json = code %d stdout %q", code, stdout)
+	}
+	env := decodeProposeEnvelope(t, stdout)
+	if env.WarrenID != "wp" || env.ProjectID != "project-a" {
+		t.Fatalf("envelope ids = %q/%q, want wp/project-a", env.WarrenID, env.ProjectID)
+	}
+	if !env.Committed || env.NothingToPropose {
+		t.Fatalf("envelope = %+v, want committed=true nothing_to_propose=false", env)
+	}
+	if !strings.HasPrefix(env.Branch, "marmot/propose/project-a-") {
+		t.Fatalf("branch = %q", env.Branch)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(env.Commit) {
+		t.Fatalf("commit = %q, want 40-hex sha", env.Commit)
+	}
+	if head := gitRun(t, warrenRoot, "rev-parse", "refs/heads/"+env.Branch); head != env.Commit {
+		t.Fatalf("commit = %q, branch tip = %q", env.Commit, head)
+	}
+	wantPush := "git -C " + warrenRoot + " push -u origin " + env.Branch
+	if env.PushCommand != wantPush {
+		t.Fatalf("push_command = %q, want %q", env.PushCommand, wantPush)
+	}
+	if env.Warnings == nil {
+		t.Fatal("warnings must be an empty array, not null")
+	}
+	// stdout must be envelope-only: no human text alongside the JSON.
+	if strings.Contains(stdout, "Created branch") || strings.Contains(stdout, "marmot never pushes") {
+		t.Fatalf("human text leaked into --json stdout: %q", stdout)
+	}
+
+	// Clean tree: nothing to propose is SUCCESS with the documented shape.
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json", "project-a"})
+	if code != 0 {
+		t.Fatalf("clean propose --json = code %d stdout %q, want exit 0", code, stdout)
+	}
+	env = decodeProposeEnvelope(t, stdout)
+	if env.Committed || !env.NothingToPropose {
+		t.Fatalf("clean envelope = %+v, want committed=false nothing_to_propose=true", env)
+	}
+	if env.Branch != "" || env.Commit != "" || env.PushCommand != "" {
+		t.Fatalf("clean envelope must have empty branch/commit/push_command: %+v", env)
+	}
+	if env.WarrenID != "wp" || env.ProjectID != "project-a" || env.Warnings == nil {
+		t.Fatalf("clean envelope = %+v", env)
+	}
+}
+
+// TestWarrenProposeJSONErrors (--json): refusals emit schema:1 error
+// envelopes on stdout with stable codes and exit 1.
+func TestWarrenProposeJSONErrors(t *testing.T) {
+	gitTestEnv(t)
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	gitInitCommit(t, warrenRoot)
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatal("register failed")
+	}
+
+	// No editable projects and no explicit argument.
+	stdout, _, code := captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json"})
+	if code != 1 {
+		t.Fatalf("propose --json without editable = code %d stdout %q", code, stdout)
+	}
+	env := decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "invalid_args" || env.Error.Message == "" {
+		t.Fatalf("error envelope = %+v", env.Error)
+	}
+
+	// Detached HEAD.
+	gitRun(t, warrenRoot, "checkout", "--detach")
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json", "project-a"})
+	if code != 1 {
+		t.Fatalf("detached propose --json = code %d stdout %q", code, stdout)
+	}
+	env = decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "detached_head" {
+		t.Fatalf("error envelope = %+v, want detached_head", env.Error)
+	}
+
+	// Unreachable warren: the registered checkout path is gone.
+	if err := os.RemoveAll(warrenRoot); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json", "project-a"})
+	if code != 1 {
+		t.Fatalf("unreachable propose --json = code %d stdout %q", code, stdout)
+	}
+	env = decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "warren_unreachable" || env.Error.Message == "" {
+		t.Fatalf("error envelope = %+v, want warren_unreachable", env.Error)
+	}
+}
+
+// TestWarrenProposeJSONErrorsMore (--json): the flag-parse failure path
+// (proposeJSONRequested), a missing workspace, and a non-git warren checkout
+// all emit schema:1 error envelopes with their documented codes.
+func TestWarrenProposeJSONErrorsMore(t *testing.T) {
+	gitTestEnv(t)
+
+	// Flag-parse failure with --json in the raw args: envelope, not bare exit.
+	stdout, _, code := captureRunBoth(t, []string{"warren", "propose", "--bogus", "--json"})
+	if code != 1 {
+		t.Fatalf("parse-fail propose --json = code %d stdout %q", code, stdout)
+	}
+	env := decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "invalid_args" {
+		t.Fatalf("error envelope = %+v, want invalid_args", env.Error)
+	}
+
+	// No workspace at --dir.
+	missing := filepath.Join(t.TempDir(), "nowhere", ".marmot")
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", missing, "--json"})
+	if code != 1 {
+		t.Fatalf("no-workspace propose --json = code %d stdout %q", code, stdout)
+	}
+	env = decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "workspace_not_found" {
+		t.Fatalf("error envelope = %+v, want workspace_not_found", env.Error)
+	}
+
+	// Registered warren checkout that is not a git repo.
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatal("register failed")
+	}
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json", "project-a"})
+	if code != 1 {
+		t.Fatalf("non-git propose --json = code %d stdout %q", code, stdout)
+	}
+	env = decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "propose_failed" || !strings.Contains(env.Error.Message, "not a git checkout") {
+		t.Fatalf("error envelope = %+v, want propose_failed not-a-git-checkout", env.Error)
+	}
+}
+
+// TestWarrenProposeExcludesEmbeddingsDB (OQ7): embeddings DB sidecars under
+// .marmot-data never enter a proposal — a DB-only dirty tree is
+// nothing-to-propose (both modes), and a mixed tree commits only the real
+// edits while the sidecars stay dirty in the worktree.
+func TestWarrenProposeExcludesEmbeddingsDB(t *testing.T) {
+	gitTestEnv(t)
+	warrenRoot := testWarrenRoot(t, "wp", "project-a")
+	dataDir := filepath.Join(warrenRoot, "projects", "project-a", ".marmot", ".marmot-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(dataDir, "embeddings.db")
+	if err := os.WriteFile(dbFile, []byte("db v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitInitCommit(t, warrenRoot) // DB tracked at v1
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatal("register failed")
+	}
+	if code := run([]string{"warren", "edit", "--dir", marmotDir, "--warren", "wp", "project-a"}); code != 0 {
+		t.Fatal("edit failed")
+	}
+
+	// Dirty tracked DB plus an untracked WAL sidecar: nothing to propose.
+	if err := os.WriteFile(dbFile, []byte("db v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbFile+"-wal", []byte("wal"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, code := captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json"})
+	if code != 0 {
+		t.Fatalf("DB-only propose --json = code %d stdout %q, want success", code, stdout)
+	}
+	env := decodeProposeEnvelope(t, stdout)
+	if env.Committed || !env.NothingToPropose {
+		t.Fatalf("DB-only envelope = %+v, want nothing_to_propose", env)
+	}
+	// Same in human mode.
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp"})
+	if code != 0 || !strings.Contains(stdout, "nothing to propose") {
+		t.Fatalf("DB-only human propose = code %d stdout %q, want nothing-to-propose", code, stdout)
+	}
+
+	// Mixed: a real edit alongside the dirty DB commits only the real edit.
+	if err := os.WriteFile(filepath.Join(warrenRoot, "projects", "project-a", ".marmot", "notes.md"), []byte("real edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json"})
+	if code != 0 {
+		t.Fatalf("mixed propose --json = code %d stdout %q", code, stdout)
+	}
+	env = decodeProposeEnvelope(t, stdout)
+	if !env.Committed {
+		t.Fatalf("mixed envelope = %+v, want committed", env)
+	}
+	for _, file := range strings.Split(gitRun(t, warrenRoot, "diff", "--name-only", "main", env.Branch), "\n") {
+		if strings.Contains(file, ".marmot-data") {
+			t.Fatalf("proposal swept in DB sidecar %q", file)
+		}
+	}
+	// The sidecars remain dirty in the worktree, untouched.
+	porcelain := gitRun(t, warrenRoot, "status", "--porcelain")
+	if !strings.Contains(porcelain, "embeddings.db") {
+		t.Fatalf("status = %q, want DB sidecars still dirty", porcelain)
+	}
+	if data, err := os.ReadFile(dbFile); err != nil || string(data) != "db v2" {
+		t.Fatalf("DB file modified: %q err=%v", data, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // D4 — set-readonly CLI + edit refusal
 // ---------------------------------------------------------------------------
@@ -504,5 +769,120 @@ func TestWarrenDoctorSummaryLine(t *testing.T) {
 	}
 	if !regexp.MustCompile(`doctor: [1-9]\d* error\(s\), \d+ warning\(s\), \d+ info\n`).MatchString(stderr) {
 		t.Fatalf("doctor report missing severity summary tail: %q", stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// W2 — propose push_command quoting, --json= forms, positional arity
+// ---------------------------------------------------------------------------
+
+// TestWarrenProposeShellQuoteArg: safe strings pass through untouched (so
+// existing push_command output never changes) and anything else gets POSIX
+// single-quoting with the '\” escape.
+func TestWarrenProposeShellQuoteArg(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/srv/checkouts/acme-warren", "/srv/checkouts/acme-warren"},
+		{"rel/path_1.2-x:y,z@%+=", "rel/path_1.2-x:y,z@%+="},
+		{"/tmp/warren dir", "'/tmp/warren dir'"},
+		{"/tmp/o'brien", `'/tmp/o'\''brien'`},
+		{"a;rm -rf /", "'a;rm -rf /'"},
+		{"tab\there", "'tab\there'"},
+		{"", "''"},
+	}
+	for _, tc := range cases {
+		if got := shellQuoteArg(tc.in); got != tc.want {
+			t.Errorf("shellQuoteArg(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestWarrenProposePushCommandQuoted: a checkout path with a space is
+// shell-quoted in both the --json envelope and the human publish line.
+func TestWarrenProposePushCommandQuoted(t *testing.T) {
+	gitTestEnv(t)
+	warrenRoot := filepath.Join(t.TempDir(), "warren dir")
+	if err := os.Rename(testWarrenRoot(t, "wp", "project-a"), warrenRoot); err != nil {
+		t.Fatal(err)
+	}
+	gitInitCommit(t, warrenRoot)
+	workspace := t.TempDir()
+	marmotDir := filepath.Join(workspace, ".marmot")
+	if code := run([]string{"warren", "register", "--dir", marmotDir, "wp", warrenRoot}); code != 0 {
+		t.Fatal("register failed")
+	}
+	if code := run([]string{"warren", "edit", "--dir", marmotDir, "--warren", "wp", "project-a"}); code != 0 {
+		t.Fatal("edit failed")
+	}
+	if err := os.WriteFile(filepath.Join(warrenRoot, "projects", "project-a", ".marmot", "notes.md"), []byte("edit one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, code := captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp", "--json"})
+	if code != 0 {
+		t.Fatalf("propose --json = code %d stdout %q", code, stdout)
+	}
+	env := decodeProposeEnvelope(t, stdout)
+	wantPush := "git -C '" + warrenRoot + "' push -u origin " + env.Branch
+	if env.PushCommand != wantPush {
+		t.Fatalf("push_command = %q, want %q", env.PushCommand, wantPush)
+	}
+
+	// Human mode: same quoting on the publish line. Drop the JSON run's branch
+	// first — both runs can land in the same timestamp second, and propose
+	// refuses an existing branch name.
+	gitRun(t, warrenRoot, "branch", "-D", env.Branch)
+	if err := os.WriteFile(filepath.Join(warrenRoot, "projects", "project-a", ".marmot", "notes.md"), []byte("edit two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, code = captureRunBoth(t, []string{"warren", "propose", "--dir", marmotDir, "--warren", "wp"})
+	if code != 0 || !strings.Contains(stdout, "git -C '"+warrenRoot+"' push -u origin ") {
+		t.Fatalf("human propose = code %d stdout %q, want quoted push command", code, stdout)
+	}
+}
+
+// TestProposeJSONRequestedForms: the raw-arg scan honors every boolean spelling
+// flag itself accepts (--json=TRUE, --json=1, ...), ignores false/unparseable
+// values, and never reads past a bare "--" terminator.
+func TestProposeJSONRequestedForms(t *testing.T) {
+	cases := []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"--json"}, true},
+		{[]string{"-json"}, true},
+		{[]string{"--json=true"}, true},
+		{[]string{"--json=TRUE"}, true},
+		{[]string{"--json=1"}, true},
+		{[]string{"-json=T"}, true},
+		{[]string{"--json=false"}, false},
+		{[]string{"--json=0"}, false},
+		{[]string{"--json=banana"}, false},
+		{[]string{"--jsonx"}, false},
+		{[]string{"--", "--json"}, false},
+		{[]string{"--bogus", "--json"}, true},
+		{[]string{}, false},
+	}
+	for _, tc := range cases {
+		if got := proposeJSONRequested(tc.args); got != tc.want {
+			t.Errorf("proposeJSONRequested(%v) = %t, want %t", tc.args, got, tc.want)
+		}
+	}
+}
+
+// TestWarrenProposeExtraPositionals: propose takes at most one positional
+// (the project ID); extras are refused before any state or git access, in
+// both human and JSON modes.
+func TestWarrenProposeExtraPositionals(t *testing.T) {
+	_, stderr, code := captureRunBoth(t, []string{"warren", "propose", "project-a", "project-b"})
+	if code != 1 || !strings.Contains(stderr, "usage: marmot warren propose") {
+		t.Fatalf("human extra positionals = code %d stderr %q, want usage refusal", code, stderr)
+	}
+	stdout, _, code := captureRunBoth(t, []string{"warren", "propose", "--json", "project-a", "project-b"})
+	if code != 1 {
+		t.Fatalf("json extra positionals = code %d stdout %q", code, stdout)
+	}
+	env := decodeProposeEnvelope(t, stdout)
+	if env.Error == nil || env.Error.Code != "invalid_args" {
+		t.Fatalf("error envelope = %+v, want invalid_args", env.Error)
 	}
 }

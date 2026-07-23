@@ -93,8 +93,8 @@ func TestContextWriteWarrenMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleContextWrite: %v", err)
 	}
-	if !res.IsError || !strings.Contains(resultText(t, res), "marmot warren edit") {
-		t.Fatalf("read-only @-write = %s, want rejection naming 'marmot warren edit'", resultText(t, res))
+	if text := resultText(t, res); !res.IsError || !strings.Contains(text, "marmot den link") || !strings.Contains(text, "--edit wp/proj-a") {
+		t.Fatalf("read-only @-write = %s, want mode-naming rejection with the den verb 'marmot den link ... --edit wp/proj-a'", resultText(t, res))
 	}
 
 	// Unmounted vault.

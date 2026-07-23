@@ -5,6 +5,7 @@ package api
 
 import (
 	"github.com/nurozen/context-marmot/internal/curator"
+	mcpserver "github.com/nurozen/context-marmot/internal/mcp"
 	"github.com/nurozen/context-marmot/internal/warren"
 )
 
@@ -92,6 +93,11 @@ type WarrensResponse struct {
 	// to fold @<local-vault>/… identity nodes back onto their live local
 	// counterparts in aggregate views.
 	LocalVaultID string `json:"local_vault_id,omitempty"`
+	// DenLinks lists the served den's _den.md links with their resolution
+	// state (additive over the original payload; always an array, empty for a
+	// non-den vault) so the UI can show federation topology that has no
+	// warren registration behind it.
+	DenLinks []mcpserver.DenLinkStatus `json:"den_links"`
 }
 
 // WarrenEntry is a registered warren's workspace state plus its computed

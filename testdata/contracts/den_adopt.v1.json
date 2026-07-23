@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "den_id": "myproject",
+  "den_path": "/home/user/.marmot/dens/myproject",
+  "vault_id": "myproject",
+  "routes": {
+    "project_path": "/home/user/src/myproject"
+  },
+  "vault_moved": true,
+  "pointer_written": true,
+  "configs_rewritten": [
+    "/home/user/src/myproject/.mcp.json",
+    "/home/user/src/myproject/.cursor/mcp.json"
+  ],
+  "links": [],
+  "warnings": []
+}

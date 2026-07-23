@@ -24,6 +24,10 @@ func NewServer(engine *Engine) *Server {
 		"context-marmot",
 		"0.1.0",
 		server.WithToolCapabilities(false),
+		// Topology snapshot at construction (decided OQ11): identity vault,
+		// den links, warren mounts, and the write policy. No live refresh —
+		// freshness that matters also flows through tool results.
+		server.WithInstructions(buildInstructions(engine)),
 	)
 	s.registerTools()
 	return s

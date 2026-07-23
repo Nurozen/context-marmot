@@ -115,12 +115,37 @@ func (s *Store) IDFromPath(filePath string) (string, error) {
 }
 
 // LoadNode reads a node markdown file from the given path and parses it.
+// If the frontmatter has no `id`, the ID is derived in-memory from the
+// vault-relative file path (see deriveID); the file is never rewritten.
 func (s *Store) LoadNode(path string) (*Node, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("load node: %w", err)
 	}
-	return ParseNode(data, path)
+	n, err := ParseNode(data, path)
+	if err != nil {
+		return nil, err
+	}
+	if n.ID == "" {
+		n.ID = s.deriveID(path)
+	}
+	return n, nil
+}
+
+// deriveID computes the implicit node ID for a file whose frontmatter lacks
+// an explicit `id`: the vault-relative path, slash-normalised, with the ".md"
+// extension stripped. This round-trips with NodePath, so
+// LoadNode(NodePath(derivedID)) yields the same ID. Returns "" if the path is
+// outside the store base or the derived ID is not a valid node ID.
+func (s *Store) deriveID(path string) string {
+	id, err := s.IDFromPath(path)
+	if err != nil {
+		return ""
+	}
+	if ValidateNodeID(id) != nil {
+		return ""
+	}
+	return id
 }
 
 // SaveNode writes a node to disk using atomic write (temp file + rename).
@@ -256,6 +281,12 @@ func (s *Store) ListNodes() ([]NodeMeta, error) {
 		meta, err := ParseNodeMeta(data, path)
 		if err != nil {
 			return nil // skip malformed files
+		}
+
+		// Hand-written nodes may omit `id:` frontmatter; derive it from the
+		// vault-relative path so such nodes never surface with an empty ID.
+		if meta.ID == "" {
+			meta.ID = s.deriveID(path)
 		}
 
 		meta.FilePath = path

@@ -1099,7 +1099,7 @@ func TestWarrenLegacyFlagSpellingsRejected(t *testing.T) {
 
 // TestWarrenUsageShowsOnlyCanonicalSpellings (U2): usage lines must never
 // advertise a deprecated spelling (--root, --aliases, or --id outside
-// warren init, where --id is the canonical form).
+// warren init and warren add, where --id is the canonical form).
 func TestWarrenUsageShowsOnlyCanonicalSpellings(t *testing.T) {
 	data, err := os.ReadFile("warren.go")
 	if err != nil {
@@ -1112,8 +1112,8 @@ func TestWarrenUsageShowsOnlyCanonicalSpellings(t *testing.T) {
 		if strings.Contains(line, "--root") || strings.Contains(line, "--aliases") {
 			t.Errorf("warren.go:%d usage line advertises a deprecated spelling: %s", i+1, strings.TrimSpace(line))
 		}
-		if strings.Contains(line, "--id") && !strings.Contains(line, "warren init") {
-			t.Errorf("warren.go:%d usage line advertises --id outside warren init: %s", i+1, strings.TrimSpace(line))
+		if strings.Contains(line, "--id") && !strings.Contains(line, "warren init") && !strings.Contains(line, "warren add") {
+			t.Errorf("warren.go:%d usage line advertises --id outside warren init/add: %s", i+1, strings.TrimSpace(line))
 		}
 	}
 }

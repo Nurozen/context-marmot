@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -188,6 +189,59 @@ func TestResolveEmbeddingStoreDoesNotMutateRemote(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(emptyVault, ".marmot-data", "embeddings.db")); !os.IsNotExist(err) {
 		t.Fatalf("resolve created a remote embeddings.db (stat err=%v)", err)
+	}
+}
+
+// TestRefreshDropsEmbeddingStore (F7): Refresh closes the cached embedding
+// store and the next resolve reopens the current DB, so a re-pinned checkout's
+// new rows are visible rather than served from a stale handle.
+func TestRefreshDropsEmbeddingStore(t *testing.T) {
+	vaultDir := setupRemoteVault(t, "refresh-vault")
+	seedRemoteEmbeddingDB(t, vaultDir)
+	bridges := []*Bridge{
+		{SourceVaultID: "local", TargetVaultID: "refresh-vault", SourceVaultPath: "/tmp/local", TargetVaultPath: vaultDir},
+	}
+	r := NewVaultRegistry("local", "/tmp/local", bridges, nil)
+	defer r.Close()
+
+	store, err := r.ResolveEmbeddingStore("refresh-vault")
+	if err != nil {
+		t.Fatalf("ResolveEmbeddingStore: %v", err)
+	}
+
+	if err := r.Refresh("refresh-vault"); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// The old handle is closed by Refresh's swap-then-close.
+	emb := embedding.NewMockEmbedder("mock-test")
+	vecA, _ := emb.Embed("A concept.")
+	if _, err := store.SearchActive(vecA, 1, emb.Model()); !errors.Is(err, embedding.ErrStoreClosed) {
+		t.Errorf("Refresh did not close the cached store: err = %v", err)
+	}
+
+	// A row added on disk (as a re-pin would) is visible after re-resolve.
+	upsertRemoteEmbeddingRow(t, vaultDir, "concept-b", "Another concept.")
+	store2, err := r.ResolveEmbeddingStore("refresh-vault")
+	if err != nil {
+		t.Fatalf("ResolveEmbeddingStore after Refresh: %v", err)
+	}
+	if store2 == store {
+		t.Error("Refresh reused the stale embedding store handle")
+	}
+	vecB, _ := emb.Embed("Another concept.")
+	res, err := store2.SearchActive(vecB, 5, emb.Model())
+	if err != nil {
+		t.Fatalf("reopened store search: %v", err)
+	}
+	found := false
+	for _, sr := range res {
+		if sr.NodeID == "concept-b" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("reopened store did not see the row added after Refresh")
 	}
 }
 

@@ -260,6 +260,19 @@ func StartGraphWatcherNotify(dir string, eng *mcp.Engine, onReload func()) (stop
 	// signal that warren wiring — not just the graph — must reload.
 	warrenStatePath := filepath.Join(dir, "_warren.md")
 
+	// A served den's _den.md governs its federated links and bridges. For a
+	// links-only den it sits inside the watched root; for a den identity vault
+	// (…/dens/<id>/vault) it sits one level up, outside the root — so watch its
+	// directory explicitly. Either way an edit must reload den wiring, not just
+	// the graph (finding F17: without this, _den.md edits needed a serve
+	// restart while _warren.md edits reloaded live). "" when not den-shaped.
+	denStatePath := eng.DenManifestPath()
+	if denStatePath != "" {
+		if denDir := filepath.Dir(denStatePath); denDir != dir {
+			_ = fw.Add(denDir) // best-effort; a missing dir just means no live den reload
+		}
+	}
+
 	stopCh := make(chan struct{})
 	go func() {
 		const debounce = 1 * time.Second
@@ -304,9 +317,11 @@ func StartGraphWatcherNotify(dir string, eng *mcp.Engine, onReload func()) (stop
 				if !strings.HasSuffix(event.Name, ".md") {
 					continue
 				}
-				// Warren mount state changed — reload warren wiring, not
-				// just the graph (see warrenStatePath above).
-				if event.Name == warrenStatePath {
+				// Warren mount state or den wiring changed — reload warren+den
+				// wiring, not just the graph (see warrenStatePath/denStatePath
+				// above). Both funnel through the same warrenPending flag: the
+				// reload path below refreshes warren and den state together.
+				if event.Name == warrenStatePath || (denStatePath != "" && event.Name == denStatePath) {
 					warrenPending = true
 					schedule()
 					continue
@@ -329,10 +344,10 @@ func StartGraphWatcherNotify(dir string, eng *mcp.Engine, onReload func()) (stop
 				pending = false
 				if warrenPending {
 					warrenPending = false
-					if err := eng.ReloadWarrenState(); err != nil {
-						fmt.Fprintf(os.Stderr, "daemon: warren state reload failed: %v\n", err)
+					if err := eng.ReloadWarrenAndDenState(); err != nil {
+						fmt.Fprintf(os.Stderr, "daemon: warren/den state reload failed: %v\n", err)
 					} else {
-						fmt.Fprintln(os.Stderr, "daemon: warren state reloaded")
+						fmt.Fprintln(os.Stderr, "daemon: warren/den state reloaded")
 					}
 				}
 				if reloadGraph(dir, eng) && onReload != nil {

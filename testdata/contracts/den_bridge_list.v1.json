@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "den_id": "demo",
+  "bridges": [
+    {
+      "from": "acme-web",
+      "to": "acme-api",
+      "relations": [
+        "calls",
+        "reads",
+        "references"
+      ]
+    },
+    {
+      "from": "acme-web",
+      "to": "shared-protos",
+      "relations": [
+        "reads",
+        "cross_project"
+      ]
+    }
+  ]
+}

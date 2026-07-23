@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "warren_id": "product-platform",
+  "url": "https://example.com/warrens/product-platform.git",
+  "cache_path": "/home/user/.marmot/warren-cache/product-platform.git",
+  "checkout_path": "/home/user/.marmot/warren-cache/checkouts/product-platform",
+  "default_branch": "main",
+  "pinned_commit": "0123456789abcdef0123456789abcdef01234567",
+  "reembedded": 3,
+  "warnings": []
+}

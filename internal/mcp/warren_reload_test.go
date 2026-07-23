@@ -615,3 +615,54 @@ func TestWarrenRuntimeBridgesWarnsOnUnreadableManifest(t *testing.T) {
 		t.Fatalf("expected bridge-policy warning on stderr, got %q", out)
 	}
 }
+
+// TestReloadWarrenAndDenStatePicksUpDenEdits proves finding F17: after editing
+// a served den's _den.md, the combined reload path (what the daemon watcher and
+// API refresh endpoints now invoke) re-resolves den links and folds the new
+// remote vault into the registry — no engine rebuild. Bare ReloadWarrenState
+// leaves den links stale; ReloadWarrenAndDenState does not.
+func TestReloadWarrenAndDenStatePicksUpDenEdits(t *testing.T) {
+	// Start den-shaped but link-less: no den vaults resolved yet.
+	eng, home := denLinkEngine(t, "mock-test", "")
+	seedRemoteVault(t, filepath.Join(home, "dens", "lib", "vault"), "lib-vault", "lib/core", "Library core API", "mock-test")
+
+	if err := eng.LoadDenLinks(); err != nil {
+		t.Fatalf("initial LoadDenLinks: %v", err)
+	}
+	if knownVaults(eng)["lib-vault"] {
+		t.Fatalf("lib-vault registered before the link exists: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+
+	// DenManifestPath must point at the _den.md the watcher watches (one level
+	// up from the served identity vault).
+	wantManifest := filepath.Join(home, "dens", "acme", "_den.md")
+	if got := eng.DenManifestPath(); got != wantManifest {
+		t.Fatalf("DenManifestPath = %q, want %q", got, wantManifest)
+	}
+
+	// Edit _den.md to add a live link to the remote vault, as a user would.
+	manifest := "---\nden_id: acme\nversion: 1\nlifetime: durable\n" +
+		"links:\n  - target: lib\n    mode: live\n---\n"
+	if err := os.WriteFile(wantManifest, []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bare warren reload must NOT pick up the _den.md edit (the F17 bug).
+	if err := eng.ReloadWarrenState(); err != nil {
+		t.Fatalf("ReloadWarrenState: %v", err)
+	}
+	if knownVaults(eng)["lib-vault"] {
+		t.Fatalf("ReloadWarrenState should not re-resolve den links, but lib-vault appeared: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+
+	// The combined reload path (watcher + API refresh) DOES pick it up live.
+	if err := eng.ReloadWarrenAndDenState(); err != nil {
+		t.Fatalf("ReloadWarrenAndDenState: %v", err)
+	}
+	if !knownVaults(eng)["lib-vault"] {
+		t.Fatalf("den link edit not reflected after reload: %v", eng.VaultRegistry.KnownVaultIDs())
+	}
+	if text := queryText(t, eng, "Library core API"); !strings.Contains(text, "@lib-vault/lib/core") {
+		t.Fatalf("reloaded den link missing from query results:\n%s", text)
+	}
+}

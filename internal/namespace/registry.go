@@ -45,18 +45,22 @@ type RemoteVault struct {
 
 // VaultRegistry manages lazy loading and caching of remote vault graphs
 // for cross-vault bridge traversal. Resolution priority:
-//  1. Global routing table (~/.marmot/routes.yml)
-//  2. Bridge manifest paths (fallback)
+//  1. Den link vaults (explicit _den.md links — see SetDenVaults)
+//  2. Global routing table (~/.marmot/routes.yml)
+//  3. Bridge manifest paths (fallback)
 //
-// Cached graphs expire after graphTTL (lazily: the next access reloads);
-// cached embedding stores never expire because every search is a live SQLite
-// read against the remote DB.
+// Cached graphs expire after graphTTL (lazily: the next access reloads). A
+// cached embedding store is dropped alongside the graph on that same reload
+// (and on Refresh) so a re-pinned checkout's new embeddings.db is picked up;
+// the next ResolveEmbeddingStore reopens the current DB. Between reloads a
+// search is a live SQLite read against the cached handle.
 type VaultRegistry struct {
 	mu           sync.RWMutex
 	localVaultID string
 	localDir     string
 	vaults       map[string]*RemoteVault // vault_id -> loaded vault
 	pathToID     map[string]string       // vault_path -> vault_id (from bridges)
+	denVaults    map[string]string       // vault_id -> vault dir (den links; survives Rebuild)
 	routingTable *routes.RoutingTable    // global routing table; may be nil
 	graphTTL     time.Duration           // 0 = cached graphs never expire
 }
@@ -117,9 +121,43 @@ func (r *VaultRegistry) seedBridgePathsLocked(bridges []*Bridge) {
 	}
 }
 
-// dirForLocked resolves a vault ID to its directory: routing table first,
-// bridge manifest paths second. Empty when unknown. Caller must hold a lock.
+// SetDenVaults replaces the registry's den-link vault set (vault_id -> vault
+// dir), the highest-precedence resolution source: an explicit den link WINS
+// over a routing-table entry or bridge path for the same id (the den author
+// pinned that vault deliberately; routes are ambient machine state). The set
+// survives Rebuild — den links are engine-construction state, not warren
+// reload state. Cached vaults whose resolved directory changes are evicted
+// swap-then-close, mirroring Rebuild. The local vault id is never accepted
+// (a den link to self must not shadow the live vault with a read-only copy).
+func (r *VaultRegistry) SetDenVaults(vaults map[string]string) {
+	var toClose []*RemoteVault
+	r.mu.Lock()
+	r.denVaults = make(map[string]string, len(vaults))
+	for id, dir := range vaults {
+		if id == "" || dir == "" || id == r.localVaultID {
+			continue
+		}
+		r.denVaults[id] = dir
+	}
+	for id, rv := range r.vaults {
+		if r.dirForLocked(id) != rv.VaultDir { // moved or dropped
+			toClose = append(toClose, rv)
+			delete(r.vaults, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, rv := range toClose {
+		closeRemoteVault(rv)
+	}
+}
+
+// dirForLocked resolves a vault ID to its directory: den link vaults first,
+// routing table second, bridge manifest paths last. Empty when unknown.
+// Caller must hold a lock.
 func (r *VaultRegistry) dirForLocked(vaultID string) string {
+	if p, ok := r.denVaults[vaultID]; ok {
+		return p
+	}
 	if r.routingTable != nil {
 		if p, ok := r.routingTable.Get(vaultID); ok {
 			return p
@@ -200,36 +238,48 @@ func (r *VaultRegistry) ResolveGraph(vaultID string) (*graph.Graph, error) {
 
 	// Slow path: write lock, load (or TTL-reload) vault.
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// Double-check after acquiring write lock.
 	if rv, ok := r.vaults[vaultID]; ok && !r.expiredLocked(rv) {
+		r.mu.Unlock()
 		return rv.Graph, nil
 	}
 
 	vaultDir := r.dirForLocked(vaultID)
 	if vaultDir == "" {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("unknown vault %q: not in routing table or bridge manifests", vaultID)
 	}
 
-	return r.loadVaultLocked(vaultID, vaultDir)
+	g, evicted, err := r.loadVaultLocked(vaultID, vaultDir)
+	r.mu.Unlock()
+	if evicted != nil {
+		closeRemoteVault(evicted)
+	}
+	return g, err
 }
 
-// loadVaultLocked loads a remote vault (caller must hold write lock). When
-// an entry for the same vault dir already exists (a TTL reload), its open
-// embedding store and shared read lock are carried over — TTL expiry only
-// refreshes the graph, it never closes a store a search may hold. Old graphs
-// are pointer-held by in-flight traversals and simply GC'd.
-func (r *VaultRegistry) loadVaultLocked(vaultID, vaultDir string) (*graph.Graph, error) {
+// loadVaultLocked loads (or TTL-reloads) a remote vault (caller must hold the
+// write lock). It always builds a fresh entry with no embedding store: any
+// store previously cached for this vault is returned as the evicted vault so
+// the caller can close it AFTER releasing the lock (swap-then-close), and the
+// next ResolveEmbeddingStore reopens the current DB. Dropping the store on
+// reload is deliberate — after `marmot warren sync` re-pins a checkout and
+// rewrites <checkout>/.marmot-data/embeddings.db, a carried-over handle would
+// keep reading the stale (often unlinked) file forever. A search racing the
+// swap keeps its own pointer and fails loudly with embedding.ErrStoreClosed
+// once the handle closes, which is the accepted design. Old graphs are
+// pointer-held by in-flight traversals and simply GC'd.
+func (r *VaultRegistry) loadVaultLocked(vaultID, vaultDir string) (*graph.Graph, *RemoteVault, error) {
 	cfg, err := config.Load(vaultDir)
 	if err != nil {
-		return nil, fmt.Errorf("load config for vault %q at %s: %w", vaultID, vaultDir, err)
+		return nil, nil, fmt.Errorf("load config for vault %q at %s: %w", vaultID, vaultDir, err)
 	}
 
 	store := node.NewStore(vaultDir)
 	g, err := graph.LoadGraph(store)
 	if err != nil {
-		return nil, fmt.Errorf("load graph for vault %q at %s: %w", vaultID, vaultDir, err)
+		return nil, nil, fmt.Errorf("load graph for vault %q at %s: %w", vaultID, vaultDir, err)
 	}
 
 	rv := &RemoteVault{
@@ -240,13 +290,13 @@ func (r *VaultRegistry) loadVaultLocked(vaultID, vaultDir string) (*graph.Graph,
 		Config:    cfg,
 		LoadedAt:  time.Now(),
 	}
-	if existing, ok := r.vaults[vaultID]; ok && existing.VaultDir == vaultDir {
-		rv.EmbStore = existing.EmbStore
-		rv.readLockRelease = existing.readLockRelease
+	var evicted *RemoteVault
+	if existing, ok := r.vaults[vaultID]; ok && (existing.EmbStore != nil || existing.readLockRelease != nil) {
+		evicted = existing
 	}
 	r.vaults[vaultID] = rv
 
-	return g, nil
+	return g, evicted, nil
 }
 
 // Refresh reloads a specific vault's graph (e.g., after an editable write or
@@ -265,18 +315,25 @@ func (r *VaultRegistry) Refresh(vaultID string) error {
 	}
 	dir := existing.VaultDir
 	delete(r.vaults, vaultID) // force loadVaultLocked to rebuild (no carry-over)
-	_, err := r.loadVaultLocked(vaultID, dir)
+	_, _, err := r.loadVaultLocked(vaultID, dir)
 	r.mu.Unlock()
 	closeRemoteVault(existing)
 	return err
 }
 
-// KnownVaultIDs returns all vault IDs from bridges and the routing table.
+// KnownVaultIDs returns all vault IDs from den links, bridges, and the
+// routing table.
 func (r *VaultRegistry) KnownVaultIDs() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	seen := make(map[string]bool)
 	var ids []string
+	for id := range r.denVaults {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
 	for _, id := range r.pathToID {
 		if !seen[id] {
 			seen[id] = true
@@ -292,6 +349,43 @@ func (r *VaultRegistry) KnownVaultIDs() []string {
 		}
 	}
 	return ids
+}
+
+// ResolveConfig returns a remote vault's parsed _config.md (used by the
+// per-link embedding federation to build a query embedder that matches the
+// remote store's model). It shares the lazy load/TTL path with ResolveGraph.
+func (r *VaultRegistry) ResolveConfig(vaultID string) (*config.VaultConfig, error) {
+	r.mu.RLock()
+	if rv, ok := r.vaults[vaultID]; ok && !r.expiredLocked(rv) && rv.Config != nil {
+		r.mu.RUnlock()
+		return rv.Config, nil
+	}
+	r.mu.RUnlock()
+
+	r.mu.Lock()
+	if rv, ok := r.vaults[vaultID]; ok && !r.expiredLocked(rv) && rv.Config != nil {
+		r.mu.Unlock()
+		return rv.Config, nil
+	}
+	vaultDir := r.dirForLocked(vaultID)
+	if vaultDir == "" {
+		r.mu.Unlock()
+		return nil, fmt.Errorf("unknown vault %q: not a den link, routing table entry, or bridge manifest path", vaultID)
+	}
+	_, evicted, err := r.loadVaultLocked(vaultID, vaultDir)
+	if err != nil {
+		r.mu.Unlock()
+		if evicted != nil {
+			closeRemoteVault(evicted)
+		}
+		return nil, err
+	}
+	cfg := r.vaults[vaultID].Config
+	r.mu.Unlock()
+	if evicted != nil {
+		closeRemoteVault(evicted)
+	}
+	return cfg, nil
 }
 
 // ResolveEmbeddingStore returns an embedding store for a remote vault,
@@ -360,8 +454,9 @@ func (r *VaultRegistry) ResolveEmbeddingStore(vaultID string) (*embedding.Store,
 	// Cache on the RemoteVault entry (create if needed).
 	rv, ok := r.vaults[vaultID]
 	if !ok {
-		// Load the graph too if not already loaded.
-		_, loadErr := r.loadVaultLocked(vaultID, vaultDir)
+		// Load the graph too if not already loaded. No entry exists yet, so
+		// loadVaultLocked evicts nothing (the second return is always nil).
+		_, _, loadErr := r.loadVaultLocked(vaultID, vaultDir)
 		if loadErr != nil {
 			_ = store.Close()
 			if release != nil {

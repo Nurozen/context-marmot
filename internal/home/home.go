@@ -66,3 +66,9 @@ func RoutesPath() string {
 func WarrenCacheDir() string {
 	return filepath.Join(Dir(), "warren-cache")
 }
+
+// WarrensRegistryPath returns $MARMOT_HOME/warrens.yml, the global warren
+// registry (separate from routes.yml — decided OQ4).
+func WarrensRegistryPath() string {
+	return filepath.Join(Dir(), "warrens.yml")
+}

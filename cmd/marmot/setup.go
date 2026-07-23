@@ -48,6 +48,8 @@ var targets = []setupTarget{
 func cmdSetup(args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
+	global := fs.Bool("global", false, "write user-scope MCP configs (bare 'marmot serve', no vault path embedded)")
+	dryRun := fs.Bool("dry-run", false, "with --global: print target files and payloads without writing")
 
 	// Add a bool flag per target.
 	flagPtrs := make(map[string]*bool, len(targets))
@@ -58,6 +60,23 @@ func cmdSetup(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
+
+	if *global {
+		requestedFlags := make(map[string]bool, len(flagPtrs))
+		for f, p := range flagPtrs {
+			requestedFlags[f] = *p
+		}
+		if err := runGlobalSetup(requestedFlags, *dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "setup: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+	if *dryRun {
+		fmt.Fprintln(os.Stderr, "setup: --dry-run currently requires --global")
+		return 1
+	}
+
 	if *dir == "" {
 		*dir = resolveVaultDir("")
 	}
@@ -277,7 +296,7 @@ func writeJSON(path string, v any) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	return atomicWriteFile(path, data)
 }
 
 // absVaultPath returns vaultDir as an absolute path. Generated MCP configs

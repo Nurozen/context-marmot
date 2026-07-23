@@ -94,6 +94,12 @@ func runIndexPipeline(dir string, force bool) error {
 	}
 	defer func() { _ = embStore.Close() }()
 
+	// Older builds indexed id-less hand-written nodes under an empty node ID.
+	// Node IDs are now always derived from the file path, so any "" row is a
+	// known-degenerate orphan; drop it on every index run. (There is no
+	// general orphan GC for deleted nodes — `index --force` rebuilds the DB.)
+	_ = embStore.Delete("")
+
 	embedder, err := loadEmbedder(dir)
 	if err != nil {
 		return err
@@ -270,6 +276,16 @@ func buildEngine(dir string) (*engineResult, error) {
 	if reloadErr := engine.ReloadWarrenState(); reloadErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: warren state load failed: %v\n", reloadErr)
 	}
+	// Den links (federated queries): when the served dir is den-shaped, feed
+	// resolved _den.md links into the registry. After ReloadWarrenState so
+	// edit-mode links see fresh mounts; the den vault set itself survives
+	// later warren reloads (VaultRegistry.SetDenVaults).
+	if denErr := engine.LoadDenLinks(); denErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: den link resolution failed: %v\n", denErr)
+	}
+	if bErr := engine.LoadDenBridges(); bErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: den bridge load failed: %v\n", bErr)
+	}
 	if bridgeList, crossVault := engine.BridgeSnapshot(); bridgeList != nil {
 		fmt.Fprintf(os.Stderr, "namespaces: %d loaded, %d bridges, %d cross-vault bridges\n",
 			len(engine.NamespaceNames()), len(bridgeList), len(crossVault))
@@ -290,33 +306,11 @@ func buildEngine(dir string) (*engineResult, error) {
 		fmt.Fprintf(os.Stderr, "heatmap: %d pairs loaded for %s\n", hm.PairCount(), nsName)
 	}
 
-	// Wire classifier from vault config.
-	var llmProvider llm.Provider
-	switch vaultCfg.ClassifierProvider {
-	case "openai":
-		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			p := llm.NewOpenAIProviderWithModel(key, vaultCfg.ClassifierModel)
-			llmProvider = p
-			engine.WithLLMClassifier(p)
-			fmt.Fprintln(os.Stderr, "classifier: using openai/"+p.Model())
-		} else {
-			engine.WithLLMClassifier(nil)
-			fmt.Fprintln(os.Stderr, "classifier: openai configured but OPENAI_API_KEY not found; using embedding-distance fallback")
-		}
-	case "anthropic":
-		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			p := llm.NewAnthropicProviderWithModel(key, vaultCfg.ClassifierModel)
-			llmProvider = p
-			engine.WithLLMClassifier(p)
-			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+p.Model())
-		} else {
-			engine.WithLLMClassifier(nil)
-			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
-		}
-	default:
-		engine.WithLLMClassifier(nil)
-		fmt.Fprintln(os.Stderr, "classifier: using embedding-distance fallback")
-	}
+	// Wire classifier from vault config (shared provider construction —
+	// config.NewClassifierLLM is also what den contribute uses).
+	llmProvider, clsNote := config.NewClassifierLLM(vaultCfg, dir)
+	engine.WithLLMClassifier(llmProvider)
+	fmt.Fprintln(os.Stderr, "classifier: "+clsNote)
 
 	// Wire summary engine.
 	var sumScheduler *summary.Scheduler
@@ -1239,26 +1233,9 @@ func runStaticIndexPipeline(dir string, srcDir string, incremental bool) error {
 		Store:    embStore,
 		Embedder: embedder,
 	}
-	switch vaultCfg.ClassifierProvider {
-	case "openai":
-		if key := config.APIKeyWithVault("openai", dir); key != "" {
-			p := llm.NewOpenAIProviderWithModel(key, vaultCfg.ClassifierModel)
-			cls.LLM = p
-			fmt.Fprintln(os.Stderr, "classifier: using openai/"+p.Model())
-		} else {
-			fmt.Fprintln(os.Stderr, "classifier: openai configured but OPENAI_API_KEY not found; using embedding-distance fallback")
-		}
-	case "anthropic":
-		if key := config.APIKeyWithVault("anthropic", dir); key != "" {
-			p := llm.NewAnthropicProviderWithModel(key, vaultCfg.ClassifierModel)
-			cls.LLM = p
-			fmt.Fprintln(os.Stderr, "classifier: using anthropic/"+p.Model())
-		} else {
-			fmt.Fprintln(os.Stderr, "classifier: anthropic configured but ANTHROPIC_API_KEY not found; using embedding-distance fallback")
-		}
-	default:
-		fmt.Fprintln(os.Stderr, "classifier: using embedding-distance fallback")
-	}
+	clsLLM, clsNote := config.NewClassifierLLM(vaultCfg, dir)
+	cls.LLM = clsLLM
+	fmt.Fprintln(os.Stderr, "classifier: "+clsNote)
 
 	// 8. Create default registry.
 	registry := indexer.NewDefaultRegistry()

@@ -4,7 +4,7 @@
 //
 //	marmot init       [--dir .marmot]                            Create a new vault
 //	marmot configure  [--dir .marmot]                            Configure vault settings
-//	marmot setup      [--dir .marmot]                            Generate MCP tool configs
+//	marmot setup      [--dir .marmot] [--global] [--dry-run]     Generate MCP tool configs (project or user scope)
 //	marmot index      [--dir .marmot] [--force] [<path>] [--incremental]  Index nodes or source code
 //	marmot query      --query "..." [flags]                      Query the knowledge graph
 //	marmot serve      [--dir .marmot] [--no-daemon]               Start MCP server on stdio
@@ -18,6 +18,7 @@
 //	marmot reembed    [--namespace ...] [--dir .marmot]          Rebuild all embeddings
 //	marmot route      [add|rm|resolve|set-project|pointer]     Manage vault/project routing table
 //	marmot den        [create|status|destroy|list|adopt]         Manage dens (central context workspaces)
+//	marmot resolve    --url <u> [--path <p>] [--json]             Diagnose reference-repo resolution (warren-url | checkout-vault | none)
 //	marmot warren     [init|project|bridge|doctor|format|register|mount|...] Manage Warrens
 //	marmot ui         [--dir .marmot] [--host 127.0.0.1] [--port 3274] [--no-open]    Start graph UI server
 //	marmot sdk        [--out <path>] [--base-url <url>]           Generate TypeScript SDK
@@ -110,6 +111,8 @@ func run(args []string) int {
 		return cmdRoute(cmdArgs)
 	case "den":
 		return cmdDen(cmdArgs)
+	case "resolve":
+		return cmdResolve(cmdArgs)
 	case "warren":
 		return cmdWarren(cmdArgs)
 	case "ui":
@@ -125,7 +128,7 @@ func run(args []string) int {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: marmot <command> [flags]")
-	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, namespace, summarize, reembed, route, den, warren, ui, sdk")
+	fmt.Fprintln(os.Stderr, "commands: version, init, configure, setup, index, query, serve, verify, status, watch, bridge, namespace, summarize, reembed, route, den, resolve, warren, ui, sdk")
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +163,7 @@ func cmdInit(args []string) int {
 		fmt.Fprintf(os.Stderr, "setup: %v\n", err)
 		return 1
 	}
+	fmt.Println("tip: 'marmot setup --global' configures every project at once.")
 	return 0
 }
 

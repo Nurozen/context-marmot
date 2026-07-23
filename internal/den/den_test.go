@@ -1,11 +1,13 @@
 package den
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/home"
 	"github.com/nurozen/context-marmot/internal/routes"
 )
@@ -26,7 +28,7 @@ func TestCreateStatusDestroy(t *testing.T) {
 	proj := t.TempDir()
 
 	res, err := Create("demo", CreateOptions{
-		Lifetime: LifetimeTask,
+		Lifetime:  LifetimeTask,
 		Projects:  []string{proj},
 		NoPointer: false,
 	})
@@ -105,7 +107,7 @@ func TestCreateNoPointerNoVault(t *testing.T) {
 	hermetic(t)
 	proj := t.TempDir()
 	res, err := Create("links-only", CreateOptions{
-		Lifetime: LifetimeTask,
+		Lifetime:  LifetimeTask,
 		Projects:  []string{proj},
 		NoVault:   true,
 		NoPointer: true,
@@ -132,8 +134,8 @@ func TestCreateDryRun(t *testing.T) {
 	proj := t.TempDir()
 	res, err := Create("dry", CreateOptions{
 		Lifetime: LifetimeDurable,
-		Projects:  []string{proj},
-		DryRun:    true,
+		Projects: []string{proj},
+		DryRun:   true,
 	})
 	if err != nil {
 		t.Fatalf("Create dry-run: %v", err)
@@ -311,7 +313,7 @@ func TestCreateInvalidLifetimeAndProjects(t *testing.T) {
 	// Empty project entries skipped; duplicates collapsed.
 	proj := t.TempDir()
 	res, err := Create("proj-dedup", CreateOptions{
-		Projects: []string{"", proj, proj},
+		Projects:  []string{"", proj, proj},
 		NoPointer: true,
 	})
 	if err != nil {
@@ -334,7 +336,7 @@ func TestCreateRoutesOffWarns(t *testing.T) {
 
 	proj := t.TempDir()
 	res, err := Create("warn-den", CreateOptions{
-		Lifetime: LifetimeTask,
+		Lifetime:  LifetimeTask,
 		Projects:  []string{proj},
 		NoPointer: false,
 	})
@@ -471,10 +473,67 @@ func TestPointerHelpers(t *testing.T) {
 	}
 }
 
+// seedInRepoVault writes a realistic in-repo .marmot vault into proj:
+// _config.md (with the given vault_id line when non-empty), a node file, and
+// a .marmot-data/embeddings.db sidecar. Returns the vault path.
+func seedInRepoVault(t *testing.T, proj, vaultID string) string {
+	t.Helper()
+	vault := filepath.Join(proj, ".marmot")
+	if err := os.MkdirAll(filepath.Join(vault, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(vault, ".marmot-data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "---\nversion: \"1\"\n"
+	if vaultID != "" {
+		cfg += "vault_id: " + vaultID + "\n"
+	}
+	cfg += "namespace: default\nembedding_provider: mock\n---\n"
+	if err := os.WriteFile(filepath.Join(vault, "_config.md"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vault, "notes", "alpha.md"), []byte("---\nid: notes/alpha\n---\nAlpha body\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vault, ".marmot-data", "embeddings.db"), []byte("fake-embeddings-db-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return vault
+}
+
+// readTreeBytes maps relative path -> content for every regular file.
+func readTreeBytes(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		data, derr := os.ReadFile(path)
+		if derr != nil {
+			return derr
+		}
+		out[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("readTreeBytes %s: %v", root, err)
+	}
+	return out
+}
+
 func TestAdoptDryRunAndApply(t *testing.T) {
 	hermetic(t)
 	proj := t.TempDir()
-	// Dry-run does not create.
+	srcVault := seedInRepoVault(t, proj, "")
+	before := readTreeBytes(t, srcVault)
+
+	// Dry-run does not create, does not move, and plans the move + pointer.
 	res, err := Adopt(AdoptOptions{From: proj, DenID: "adopted", DryRun: true})
 	if err != nil {
 		t.Fatal(err)
@@ -485,32 +544,286 @@ func TestAdoptDryRunAndApply(t *testing.T) {
 	if _, err := os.Stat(Path("adopted")); !os.IsNotExist(err) {
 		t.Fatal("dry-run must not create")
 	}
+	if _, err := os.Stat(srcVault); err != nil {
+		t.Fatal("dry-run must not move the source vault")
+	}
+	hasOp := func(sub string) bool {
+		for _, op := range res.Ops {
+			if strings.Contains(op, sub) {
+				return true
+			}
+		}
+		return false
+	}
+	// Ops carry the NORMALIZED project key (symlinks resolved).
+	key, err := routes.NormalizeProjectKey(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasOp("move "+filepath.Join(key, ".marmot")) || !hasOp(PointerFileName) {
+		t.Fatalf("dry-run ops missing move/pointer: %+v", res.Ops)
+	}
 
-	// Real adopt derives id from basename when empty.
+	// Real adopt derives id from basename when the source config has no
+	// vault_id: the vault MOVES byte-identically (embeddings.db included),
+	// the route registers, and the pointer is written.
 	res, err = Adopt(AdoptOptions{From: proj})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantID := filepath.Base(proj)
-	// Base of temp dir may be invalid? temp dirs are usually random hex — valid warren ids.
-	if res.DenID == "" {
-		t.Fatal("empty den id")
+	if res.DenID == "" || !res.VaultMoved || !res.PointerWritten {
+		t.Fatalf("adopt = %+v", res)
 	}
 	st, err := Status(res.DenID)
 	if err != nil {
-		t.Fatalf("status after adopt: %v (id=%s want basename %s)", err, res.DenID, wantID)
+		t.Fatalf("status after adopt: %v (id=%s)", err, res.DenID)
 	}
 	if len(st.Projects) != 1 {
 		t.Fatalf("projects = %v", st.Projects)
 	}
+	// The moved vault IS the identity vault.
+	if st.VaultID != res.DenID {
+		t.Fatalf("vault_id = %q, want %q", st.VaultID, res.DenID)
+	}
+	after := readTreeBytes(t, VaultPath(res.DenID))
+	if len(after) != len(before) {
+		t.Fatalf("moved vault file set differs: before=%d after=%d", len(before), len(after))
+	}
+	for rel, want := range before {
+		if after[rel] != want {
+			t.Fatalf("moved vault %s not byte-identical", rel)
+		}
+	}
+	if _, ok := after[".marmot-data/embeddings.db"]; !ok {
+		t.Fatal("embeddings.db did not travel with the vault")
+	}
+	// No .marmot left behind; pointer present.
+	if _, err := os.Stat(srcVault); !os.IsNotExist(err) {
+		t.Fatalf(".marmot left behind (stat err=%v)", err)
+	}
+	if ptr, perr := ReadPointer(proj); perr != nil || ptr != res.DenID {
+		t.Fatalf("pointer = %q err=%v", ptr, perr)
+	}
 
 	// Invalid den id override.
-	if _, err := Adopt(AdoptOptions{From: proj, DenID: "../bad"}); err == nil {
+	proj2 := t.TempDir()
+	seedInRepoVault(t, proj2, "")
+	if _, err := Adopt(AdoptOptions{From: proj2, DenID: "../bad"}); err == nil {
 		t.Fatal("invalid adopt id")
 	}
-	// Empty from uses cwd — just ensure no panic with explicit valid from.
-	if _, err := Adopt(AdoptOptions{From: "", DenID: "from-cwd", DryRun: true}); err != nil {
-		t.Fatalf("from cwd dry-run: %v", err)
+}
+
+// TestAdoptVaultIDDefaultAndNoPointer: the den id defaults to the source
+// vault's declared vault_id, and NoPointer leaves no .marmot-vault behind.
+func TestAdoptVaultIDDefaultAndNoPointer(t *testing.T) {
+	hermetic(t)
+	proj := t.TempDir()
+	seedInRepoVault(t, proj, "declared-id")
+
+	res, err := Adopt(AdoptOptions{From: proj, NoPointer: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.DenID != "declared-id" {
+		t.Fatalf("den id = %q, want declared-id (source vault_id)", res.DenID)
+	}
+	if res.PointerWritten {
+		t.Fatal("NoPointer adopt must not report pointer_written")
+	}
+	if _, err := os.Stat(filepath.Join(proj, PointerFileName)); !os.IsNotExist(err) {
+		t.Fatalf("NoPointer adopt wrote a pointer (stat err=%v)", err)
+	}
+}
+
+// TestAdoptRefusals: not_a_vault and den_vault_exists carry structured codes,
+// and every refusal leaves the source vault untouched.
+func TestAdoptRefusals(t *testing.T) {
+	hermetic(t)
+
+	// not_a_vault: no .marmot/_config.md in the source.
+	empty := t.TempDir()
+	_, err := Adopt(AdoptOptions{From: empty, DenID: "nv"})
+	var refusal *AdoptRefusal
+	if !errors.As(err, &refusal) || refusal.Code != "not_a_vault" {
+		t.Fatalf("expected not_a_vault refusal, got %v", err)
+	}
+
+	// den_vault_exists: the target den already has a vault dir.
+	proj := t.TempDir()
+	srcVault := seedInRepoVault(t, proj, "")
+	if _, err := Create("occupied", CreateOptions{Lifetime: LifetimeTask}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Adopt(AdoptOptions{From: proj, DenID: "occupied"})
+	if !errors.As(err, &refusal) || refusal.Code != "den_vault_exists" {
+		t.Fatalf("expected den_vault_exists refusal, got %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(srcVault, "_config.md")); serr != nil {
+		t.Fatal("refusal must leave the source vault untouched")
+	}
+}
+
+// TestAdoptMoveFailedRollsBack: a read-only project root makes the rename
+// fail (no write on the source parent) and an unreadable file inside the
+// vault then fails the copy fallback. Adopt must return the move_failed
+// refusal, roll the den shell back (den dir and route gone), and leave the
+// source vault intact.
+func TestAdoptMoveFailedRollsBack(t *testing.T) {
+	hermetic(t)
+	proj := t.TempDir()
+	srcVault := seedInRepoVault(t, proj, "")
+	blocked := filepath.Join(srcVault, "notes", "alpha.md")
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o644) })
+	if err := os.Chmod(proj, 0o555); err != nil { // rename fails -> copy path
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(proj, 0o755) })
+
+	_, err := Adopt(AdoptOptions{From: proj, DenID: "blocked", NoPointer: true})
+	var refusal *AdoptRefusal
+	if !errors.As(err, &refusal) || refusal.Code != "move_failed" {
+		t.Fatalf("expected move_failed refusal, got %v", err)
+	}
+	if refusal.Hint == "" {
+		t.Fatal("move_failed must carry recovery guidance")
+	}
+	// Source vault intact.
+	if _, serr := os.Stat(filepath.Join(srcVault, "_config.md")); serr != nil {
+		t.Fatal("failed adopt must leave the source vault intact")
+	}
+	// Den shell rolled back: dir and route gone.
+	if _, serr := os.Stat(Path("blocked")); !os.IsNotExist(serr) {
+		t.Fatalf("failed adopt left den dir behind (stat err=%v)", serr)
+	}
+	if rt, lerr := routes.Load(); lerr == nil && rt != nil {
+		for p, id := range rt.ListProjects() {
+			if id == "blocked" {
+				t.Fatalf("failed adopt left route %s -> blocked", p)
+			}
+		}
+	}
+}
+
+// TestAdoptSourceRemovalFailureWarns: when the copy is verified and promoted
+// but the source cannot be (fully) removed — read-only project root — the
+// adopt SUCCEEDS with a warning: rolling back would destroy the only complete
+// copy. The den's vault must carry the full content.
+func TestAdoptSourceRemovalFailureWarns(t *testing.T) {
+	hermetic(t)
+	proj := t.TempDir()
+	srcVault := seedInRepoVault(t, proj, "")
+	before := readTreeBytes(t, srcVault)
+	if err := os.Chmod(proj, 0o555); err != nil { // rename + source unlink fail
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(proj, 0o755) })
+
+	res, err := Adopt(AdoptOptions{From: proj, DenID: "leftover", NoPointer: true})
+	if err != nil {
+		t.Fatalf("adopt must succeed once the copy is promoted: %v", err)
+	}
+	if !res.VaultMoved {
+		t.Fatalf("vault_moved = false: %+v", res)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "could not be fully removed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want a source-leftover warning", res.Warnings)
+	}
+	// The den vault carries the complete content.
+	after := readTreeBytes(t, VaultPath("leftover"))
+	for rel, want := range before {
+		if after[rel] != want {
+			t.Fatalf("den vault missing/differing %s", rel)
+		}
+	}
+}
+
+// TestMoveVaultDirCopyFallback exercises the copy+verify+remove path directly
+// (rename is forced to fail by a pre-existing destination parent oddity is
+// unreliable; call the copy path through a src/dst pair on the same fs where
+// rename works — so instead verify the copy helpers themselves).
+func TestMoveVaultDirCopyFallback(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(filepath.Join(src, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "a.md"), []byte("alpha"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "sub", "b.db"), []byte{0x00, 0x01, 0xff}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "dst")
+	if err := copyTree(src, dst); err != nil {
+		t.Fatalf("copyTree: %v", err)
+	}
+	if err := verifyTree(src, dst); err != nil {
+		t.Fatalf("verifyTree: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "sub", "b.db"))
+	if err != nil || string(got) != string([]byte{0x00, 0x01, 0xff}) {
+		t.Fatalf("copied bytes = %v err=%v", got, err)
+	}
+	// verifyTree catches divergence.
+	if err := os.WriteFile(filepath.Join(dst, "a.md"), []byte("tampered"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyTree(src, dst); err == nil {
+		t.Fatal("verifyTree must detect differing content")
+	}
+}
+
+// TestCreateEmbeddingProviderConfig: den create can wire a REAL embedding
+// provider into the identity vault's _config.md (no hand-editing), defaults
+// to mock, and rejects unknown providers.
+func TestCreateEmbeddingProviderConfig(t *testing.T) {
+	hermetic(t)
+
+	// Default: mock provider, empty model.
+	if _, err := Create("emb-default", CreateOptions{Lifetime: LifetimeTask}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(VaultPath("emb-default"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmbeddingProvider != "mock" || cfg.EmbeddingModel != "" {
+		t.Fatalf("default vault config = %s/%s, want mock/", cfg.EmbeddingProvider, cfg.EmbeddingModel)
+	}
+
+	// Real provider + model land in _config.md verbatim.
+	if _, err := Create("emb-real", CreateOptions{
+		Lifetime:          LifetimeTask,
+		EmbeddingProvider: "openai",
+		EmbeddingModel:    "text-embedding-3-small",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(VaultPath("emb-real"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmbeddingProvider != "openai" || cfg.EmbeddingModel != "text-embedding-3-small" {
+		t.Fatalf("real vault config = %s/%s", cfg.EmbeddingProvider, cfg.EmbeddingModel)
+	}
+	if cfg.VaultID != "emb-real" {
+		t.Fatalf("vault_id = %q", cfg.VaultID)
+	}
+
+	// Unknown provider is refused before anything is created.
+	if _, err := Create("emb-bad", CreateOptions{Lifetime: LifetimeTask, EmbeddingProvider: "carrier-pigeon"}); err == nil {
+		t.Fatal("unknown embedding provider must be rejected")
+	}
+	if _, serr := os.Stat(Path("emb-bad")); !os.IsNotExist(serr) {
+		t.Fatal("rejected create left a den dir")
 	}
 }
 
@@ -595,10 +908,14 @@ func TestRemovePointerNonNotExistError(t *testing.T) {
 
 func TestAdoptCreateFailure(t *testing.T) {
 	hermetic(t)
-	if _, err := Create("taken", CreateOptions{Lifetime: LifetimeTask}); err != nil {
+	// A links-only den (no vault dir) dodges the den_vault_exists precheck,
+	// so the failure surfaces from Create's atomic den-dir claim.
+	if _, err := Create("taken", CreateOptions{Lifetime: LifetimeTask, NoVault: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Adopt(AdoptOptions{From: t.TempDir(), DenID: "taken"}); err == nil {
+	proj := t.TempDir()
+	seedInRepoVault(t, proj, "")
+	if _, err := Adopt(AdoptOptions{From: proj, DenID: "taken"}); err == nil {
 		t.Fatal("expected adopt fail when den exists")
 	}
 }
@@ -626,7 +943,7 @@ func TestCreatePointerWarningWhenProjectIsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := Create("ptr-warn", CreateOptions{
-		Lifetime: LifetimeTask,
+		Lifetime:  LifetimeTask,
 		Projects:  []string{fileProj},
 		NoPointer: false,
 	})

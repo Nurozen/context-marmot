@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,13 +13,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/nurozen/context-marmot/internal/config"
 	"github.com/nurozen/context-marmot/internal/embedding"
+	"github.com/nurozen/context-marmot/internal/gitx"
+	"github.com/nurozen/context-marmot/internal/home"
+	"github.com/nurozen/context-marmot/internal/node"
 	"github.com/nurozen/context-marmot/internal/warren"
+	"github.com/nurozen/context-marmot/internal/warrenreg"
 )
 
 // gitOutput runs git against dir and returns its trimmed stdout. It is the
@@ -76,6 +84,10 @@ func cmdWarren(args []string) int {
 	switch sub {
 	case "init":
 		return warrenInit(subArgs)
+	case "add":
+		return warrenAdd(subArgs)
+	case "sync":
+		return warrenSync(subArgs)
 	case "register":
 		return warrenRegister(subArgs)
 	case "list":
@@ -112,7 +124,9 @@ func cmdWarren(args []string) int {
 }
 
 func warrenUsage() {
-	fmt.Fprintln(os.Stderr, "usage: marmot warren <init|project|bridge|doctor|format|register|unregister|list|mount|unmount|burrow|status|edit|refresh|propose> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: marmot warren <init|add|sync|project|bridge|doctor|format|register|unregister|list|mount|unmount|burrow|status|edit|refresh|propose> [flags]")
+	fmt.Fprintln(os.Stderr, "  add <url> clones a warren into the shared cache ($MARMOT_HOME/warren-cache);")
+	fmt.Fprintln(os.Stderr, "  sync [<id>] fetches cached warrens and re-pins their shared read checkouts;")
 	fmt.Fprintln(os.Stderr, "  refresh [--pull] reloads warren state (and with --pull fast-forwards the checkout);")
 	fmt.Fprintln(os.Stderr, "  propose branches+commits one project's editable-mount edits for review (never pushes)")
 }
@@ -171,6 +185,641 @@ func ensureGitignoreEntry(root, entry string) error {
 	}
 	out += entry + "\n"
 	return os.WriteFile(path, []byte(out), 0o644)
+}
+
+// jsonWarrenAddEnvelope is the schema:1 stdout contract for
+// `warren add --json` (additive-only evolution — never remove or repurpose a
+// field; stave's memory verbs consume it).
+type jsonWarrenAddEnvelope struct {
+	Schema        int      `json:"schema"`
+	WarrenID      string   `json:"warren_id"`
+	URL           string   `json:"url"`
+	CachePath     string   `json:"cache_path"`
+	CheckoutPath  string   `json:"checkout_path"`
+	DefaultBranch string   `json:"default_branch"`
+	PinnedCommit  string   `json:"pinned_commit"`
+	Reembedded    int      `json:"reembedded"`
+	Warnings      []string `json:"warnings"`
+}
+
+// warrenIDFromURL derives the default warren id from a clone URL: the last
+// path segment (after '/' or the scp-style ':') minus a .git suffix.
+func warrenIDFromURL(url string) string {
+	s := strings.TrimRight(strings.TrimSpace(url), "/")
+	if i := strings.LastIndexAny(s, "/:"); i >= 0 {
+		s = s[i+1:]
+	}
+	return strings.TrimSuffix(s, ".git")
+}
+
+// warrenAddFail routes an add refusal to the right surface: a schema:1 error
+// envelope on stdout with --json, plain stderr otherwise. Always exits 1.
+func warrenAddFail(jsonOut bool, code, message, hint string) int {
+	if jsonOut {
+		return denJSONError(code, message, hint)
+	}
+	fmt.Fprintf(os.Stderr, "warren add: %s\n", message)
+	if hint != "" {
+		fmt.Fprintf(os.Stderr, "warren add: hint: %s\n", hint)
+	}
+	return 1
+}
+
+// warrenAdd implements `marmot warren add <url> [--id <id>] [--dry-run]
+// [--json]` (§5.2, stave reposAdd sequence): duplicate-id check BEFORE any fs
+// op → existing-cache-path guard → CloneBare → refspec rewrite →
+// FetchAllPrune → soft RemoteDefaultBranch → shared read checkout (detached
+// worktree pinned at origin/<default_branch>) → manifest validation → pin
+// stamp → registry save LAST, so a failed clone leaves no dangling registry
+// entry and a failed registry save leaves no dangling cache.
+func warrenAdd(args []string) int {
+	args = reorderInterspersedFlags(args, map[string]bool{"id": true}, map[string]bool{"dry-run": true, "json": true})
+	fs := flag.NewFlagSet("warren add", flag.ContinueOnError)
+	idFlag := fs.String("id", "", "warren ID (default: URL basename minus .git)")
+	dryRun := fs.Bool("dry-run", false, "print planned operations without touching the cache or registry")
+	jsonOut := fs.Bool("json", false, "print a schema:1 JSON envelope on stdout")
+	const usage = "usage: marmot warren add <url> [--id <id>] [--dry-run] [--json]"
+	if err := fs.Parse(args); err != nil {
+		return denParseFail(args, err, usage)
+	}
+	if fs.NArg() != 1 {
+		return warrenAddFail(*jsonOut, "invalid_args", "exactly one clone URL is required", usage)
+	}
+	url := fs.Arg(0)
+	id := *idFlag
+	if id == "" {
+		id = warrenIDFromURL(url)
+	}
+	if err := warren.ValidateWarrenID(id); err != nil {
+		return warrenAddFail(*jsonOut, "invalid_args", err.Error(), "pass an explicit id with --id <id>")
+	}
+	cacheRoot := home.WarrenCacheDir()
+	barePath := warren.CacheBarePath(id)
+	checkoutPath := warren.CacheCheckoutPath(id)
+	// checkAddPreconditions is the duplicate-id / existing-cache-path guard.
+	// It runs twice: here, pre-lock, as a fast lock-free refusal for the
+	// common cases (and for --dry-run, which never takes the lock), and again
+	// as the FIRST step inside the cache lock — the authoritative pass. Only
+	// the in-lock pass gates filesystem work: a concurrent add of the same id
+	// can win the lock between the two passes, and failure cleanup must never
+	// remove a live cache this run did not create (F4).
+	checkAddPreconditions := func() (code, msg, hint string) {
+		reg, err := warrenreg.Load()
+		if err != nil {
+			return "registry_error", err.Error(), ""
+		}
+		if existing, dup := reg.Warrens[id]; dup {
+			return "duplicate_warren",
+				fmt.Sprintf("warren %q is already registered (url %s)", id, existing.URL),
+				"pick another id with --id, or sync the existing cache with 'marmot warren sync " + id + "'"
+		}
+		for _, path := range []string{barePath, checkoutPath} {
+			if _, statErr := os.Stat(path); statErr == nil {
+				return "duplicate_warren",
+					fmt.Sprintf("cache path %s already exists but warren %q is not in the registry", path, id),
+					"remove the stale cache dir(s) (or pick another --id) and re-run"
+			}
+		}
+		return "", "", ""
+	}
+	if code, msg, hint := checkAddPreconditions(); code != "" {
+		return warrenAddFail(*jsonOut, code, msg, hint)
+	}
+	ctx := context.Background()
+	if *dryRun {
+		// Dry-run touches nothing: no cache lock (the flock sidecar would be
+		// created), no clone, no registry write — just the planned ops.
+		var ops []string
+		client := gitx.New(gitx.WithDryRun(true, func(format string, a ...any) {
+			ops = append(ops, strings.TrimPrefix(fmt.Sprintf(format, a...), "dry-run: "))
+		}))
+		_ = client.CloneBare(ctx, url, barePath)
+		_ = client.ConfigureBareRemoteTracking(ctx, barePath)
+		_ = client.FetchAllPrune(ctx, barePath)
+		_ = client.WorktreeAddDetached(ctx, barePath, checkoutPath, "origin/<default-branch>")
+		ops = append(ops,
+			"write "+warren.CachePinPath(id),
+			fmt.Sprintf("registry add %s -> %s (%s)", id, url, warrenreg.Path()))
+		if *jsonOut {
+			return printDenJSON(jsonDryRunEnvelope{Schema: 1, DryRun: true, Ops: ops})
+		}
+		for _, op := range ops {
+			fmt.Println("dry-run:", op)
+		}
+		return 0
+	}
+	if err := os.MkdirAll(cacheRoot, 0o755); err != nil {
+		return warrenAddFail(*jsonOut, "clone_failed", fmt.Sprintf("create cache root: %v", err), "")
+	}
+	client := gitx.New()
+	warnings := []string{}
+	defaultBranch := ""
+	pinnedCommit := ""
+	reembedded := 0
+	failCode, failMsg, failHint := "", "", ""
+	// cleanupCache removes everything this add created, in dependency order
+	// (worktree bookkeeping before the bare repo), so a refusal leaves the
+	// cache exactly as it was and the command is re-runnable. It only runs
+	// inside the cache lock AFTER the in-lock precondition pass proved both
+	// paths absent, so it can only ever remove artifacts created by THIS run —
+	// never a live cache a concurrent add produced (F4).
+	cleanupCache := func() {
+		_ = client.WorktreeRemove(ctx, barePath, checkoutPath, true)
+		_ = client.WorktreePrune(ctx, barePath)
+		_ = os.RemoveAll(checkoutPath)
+		_ = os.Remove(warren.CachePinPath(id))
+		_ = os.RemoveAll(barePath)
+	}
+	lockErr := gitx.WithCacheLock(cacheRoot, id, func() error {
+		// Authoritative duplicate/exists pass, now that we hold the lock: a
+		// concurrent add of the same id may have registered and populated the
+		// cache while we waited. Refuse WITHOUT any cleanup — nothing below
+		// has run yet, so everything on disk belongs to someone else.
+		if code, msg, hint := checkAddPreconditions(); code != "" {
+			failCode, failMsg, failHint = code, msg, hint
+			return errors.New(msg)
+		}
+		if err := client.CloneBare(ctx, url, barePath); err != nil {
+			_ = os.RemoveAll(barePath)
+			failCode, failMsg = "clone_failed", err.Error()
+			return err
+		}
+		if err := client.ConfigureBareRemoteTracking(ctx, barePath); err != nil {
+			cleanupCache()
+			failCode, failMsg = "clone_failed", err.Error()
+			return err
+		}
+		if err := client.FetchAllPrune(ctx, barePath); err != nil {
+			cleanupCache()
+			failCode, failMsg = "clone_failed", err.Error()
+			return err
+		}
+		// Soft: an unresolved default branch degrades to the clone's HEAD.
+		ref := "HEAD"
+		if branch, branchErr := client.RemoteDefaultBranch(ctx, barePath); branchErr == nil && branch != "" {
+			defaultBranch = branch
+			ref = "origin/" + branch
+		} else {
+			warnings = append(warnings, "could not determine the remote default branch; pinned the clone's HEAD (sync will re-resolve)")
+		}
+		if err := client.WorktreeAddDetached(ctx, barePath, checkoutPath, ref); err != nil {
+			cleanupCache()
+			failCode, failMsg = "clone_failed", err.Error()
+			return err
+		}
+		// The cache only ever holds warren repos: a repository without a
+		// loadable _warren.md manifest is refused and everything created here
+		// is removed.
+		manifest, _, manifestErr := warren.LoadManifest(checkoutPath)
+		if manifestErr != nil {
+			cleanupCache()
+			failCode = "not_a_warren"
+			failMsg = fmt.Sprintf("repository at %s is not a warren (no loadable %s manifest): %v", url, warren.ManifestFileName, manifestErr)
+			failHint = "initialize the repository as a warren first: 'marmot warren init --id <id>' in a checkout, commit, then re-run 'marmot warren add'"
+			return manifestErr
+		}
+		if manifest.WarrenID != "" && manifest.WarrenID != id {
+			warnings = append(warnings, fmt.Sprintf("manifest warren_id %q differs from cache id %q; register-free mount/status resolve by cache id but workspace registration validates against the manifest — re-add with --id %s to align", manifest.WarrenID, id, manifest.WarrenID))
+		}
+		head, headErr := client.HeadCommit(ctx, checkoutPath)
+		if headErr != nil {
+			cleanupCache()
+			failCode, failMsg = "clone_failed", fmt.Sprintf("resolve pinned commit: %v", headErr)
+			return headErr
+		}
+		pinnedCommit = head
+		if err := warren.WriteCachePin(id, head); err != nil {
+			cleanupCache()
+			failCode, failMsg = "cache_write_failed", fmt.Sprintf("record checkout pin: %v", err)
+			return err
+		}
+		// Registry save LAST, but still INSIDE the cache lock (F4): a failed
+		// clone above never reached this point, so no dangling entry; a failed
+		// save removes the fresh cache (still exclusively ours under the lock)
+		// so re-running does not trip the existing-cache-path guard.
+		if err := warrenreg.Update(func(reg *warrenreg.Registry) error {
+			if existing, dup := reg.Warrens[id]; dup {
+				return fmt.Errorf("warren %q was registered concurrently (url %s)", id, existing.URL)
+			}
+			reg.Warrens[id] = warrenreg.Entry{URL: url, DefaultBranch: defaultBranch}
+			return nil
+		}); err != nil {
+			cleanupCache()
+			failCode, failMsg = "registry_error", err.Error()
+			return err
+		}
+		// Regenerate project-vault embeddings keyed to the fresh pin (F1):
+		// the checkout's markdown may not ship vectors for every node.
+		// Best-effort — reembed warnings never fail the add.
+		reembedded, warnings = reembedCheckoutVaults(checkoutPath, id, warnings)
+		return nil
+	})
+	if lockErr != nil {
+		if failCode == "" {
+			failCode, failMsg = "clone_failed", lockErr.Error()
+		}
+		return warrenAddFail(*jsonOut, failCode, failMsg, failHint)
+	}
+	if *jsonOut {
+		return printDenJSON(jsonWarrenAddEnvelope{
+			Schema:        1,
+			WarrenID:      id,
+			URL:           url,
+			CachePath:     barePath,
+			CheckoutPath:  checkoutPath,
+			DefaultBranch: defaultBranch,
+			PinnedCommit:  pinnedCommit,
+			Reembedded:    reembedded,
+			Warnings:      warnings,
+		})
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+	}
+	fmt.Printf("Added warren %q to the shared cache\n", id)
+	fmt.Printf("  checkout: %s (pinned at %s)\n", checkoutPath, shortCommit(pinnedCommit))
+	if reembedded > 0 {
+		fmt.Printf("  reembedded %d node(s) across project vaults\n", reembedded)
+	}
+	fmt.Printf("Keep it fresh with 'marmot warren sync %s'\n", id)
+	return 0
+}
+
+// jsonWarrenSyncResult is one warren's outcome inside the sync envelope.
+// Field names are stave-consumed (memory sync) — keep them stable.
+type jsonWarrenSyncResult struct {
+	ID             string `json:"id"`
+	Fetched        bool   `json:"fetched"`
+	PreviousCommit string `json:"previous_commit"`
+	PinnedCommit   string `json:"pinned_commit"`
+	Updated        bool   `json:"updated"`
+	// Reembedded counts project-vault embeddings regenerated for this pin
+	// (F1: contribute PRs carry markdown only, so merged nodes need their
+	// vectors rebuilt with each vault's own embedder). Additive field.
+	Reembedded int    `json:"reembedded"`
+	Error      string `json:"error,omitempty"`
+}
+
+// jsonWarrenSyncEnvelope is the schema:1 stdout contract for
+// `warren sync --json`.
+type jsonWarrenSyncEnvelope struct {
+	Schema   int                    `json:"schema"`
+	Warrens  []jsonWarrenSyncResult `json:"warrens"`
+	Warnings []string               `json:"warnings"`
+}
+
+// warrenSync implements `marmot warren sync [<id>] [--dry-run] [--json]`
+// (§5.2): for one or every registered warren, fetch the bare mirror and
+// re-pin the shared read checkout at the new origin/<default_branch> head.
+// Per-warren failures never abort the loop; exit policy: 0 when at least one
+// warren synced (per-warren errors are reported inline), 1 only when every
+// warren failed. An empty registry is informational, exit 0.
+func warrenSync(args []string) int {
+	args = reorderInterspersedFlags(args, nil, map[string]bool{"dry-run": true, "json": true})
+	fs := flag.NewFlagSet("warren sync", flag.ContinueOnError)
+	dryRun := fs.Bool("dry-run", false, "print planned operations without touching the cache")
+	jsonOut := fs.Bool("json", false, "print a schema:1 JSON envelope on stdout")
+	const usage = "usage: marmot warren sync [<warren-id>] [--dry-run] [--json]"
+	if err := fs.Parse(args); err != nil {
+		return denParseFail(args, err, usage)
+	}
+	if fs.NArg() > 1 {
+		if *jsonOut {
+			return denJSONError("invalid_args", "too many arguments", usage)
+		}
+		fmt.Fprintln(os.Stderr, usage)
+		return 1
+	}
+	reg, err := warrenreg.Load()
+	if err != nil {
+		if *jsonOut {
+			return denJSONError("registry_error", err.Error(), "")
+		}
+		fmt.Fprintf(os.Stderr, "warren sync: %v\n", err)
+		return 1
+	}
+	var ids []string
+	if fs.NArg() == 1 {
+		id := fs.Arg(0)
+		if _, ok := reg.Warrens[id]; !ok {
+			hint := "add it with 'marmot warren add <url> --id " + id + "'"
+			if *jsonOut {
+				return denJSONError("invalid_args", fmt.Sprintf("warren %q is not in the shared cache registry", id), hint)
+			}
+			fmt.Fprintf(os.Stderr, "warren sync: warren %q is not in the shared cache registry — %s\n", id, hint)
+			return 1
+		}
+		ids = []string{id}
+	} else {
+		for id := range reg.Warrens {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+	}
+	if len(ids) == 0 {
+		if *jsonOut {
+			return printDenJSON(jsonWarrenSyncEnvelope{Schema: 1, Warrens: []jsonWarrenSyncResult{}, Warnings: []string{}})
+		}
+		fmt.Println("No warrens registered.")
+		return 0
+	}
+	ctx := context.Background()
+	if *dryRun {
+		// Dry-run touches nothing: no cache locks, no pin writes.
+		var ops []string
+		client := gitx.New(gitx.WithDryRun(true, func(format string, a ...any) {
+			ops = append(ops, strings.TrimPrefix(fmt.Sprintf(format, a...), "dry-run: "))
+		}))
+		for _, id := range ids {
+			ref := "origin/<default-branch>"
+			if branch := reg.Warrens[id].DefaultBranch; branch != "" {
+				ref = "origin/" + branch
+			}
+			_ = client.FetchAllPrune(ctx, warren.CacheBarePath(id))
+			_ = client.CheckoutDetached(ctx, warren.CacheCheckoutPath(id), ref)
+			ops = append(ops, "write "+warren.CachePinPath(id))
+		}
+		if *jsonOut {
+			return printDenJSON(jsonDryRunEnvelope{Schema: 1, DryRun: true, Ops: ops})
+		}
+		for _, op := range ops {
+			fmt.Println("dry-run:", op)
+		}
+		return 0
+	}
+	client := gitx.New()
+	warnings := []string{}
+	resolvedBranches := map[string]string{}
+	results := make([]jsonWarrenSyncResult, 0, len(ids))
+	failed := 0
+	for _, id := range ids {
+		result, resolved, reembedWarnings := syncOneWarren(ctx, client, home.WarrenCacheDir(), id, reg.Warrens[id])
+		warnings = append(warnings, reembedWarnings...)
+		if resolved != "" {
+			resolvedBranches[id] = resolved
+		}
+		if result.Error != "" {
+			failed++
+		}
+		results = append(results, result)
+		if *jsonOut {
+			continue
+		}
+		switch {
+		case result.Error != "":
+			fmt.Fprintf(os.Stderr, "warren sync: %s: %s\n", id, result.Error)
+		case result.Updated && result.PreviousCommit == "":
+			fmt.Printf("Warren %q synced: pinned at %s\n", id, shortCommit(result.PinnedCommit))
+		case result.Updated:
+			fmt.Printf("Warren %q synced: %s -> %s\n", id, shortCommit(result.PreviousCommit), shortCommit(result.PinnedCommit))
+		default:
+			fmt.Printf("Warren %q already up to date at %s\n", id, shortCommit(result.PinnedCommit))
+		}
+		if result.Error == "" && result.Reembedded > 0 {
+			fmt.Printf("  reembedded %d node(s) across project vaults\n", result.Reembedded)
+		}
+	}
+	// Persist default branches resolved during this sync (registered with an
+	// unresolvable one) so later syncs and den links stop guessing.
+	// Best-effort: the sync itself already succeeded.
+	if len(resolvedBranches) > 0 {
+		if err := warrenreg.Update(func(reg *warrenreg.Registry) error {
+			for id, branch := range resolvedBranches {
+				if entry, ok := reg.Warrens[id]; ok && entry.DefaultBranch == "" {
+					entry.DefaultBranch = branch
+					reg.Warrens[id] = entry
+				}
+			}
+			return nil
+		}); err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not record resolved default branch(es) in the registry: %v", err))
+		}
+	}
+	exit := 0
+	if failed == len(ids) {
+		exit = 1
+	}
+	if *jsonOut {
+		if code := printDenJSON(jsonWarrenSyncEnvelope{Schema: 1, Warrens: results, Warnings: warnings}); code != 0 {
+			return code
+		}
+		return exit
+	}
+	for _, warning := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", warning)
+	}
+	return exit
+}
+
+// syncOneWarren fetches one warren's bare mirror and re-pins its shared read
+// checkout under the per-warren cache lock. It returns the per-warren result
+// (errors captured, never fatal to the caller's loop), the default branch it
+// had to resolve when the registry entry lacked one, and any reembed warnings
+// (best-effort, never fatal).
+func syncOneWarren(ctx context.Context, client *gitx.Client, cacheRoot, id string, entry warrenreg.Entry) (jsonWarrenSyncResult, string, []string) {
+	result := jsonWarrenSyncResult{ID: id, PreviousCommit: warren.ReadCachePin(id)}
+	resolvedBranch := ""
+	var reembedWarnings []string
+	err := gitx.WithCacheLock(cacheRoot, id, func() error {
+		barePath := warren.CacheBarePath(id)
+		if !dirExistsCLI(barePath) {
+			return fmt.Errorf("bare cache missing at %s (re-add with 'marmot warren add %s --id %s')", barePath, entry.URL, id)
+		}
+		if err := client.FetchAllPrune(ctx, barePath); err != nil {
+			return fmt.Errorf("fetch: %w", err)
+		}
+		result.Fetched = true
+		branch := entry.DefaultBranch
+		if branch == "" {
+			if b, branchErr := client.RemoteDefaultBranch(ctx, barePath); branchErr == nil && b != "" {
+				branch, resolvedBranch = b, b
+			}
+		}
+		ref := "HEAD"
+		if branch != "" {
+			ref = "origin/" + branch
+		}
+		checkoutPath := warren.CacheCheckoutPath(id)
+		if !dirExistsCLI(checkoutPath) {
+			// The shared checkout disappeared (manual cleanup): recreate it
+			// rather than fail — sync's contract is "a fresh pinned checkout".
+			if err := client.WorktreeAddDetached(ctx, barePath, checkoutPath, ref); err != nil {
+				return fmt.Errorf("recreate shared checkout: %w", err)
+			}
+		} else if err := client.CheckoutDetached(ctx, checkoutPath, ref); err != nil {
+			return fmt.Errorf("re-pin shared checkout: %w", err)
+		}
+		head, err := client.HeadCommit(ctx, checkoutPath)
+		if err != nil {
+			return fmt.Errorf("resolve pinned commit: %w", err)
+		}
+		result.PinnedCommit = head
+		result.Updated = head != result.PreviousCommit
+		if err := warren.WriteCachePin(id, head); err != nil {
+			return fmt.Errorf("record checkout pin: %w", err)
+		}
+		// Regenerate project-vault embeddings keyed to the new pin (F1):
+		// contribute PRs carry markdown only, so nodes merged upstream are
+		// invisible to semantic search until their vectors are rebuilt with
+		// each vault's own embedder. Runs on every sync — the per-node
+		// summary-hash check makes the no-change case cheap, and it also
+		// heals checkouts pinned before this feature existed.
+		result.Reembedded, reembedWarnings = reembedCheckoutVaults(warren.CacheCheckoutPath(id), id, nil)
+		return nil
+	})
+	if err != nil {
+		result.Error = err.Error()
+	}
+	return result, resolvedBranch, reembedWarnings
+}
+
+// reembedCheckoutVaults regenerates missing/stale embeddings for every
+// project vault inside a warren's shared cache checkout (F1). Contribute PRs
+// carry markdown only — a merged node has no row in the checkout's
+// .marmot-data/embeddings.db, so it is invisible to semantic search until its
+// vector is regenerated keyed to the current pin. For each manifest project
+// it lists active nodes, hash-checks each against the vault's store (cheap
+// no-op when nothing changed), and embeds only absent/stale nodes with the
+// vault's OWN configured embedder. It never poisons a store: a store already
+// holding a different model is skipped with a warning naming both models (F2
+// guard), and a configured-but-keyless provider skips the vault instead of
+// silently writing mock-model rows. Every failure degrades to a warning —
+// add/sync still succeed. Callers must hold the warren's cache lock (the
+// checkout must not move underneath the scan). Returns the total upserted
+// count and warnings appended to the passed slice.
+func reembedCheckoutVaults(checkoutPath, warrenID string, warnings []string) (int, []string) {
+	manifest, _, err := warren.LoadManifest(checkoutPath)
+	if err != nil {
+		return 0, append(warnings, fmt.Sprintf("%s: reembed skipped: manifest unreadable: %v", warrenID, err))
+	}
+	total := 0
+	for _, project := range manifest.Projects {
+		vaultDir := filepath.Join(checkoutPath, filepath.FromSlash(project.Path))
+		if !dirExistsCLI(vaultDir) {
+			continue // project vault absent at this pin — nothing to embed
+		}
+		n, vaultWarnings := reembedVault(vaultDir, warrenID+"/"+project.ProjectID)
+		total += n
+		warnings = append(warnings, vaultWarnings...)
+	}
+	return total, warnings
+}
+
+// reembedVault upserts missing/stale embeddings for one project vault's
+// active nodes, embedding with the vault's own configured embedder (lazily
+// built only when a stale node is found). label prefixes every warning
+// ("<warren>/<project>").
+func reembedVault(vaultDir, label string) (int, []string) {
+	var warnings []string
+	warnf := func(format string, a ...any) {
+		warnings = append(warnings, label+": "+fmt.Sprintf(format, a...))
+	}
+	store := node.NewStore(vaultDir)
+	metas, err := store.ListActiveNodes()
+	if err != nil {
+		warnf("reembed skipped: list nodes: %v", err)
+		return 0, warnings
+	}
+	if len(metas) == 0 {
+		return 0, warnings
+	}
+	dbPath := filepath.Join(vaultDir, ".marmot-data", "embeddings.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
+		warnf("reembed skipped: %v", err)
+		return 0, warnings
+	}
+	embStore, err := embedding.NewStore(dbPath)
+	if err != nil {
+		warnf("reembed skipped: open embeddings: %v", err)
+		return 0, warnings
+	}
+	defer func() { _ = embStore.Close() }()
+
+	var embedder embedding.Embedder // built lazily on the first stale node
+	count := 0
+	for _, meta := range metas {
+		n, loadErr := store.LoadNode(meta.FilePath)
+		if loadErr != nil {
+			warnf("node %s unreadable: %v", meta.ID, loadErr)
+			continue
+		}
+		if n.ID == "" {
+			n.ID = meta.ID
+		}
+		text := warren.EmbedText(n)
+		if text == "" {
+			continue
+		}
+		hash := embedTextHash(text)
+		stale, staleErr := embStore.StaleCheck(n.ID, hash)
+		if staleErr != nil {
+			warnf("stale check %s: %v", n.ID, staleErr)
+			continue
+		}
+		if !stale {
+			continue // fast path: vector already keyed to this content
+		}
+		if embedder == nil {
+			var setupWarning string
+			embedder, setupWarning = reembedEmbedder(vaultDir)
+			if embedder == nil {
+				if setupWarning != "" {
+					warnf("%s", setupWarning)
+				}
+				return count, warnings
+			}
+			// Whole-store model guard (F2) before the first write: never mix
+			// models — one mixed row breaks every future search of the store.
+			if ok, compatErr := embStore.CompatibleModel(embedder.Model()); compatErr != nil {
+				warnf("reembed skipped: %v", compatErr)
+				return count, warnings
+			} else if !ok {
+				stored, _ := embStore.Models()
+				warnf("reembed skipped: store holds model(s) %s but the vault's embedder is %q — refusing to mix embedding models", strings.Join(stored, ","), embedder.Model())
+				return count, warnings
+			}
+		}
+		vec, embErr := embedder.Embed(text)
+		if embErr != nil {
+			warnf("embed %s: %v", n.ID, embErr)
+			continue
+		}
+		if upErr := embStore.UpsertChecked(n.ID, vec, hash, embedder.Model()); upErr != nil {
+			warnf("upsert %s: %v", n.ID, upErr)
+			continue
+		}
+		count++
+	}
+	return count, warnings
+}
+
+// reembedEmbedder builds a project vault's own configured embedder for the
+// sync reembed. It returns nil (with a warning) when the vault config is
+// unreadable, or when a real provider is configured but its API key is
+// missing: NewEmbedderFromVault would silently fall back to the mock
+// embedder, and writing mock-model rows into a store meant for the real
+// model is exactly the poisoning F2 forbids.
+func reembedEmbedder(vaultDir string) (embedding.Embedder, string) {
+	cfg, err := config.Load(vaultDir)
+	if err != nil {
+		return nil, fmt.Sprintf("reembed skipped: vault config unreadable: %v", err)
+	}
+	provider := cfg.EmbeddingProvider
+	if provider != "" && provider != "mock" && config.APIKeyWithVault(provider, cfg.VaultDir) == "" {
+		return nil, fmt.Sprintf("reembed skipped: %s provider configured but no API key found (set %s) — refusing the mock-embedder fallback", provider, config.EnvKeyName(provider))
+	}
+	emb, err := config.NewEmbedderFromVault(cfg)
+	if err != nil {
+		return nil, fmt.Sprintf("reembed skipped: embedder unavailable: %v", err)
+	}
+	return emb, ""
+}
+
+// embedTextHash is the summary-hash formula shared with the MCP/warren write
+// paths (sha256 hex of the embed text — staleness detection keys on it).
+func embedTextHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
 }
 
 func warrenProject(args []string) int {
@@ -234,7 +883,7 @@ func warrenProjectSetReadonly(args []string) int {
 
 func warrenProjectAdd(args []string) int {
 	args = reorderInterspersedFlags(args,
-		map[string]bool{"warren-dir": true, "path": true, "vault-id": true, "alias": true},
+		map[string]bool{"warren-dir": true, "path": true, "vault-id": true, "alias": true, "source-url": true, "source-commit": true},
 		map[string]bool{"generate-id": true},
 	)
 	fs := flag.NewFlagSet("warren project add", flag.ContinueOnError)
@@ -242,6 +891,8 @@ func warrenProjectAdd(args []string) int {
 	path := fs.String("path", "", "project .marmot path inside the Warren")
 	vaultID := fs.String("vault-id", "", "vault ID (default: project ID)")
 	generateID := fs.Bool("generate-id", false, "generate the project ID from existing metadata or path")
+	sourceURL := fs.String("source-url", "", "source repo URL recorded as manifest v3 provenance")
+	sourceCommit := fs.String("source-commit", "", "source repo commit recorded as manifest v3 provenance")
 	var aliases repeatedStringFlag
 	fs.Var(&aliases, "alias", "project alias (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -276,9 +927,11 @@ func warrenProjectAdd(args []string) int {
 		}
 	}
 	project := warren.Project{
-		ProjectID: projectID,
-		Path:      filepath.ToSlash(*path),
-		Aliases:   aliases,
+		ProjectID:    projectID,
+		Path:         filepath.ToSlash(*path),
+		Aliases:      aliases,
+		SourceURL:    warren.CanonicalRepoURL(*sourceURL),
+		SourceCommit: strings.TrimSpace(*sourceCommit),
 	}
 	if _, err := warren.AddProject(*root, project); err != nil {
 		fmt.Fprintf(os.Stderr, "warren project add: %v\n", err)
@@ -318,7 +971,7 @@ func generatedProjectID(root, projectPath string) string {
 
 func warrenProjectImport(args []string) int {
 	args = reorderInterspersedFlags(args,
-		map[string]bool{"warren-dir": true, "path": true, "vault-id": true, "alias": true},
+		map[string]bool{"warren-dir": true, "path": true, "vault-id": true, "alias": true, "source-url": true, "source-commit": true},
 		map[string]bool{"generate-id": true, "include-heat": true, "no-obsidian": true},
 	)
 	fs := flag.NewFlagSet("warren project import", flag.ContinueOnError)
@@ -328,6 +981,8 @@ func warrenProjectImport(args []string) int {
 	generateID := fs.Bool("generate-id", false, "generate the project ID from existing metadata or source path")
 	includeHeat := fs.Bool("include-heat", false, "include _heat/ files")
 	noObsidian := fs.Bool("no-obsidian", false, "exclude .obsidian/ files")
+	sourceURL := fs.String("source-url", "", "source repo URL recorded as manifest v3 provenance (default: auto-detect origin of the source checkout)")
+	sourceCommit := fs.String("source-commit", "", "source repo commit recorded as manifest v3 provenance (default: auto-detect HEAD of the source checkout)")
 	var aliases repeatedStringFlag
 	fs.Var(&aliases, "alias", "project alias (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -367,10 +1022,19 @@ func warrenProjectImport(args []string) int {
 		Path:      filepath.ToSlash(*path),
 		Aliases:   aliases,
 	}
+	autoURL, autoCommit := detectImportSource(source)
+	if *sourceURL == "" {
+		*sourceURL = autoURL
+	}
+	if *sourceCommit == "" {
+		*sourceCommit = autoCommit
+	}
 	opts := warren.ImportOptions{
-		IncludeHeat: *includeHeat,
-		NoObsidian:  *noObsidian,
-		VaultID:     *vaultID,
+		IncludeHeat:  *includeHeat,
+		NoObsidian:   *noObsidian,
+		VaultID:      *vaultID,
+		SourceURL:    *sourceURL,
+		SourceCommit: *sourceCommit,
 	}
 	if _, err := warren.ImportProject(*root, source, project, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "warren project import: %v\n", err)
@@ -378,6 +1042,30 @@ func warrenProjectImport(args []string) int {
 	}
 	fmt.Printf("Imported project %q from %s -> %s\n", project.ProjectID, source, project.Path)
 	return 0
+}
+
+// detectImportSource captures manifest v3 provenance for an import: when the
+// source .marmot dir's parent is inside a git repo, the repo's HEAD commit
+// and origin remote URL (canonicalized at write time by ImportProject) are
+// recorded automatically. Best-effort by design — a non-git source (or a
+// repo without an origin remote) degrades to empty fields and never blocks
+// the import.
+func detectImportSource(sourceMarmotDir string) (url, commit string) {
+	abs, err := filepath.Abs(sourceMarmotDir)
+	if err != nil {
+		return "", ""
+	}
+	parent := filepath.Dir(abs)
+	ctx := context.Background()
+	client := gitx.New()
+	head, err := client.HeadCommit(ctx, parent)
+	if err != nil {
+		return "", "" // not a git repo (or empty repo): no provenance
+	}
+	if origin, originErr := client.OutputIn(ctx, parent, "remote", "get-url", "origin"); originErr == nil {
+		url = strings.TrimSpace(origin)
+	}
+	return url, head
 }
 
 func generatedImportProjectID(source string) string {
@@ -734,10 +1422,13 @@ func warrenRegister(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren register: %v\n", err)
 		return 1
 	}
-	if _, err := warren.RegisterWorkspaceWarren(workspaceRoot, fs.Arg(0), fs.Arg(1)); err != nil {
+	if err := registerWorkspaceWarrenFor(marmotDir, workspaceRoot, fs.Arg(0), fs.Arg(1)); err != nil {
 		fmt.Fprintf(os.Stderr, "warren register: %v\n", err)
 		return 1
 	}
+	// Deprecation posture (§5.2): behavior kept identical, stderr-only note —
+	// e2e greps pin the stdout strings below.
+	fmt.Fprintln(os.Stderr, "note: registering a user-managed checkout is legacy; prefer 'marmot warren add <url>' (shared cache)")
 	fmt.Printf("Registered Warren %q -> %s\n", fs.Arg(0), fs.Arg(1))
 	// Identity is automatic (derived from vault_id, never mounted); register
 	// is the moment it becomes discoverable, so announce every match — and
@@ -790,7 +1481,7 @@ func warrenList(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren list: %v\n", err)
 		return 1
 	}
-	state, _, err := warren.LoadWorkspaceState(workspaceRoot)
+	state, _, err := loadWorkspaceStateFor(marmotDir, workspaceRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren list: %v\n", err)
 		return 1
@@ -798,24 +1489,41 @@ func warrenList(args []string) int {
 	// Identity is derived, never stored, so the state passthrough alone
 	// cannot show it — graft the computed per-warren identified projects on.
 	identified := identifiedProjectsByWarren(marmotDir)
+	// Cache-backed warrens (shared cache registry, §5.2) that are not in the
+	// workspace state are listed additively, marked [cache]: they resolve
+	// register-free for read verbs, so the list must show them.
+	cacheOnly := make(map[string]warren.WorkspaceWarren)
+	for _, id := range warren.CacheWarrenIDs() {
+		if _, ok := state.Warrens[id]; ok {
+			continue
+		}
+		if entry, ok := warren.CacheWorkspaceWarren(id); ok {
+			cacheOnly[id] = entry
+		}
+	}
 	if *jsonOut {
 		// Same shape as the raw workspace state plus additive per-warren
-		// "reachable" (whether the registered checkout still exists) and
-		// "identified_projects" (vault_id matches this workspace) fields.
+		// "reachable" (whether the registered checkout still exists),
+		// "identified_projects" (vault_id matches this workspace), and
+		// "cache" (resolved from the shared cache, not workspace state) fields.
 		type listEntry struct {
 			warren.WorkspaceWarren
 			Reachable          bool     `json:"reachable"`
 			IdentifiedProjects []string `json:"identified_projects,omitempty"`
+			Cache              bool     `json:"cache,omitempty"`
 		}
 		out := struct {
 			Warrens map[string]listEntry `json:"Warrens"`
-		}{Warrens: make(map[string]listEntry, len(state.Warrens))}
+		}{Warrens: make(map[string]listEntry, len(state.Warrens)+len(cacheOnly))}
 		for id, entry := range state.Warrens {
 			out.Warrens[id] = listEntry{WorkspaceWarren: entry, Reachable: dirExistsCLI(entry.Path), IdentifiedProjects: identified[id]}
 		}
+		for id, entry := range cacheOnly {
+			out.Warrens[id] = listEntry{WorkspaceWarren: entry, Reachable: dirExistsCLI(entry.Path), Cache: true}
+		}
 		return printJSON(out)
 	}
-	if len(state.Warrens) == 0 {
+	if len(state.Warrens) == 0 && len(cacheOnly) == 0 {
 		fmt.Println("No Warrens registered.")
 		return 0
 	}
@@ -833,6 +1541,15 @@ func warrenList(args []string) int {
 			identity = strings.Join(identified[id], ",")
 		}
 		fmt.Fprintf(w, "%s\t%s\t%t\t%d\t%d\t%t\t%s\n", id, entry.Path, dirExistsCLI(entry.Path), len(entry.ActiveProjects), len(entry.EditableProjects), entry.Materialized, identity)
+	}
+	cacheIDs := make([]string, 0, len(cacheOnly))
+	for id := range cacheOnly {
+		cacheIDs = append(cacheIDs, id)
+	}
+	sort.Strings(cacheIDs)
+	for _, id := range cacheIDs {
+		entry := cacheOnly[id]
+		fmt.Fprintf(w, "%s [cache]\t%s\t%t\t0\t0\tfalse\t-\n", id, entry.Path, dirExistsCLI(entry.Path))
 	}
 	_ = w.Flush()
 	return 0
@@ -881,12 +1598,26 @@ func warrenMount(args []string, isBurrow bool) int {
 		fmt.Fprintf(os.Stderr, "warren %s: %v\n", name, err)
 		return 1
 	}
-	state, _, err := warren.LoadWorkspaceState(workspaceRoot)
+	state, _, err := loadWorkspaceStateFor(marmotDir, workspaceRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren %s: %v\n", name, err)
 		return 1
 	}
 	entry, ok := state.Warrens[*warrenID]
+	if !ok {
+		// Cache-backed fallback (§5.2): a warren added with 'warren add' is
+		// mountable without a prior 'warren register' — record the shared
+		// checkout into the workspace state (mount state must reference a
+		// registered path) and proceed.
+		if cacheEntry, cached := warren.CacheWorkspaceWarren(*warrenID); cached {
+			if err := registerWorkspaceWarrenFor(marmotDir, workspaceRoot, *warrenID, cacheEntry.Path); err != nil {
+				fmt.Fprintf(os.Stderr, "warren %s: %v\n", name, err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "note: warren %q resolved from the shared cache; recorded checkout %s in this workspace\n", *warrenID, cacheEntry.Path)
+			entry, ok = cacheEntry, true
+		}
+	}
 	if !ok {
 		fmt.Fprintf(os.Stderr, "warren %s: Warren %q is not registered\n", name, *warrenID)
 		return 1
@@ -920,7 +1651,7 @@ func warrenMount(args []string, isBurrow bool) int {
 	for _, project := range manifest.Projects {
 		projectMap[project.ProjectID] = project
 	}
-	if _, err := warren.Mount(workspaceRoot, *warrenID, projects, materialize); err != nil {
+	if err := mountWarrenFor(marmotDir, workspaceRoot, *warrenID, projects, materialize); err != nil {
 		fmt.Fprintf(os.Stderr, "warren %s: %v\n", name, err)
 		return 1
 	}
@@ -952,7 +1683,7 @@ func warrenMount(args []string, isBurrow bool) int {
 					}
 				}
 				if len(rollback) > 0 {
-					if _, unmountErr := warren.Unmount(workspaceRoot, *warrenID, rollback); unmountErr != nil {
+					if unmountErr := unmountWarrenFor(marmotDir, workspaceRoot, *warrenID, rollback); unmountErr != nil {
 						fmt.Fprintf(os.Stderr, "warren %s: rollback unmount failed: %v\n", name, unmountErr)
 					} else {
 						fmt.Fprintf(os.Stderr, "warren %s: unmounted not-yet-cached project(s): %s\n", name, strings.Join(rollback, ", "))
@@ -1089,7 +1820,7 @@ func warrenUnmount(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren unmount: %v\n", err)
 		return 1
 	}
-	state, _, err := warren.LoadWorkspaceState(workspaceRoot)
+	state, _, err := loadWorkspaceStateFor(marmotDir, workspaceRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren unmount: %v\n", err)
 		return 1
@@ -1111,7 +1842,7 @@ func warrenUnmount(args []string) int {
 		}
 		projects = append([]string(nil), entry.ActiveProjects...)
 	}
-	if _, err := warren.Unmount(workspaceRoot, *warrenID, projects); err != nil {
+	if err := unmountWarrenFor(marmotDir, workspaceRoot, *warrenID, projects); err != nil {
 		fmt.Fprintf(os.Stderr, "warren unmount: %v\n", err)
 		return 1
 	}
@@ -1166,7 +1897,7 @@ func warrenStatus(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren status: %v\n", err)
 		return 1
 	}
-	id, entry, err := resolveWarrenEntry(workspaceRoot, *warrenID)
+	id, entry, err := resolveWarrenEntry(marmotDir, workspaceRoot, *warrenID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren status: %v\n", err)
 		return 1
@@ -1174,10 +1905,18 @@ func warrenStatus(args []string) int {
 	if !dirExistsCLI(entry.Path) {
 		fmt.Fprintf(os.Stderr, "warren %q UNREACHABLE at %s — re-run 'marmot warren register %s <path>' or 'marmot warren unregister --warren %s'\n", id, entry.Path, id, id)
 	}
-	statuses, err := warren.Status(workspaceRoot, id)
+	statuses, err := warrenStatusesFor(marmotDir, workspaceRoot, id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warren status: %v\n", err)
-		return 1
+		// Cache-backed fallback: the warren is not in the workspace state but
+		// resolveWarrenEntry synthesized it from the shared cache — derive
+		// statuses from the shared checkout (no mounts, purely manifest rows).
+		if cacheEntry, cached := warren.CacheWorkspaceWarren(id); cached {
+			statuses, err = warren.CacheStatuses(marmotDir, id, cacheEntry)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warren status: %v\n", err)
+			return 1
+		}
 	}
 	if *jsonOut {
 		return printJSON(statuses)
@@ -1235,14 +1974,14 @@ func warrenEdit(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: marmot warren edit [--off] --warren <id> <project-id>")
 		return 1
 	}
-	_, workspaceRoot, err := ensureWorkspace(*dir)
+	marmotDir, workspaceRoot, err := ensureWorkspace(*dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren edit: %v\n", err)
 		return 1
 	}
 	// Edit implies mount; make the auto-mount audible instead of silent.
 	wasActive := false
-	if state, _, loadErr := warren.LoadWorkspaceState(workspaceRoot); loadErr == nil {
+	if state, _, loadErr := loadWorkspaceStateFor(marmotDir, workspaceRoot); loadErr == nil {
 		if entry, ok := state.Warrens[*warrenID]; ok {
 			for _, active := range entry.ActiveProjects {
 				if active == fs.Arg(0) {
@@ -1250,9 +1989,17 @@ func warrenEdit(args []string) int {
 					break
 				}
 			}
+		} else if cacheEntry, cached := warren.CacheWorkspaceWarren(*warrenID); cached {
+			// Cache-backed fallback (§5.2): like mount, edit records into the
+			// workspace state, so the shared checkout is registered first.
+			if err := registerWorkspaceWarrenFor(marmotDir, workspaceRoot, *warrenID, cacheEntry.Path); err != nil {
+				fmt.Fprintf(os.Stderr, "warren edit: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(os.Stderr, "note: warren %q resolved from the shared cache; recorded checkout %s in this workspace\n", *warrenID, cacheEntry.Path)
 		}
 	}
-	if _, err := warren.SetEditable(workspaceRoot, *warrenID, fs.Arg(0), !*off); err != nil {
+	if err := setEditableWarrenFor(marmotDir, workspaceRoot, *warrenID, fs.Arg(0), !*off); err != nil {
 		fmt.Fprintf(os.Stderr, "warren edit: %v\n", err)
 		return 1
 	}
@@ -1288,7 +2035,7 @@ func warrenRefresh(args []string) int {
 		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
 		return 1
 	}
-	id, entry, err := resolveWarrenEntry(workspaceRoot, *warrenID)
+	id, entry, err := resolveWarrenEntry(marmotDir, workspaceRoot, *warrenID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
 		return 1
@@ -1298,13 +2045,19 @@ func warrenRefresh(args []string) int {
 		return 1
 	}
 	if *pull {
+		// Cache-backed warrens are synced via the bare mirror; --pull against
+		// the shared detached checkout is the legacy path. Hint, never error
+		// (§5.2 deprecation posture).
+		if _, cached := warren.CacheWorkspaceWarren(id); cached {
+			fmt.Fprintf(os.Stderr, "note: warren %q is cache-backed; prefer 'marmot warren sync %s' (refresh --pull targets user-managed checkouts)\n", id, id)
+		}
 		if code := warrenRefreshPull(marmotDir, id, entry); code != 0 {
 			return code
 		}
 	}
 	// Signal live observers (daemon owners, API watchers) via the file they
 	// already watch.
-	if err := warren.TouchWorkspaceState(workspaceRoot); err != nil {
+	if err := touchWorkspaceStateFor(marmotDir, workspaceRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "warren refresh: %v\n", err)
 		return 1
 	}
@@ -1416,6 +2169,35 @@ func warrenRefreshPull(marmotDir, id string, entry warren.WorkspaceWarren) int {
 	return 0
 }
 
+// jsonProposeEnvelope is the schema:1 stdout contract for
+// `warren propose --json` (consumed by stave's runJSON; additive-only
+// evolution — never remove or repurpose a field).
+type jsonProposeEnvelope struct {
+	Schema           int      `json:"schema"`
+	WarrenID         string   `json:"warren_id"`
+	ProjectID        string   `json:"project_id"`
+	Branch           string   `json:"branch"`
+	Commit           string   `json:"commit"`
+	Committed        bool     `json:"committed"`
+	NothingToPropose bool     `json:"nothing_to_propose"`
+	PushCommand      string   `json:"push_command"`
+	Warnings         []string `json:"warnings"`
+}
+
+// proposeExcludePathspecs keeps embeddings DB sidecars (embeddings.db and
+// its WAL/SHM files under any .marmot-data dir) out of both the dirty-scope
+// check and the proposal commit: derived binary state never belongs in a
+// warren PR. Both forms are listed so the directory itself (as git reports
+// untracked dirs) and files inside it are matched. Excludes MUST precede the
+// positive pathspec: `git add` (observed on git 2.50) stages nothing when an
+// exclude pathspec follows the positive one, but behaves correctly with the
+// excludes first — pathspec matching itself is documented as order-independent,
+// so this ordering is safe everywhere else too.
+var proposeExcludePathspecs = []string{
+	":(exclude,glob)**/.marmot-data",
+	":(exclude,glob)**/.marmot-data/**",
+}
+
 // warrenPropose packages editable-mount edits into a reviewable git
 // artifact (D3): a local branch holding one pathspec-limited commit of the
 // project's changes. It is local-only by design — marmot never pulls,
@@ -1423,39 +2205,71 @@ func warrenRefreshPull(marmotDir, id string, entry warren.WorkspaceWarren) int {
 // discovered and resolved by humans at push/PR time through normal git
 // flow. Concurrent proposes are serialized by git's own index lock plus the
 // branch-exists refusal.
+//
+// With --json every outcome is a schema:1 envelope on stdout: success and
+// nothing-to-propose both exit 0 (a clean tree is not a failure for the
+// stave flow), every refusal exits 1 with an error envelope. Human output
+// is unchanged when --json is absent, with one deliberate exception (OQ7):
+// a project whose only changes are embeddings DB sidecars under
+// .marmot-data used to produce a proposal and now reports
+// nothing-to-propose — derived binary state never belongs in a warren PR.
 func warrenPropose(args []string) int {
-	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "warren": true}, nil)
+	args = reorderInterspersedFlags(args, map[string]bool{"dir": true, "warren": true}, map[string]bool{"json": true})
 	fs := flag.NewFlagSet("warren propose", flag.ContinueOnError)
 	dir := fs.String("dir", "", "marmot vault directory (default: auto-discover or .marmot)")
 	warrenID := fs.String("warren", "", "Warren ID")
+	jsonOut := fs.Bool("json", false, "print a schema:1 JSON envelope on stdout")
 	if err := fs.Parse(args); err != nil {
+		// *jsonOut is unusable when parsing itself failed; honor the contract
+		// by scanning the raw args for the flag.
+		if proposeJSONRequested(args) {
+			return denJSONError("invalid_args", err.Error(), "usage: marmot warren propose [--warren <id>] [--json] [<project-id>]")
+		}
 		return 1
 	}
 	if fs.NArg() > 1 {
+		if *jsonOut {
+			return denJSONError("invalid_args", "too many arguments", "usage: marmot warren propose [--warren <id>] [--json] [<project-id>]")
+		}
 		fmt.Fprintln(os.Stderr, "usage: marmot warren propose [--warren <id>] [<project-id>]")
 		return 1
 	}
 	marmotDir, workspaceRoot, err := locateWorkspace(*dir)
 	if err != nil {
+		if *jsonOut {
+			return denJSONError("workspace_not_found", err.Error(), "run a mutating warren command, or marmot init, to create a workspace")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
 	}
-	id, entry, err := resolveWarrenEntry(workspaceRoot, *warrenID)
+	id, entry, err := resolveWarrenEntry(marmotDir, workspaceRoot, *warrenID)
 	if err != nil {
+		if *jsonOut {
+			return denJSONError("warren_unreachable", err.Error(), "register the warren with 'marmot warren register <id> <path>' or pass --warren")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
 	}
 	if !dirExistsCLI(entry.Path) {
+		if *jsonOut {
+			return denJSONError("warren_unreachable", fmt.Sprintf("warren %q is UNREACHABLE at %s", id, entry.Path), fmt.Sprintf("re-run 'marmot warren register %s <path>' with the current checkout location", id))
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: warren %q is UNREACHABLE at %s — re-run 'marmot warren register %s <path>' with the current checkout location\n", id, entry.Path, id)
 		return 1
 	}
 	if _, err := gitOutput(entry.Path, "rev-parse", "--is-inside-work-tree"); err != nil {
+		if *jsonOut {
+			return denJSONError("propose_failed", fmt.Sprintf("warren %q at %s is not a git checkout; propose creates a git branch and needs one", id, entry.Path), "")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: warren %q at %s is not a git checkout; propose creates a git branch and needs one\n", id, entry.Path)
 		return 1
 	}
 	// Propose must be able to return to a branch afterwards.
 	prevBranch, err := gitOutput(entry.Path, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
+		if *jsonOut {
+			return denJSONError("detached_head", fmt.Sprintf("warren checkout at %s is on a detached HEAD", entry.Path), "check out a branch first (propose needs a branch to return to)")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: warren checkout at %s is on a detached HEAD; check out a branch first (propose needs a branch to return to)\n", entry.Path)
 		return 1
 	}
@@ -1467,14 +2281,23 @@ func warrenPropose(args []string) int {
 	case len(entry.EditableProjects) == 1:
 		projectID = entry.EditableProjects[0]
 	case len(entry.EditableProjects) > 1:
+		if *jsonOut {
+			return denJSONError("invalid_args", fmt.Sprintf("warren %q has %d editable projects (%s)", id, len(entry.EditableProjects), strings.Join(entry.EditableProjects, ", ")), "name the one project to propose")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: warren %q has %d editable projects (%s); name the one to propose\n", id, len(entry.EditableProjects), strings.Join(entry.EditableProjects, ", "))
 		return 1
 	default:
+		if *jsonOut {
+			return denJSONError("invalid_args", fmt.Sprintf("no editable projects in warren %q", id), fmt.Sprintf("name a project explicitly, or enable editing with 'marmot warren edit --warren %s <project-id>' first", id))
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: no editable projects in warren %q; name a project explicitly, or enable editing with 'marmot warren edit --warren %s <project-id>' first\n", id, id)
 		return 1
 	}
 	manifest, _, err := warren.LoadManifest(entry.Path)
 	if err != nil {
+		if *jsonOut {
+			return denJSONError("propose_failed", err.Error(), "")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
 	}
@@ -1487,6 +2310,9 @@ func warrenPropose(args []string) int {
 		}
 	}
 	if !found {
+		if *jsonOut {
+			return denJSONError("invalid_args", fmt.Sprintf("project %q is not registered in warren %q", projectID, id), "")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: project %q is not registered in warren %q\n", projectID, id)
 		return 1
 	}
@@ -1501,17 +2327,35 @@ func warrenPropose(args []string) int {
 			vaultID = meta.VaultID
 		}
 		if vaultID == local {
+			if *jsonOut {
+				return denJSONError("invalid_args", fmt.Sprintf("project %q is this workspace (vault ID %q); its live context never lands in the warren checkout", projectID, vaultID), "refresh the warren's copy in the warren repo (project remove + project import) and commit there")
+			}
 			fmt.Fprintf(os.Stderr, "warren propose: project %q is this workspace (vault ID %q); its live context never lands in the warren checkout — refresh the warren's copy in the warren repo (project remove + project import) and commit there\n", projectID, vaultID)
 			return 1
 		}
 	}
-	// Scope check, pathspec-limited: only changes under the project count.
-	porcelain, err := gitOutput(entry.Path, "status", "--porcelain", "--", project.Path)
+	// Scope check, pathspec-limited: only changes under the project count,
+	// and embeddings DB sidecars never count (same excludes as the commit,
+	// so a DB-only dirty tree is nothing-to-propose, not an empty commit).
+	statusArgs := append(append([]string{"status", "--porcelain", "--"}, proposeExcludePathspecs...), project.Path)
+	porcelain, err := gitOutput(entry.Path, statusArgs...)
 	if err != nil {
+		if *jsonOut {
+			return denJSONError("propose_failed", err.Error(), "")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
 	}
 	if porcelain == "" {
+		if *jsonOut {
+			return printDenJSON(jsonProposeEnvelope{
+				Schema:           1,
+				WarrenID:         id,
+				ProjectID:        projectID,
+				NothingToPropose: true,
+				Warnings:         []string{},
+			})
+		}
 		fmt.Printf("nothing to propose for %q (no changes under %s)\n", projectID, project.Path)
 		return 0
 	}
@@ -1519,24 +2363,38 @@ func warrenPropose(args []string) int {
 	// Timestamped names make an existing branch near-impossible; the check
 	// is belt-and-braces so we never move a branch the user already had.
 	if _, err := gitOutput(entry.Path, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		if *jsonOut {
+			return denJSONError("propose_failed", fmt.Sprintf("branch %q already exists in %s", branch, entry.Path), "re-run to get a fresh timestamp")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: branch %q already exists in %s; re-run to get a fresh timestamp\n", branch, entry.Path)
 		return 1
 	}
 	if _, err := gitOutput(entry.Path, "checkout", "-b", branch); err != nil {
+		if *jsonOut {
+			return denJSONError("propose_failed", err.Error(), "")
+		}
 		fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 		return 1
 	}
 	// From here on any failure tries to return to the previous branch and
 	// reports the exact repo state — never delete or reset anything.
+	// Pathspec-limited add/commit: unrelated files the user had staged stay
+	// staged and out of the proposal, and DB sidecars stay in the worktree.
+	proposePathspec := append(append([]string{"--"}, proposeExcludePathspecs...), project.Path)
 	steps := [][]string{
-		{"add", "--", project.Path},
-		// Pathspec-limited commit: unrelated files the user had staged stay
-		// staged and out of the proposal.
-		{"commit", "-m", fmt.Sprintf("marmot propose: %s context updates", projectID), "--", project.Path},
+		append([]string{"add"}, proposePathspec...),
+		append([]string{"commit", "-m", fmt.Sprintf("marmot propose: %s context updates", projectID)}, proposePathspec...),
 		{"checkout", prevBranch},
 	}
+	commitSHA := ""
 	for _, step := range steps {
 		if _, err := gitOutput(entry.Path, step...); err != nil {
+			if *jsonOut {
+				_, _ = gitOutput(entry.Path, "checkout", prevBranch)
+				currentBranch, _ := gitOutput(entry.Path, "rev-parse", "--abbrev-ref", "HEAD")
+				staged, _ := gitOutput(entry.Path, "diff", "--cached", "--name-only")
+				return denJSONError("propose_failed", err.Error(), fmt.Sprintf("repo state left untouched otherwise — current branch %q, staged files: %s", currentBranch, staged))
+			}
 			fmt.Fprintf(os.Stderr, "warren propose: %v\n", err)
 			_, _ = gitOutput(entry.Path, "checkout", prevBranch)
 			currentBranch, _ := gitOutput(entry.Path, "rev-parse", "--abbrev-ref", "HEAD")
@@ -1544,10 +2402,53 @@ func warrenPropose(args []string) int {
 			fmt.Fprintf(os.Stderr, "warren propose: repo state left untouched otherwise — current branch %q, staged files: %s\n", currentBranch, staged)
 			return 1
 		}
+		if step[0] == "commit" {
+			// Best-effort sha capture while the proposal branch is still
+			// checked out; the contract allows commit to be empty.
+			commitSHA, _ = gitOutput(entry.Path, "rev-parse", "HEAD")
+		}
+	}
+	if *jsonOut {
+		return printDenJSON(jsonProposeEnvelope{
+			Schema:      1,
+			WarrenID:    id,
+			ProjectID:   projectID,
+			Branch:      branch,
+			Commit:      commitSHA,
+			Committed:   true,
+			PushCommand: fmt.Sprintf("git -C %s push -u origin %s", shellQuoteArg(entry.Path), branch),
+			Warnings:    []string{},
+		})
 	}
 	fmt.Printf("Created branch %q with the %s context updates (back on %q).\n", branch, projectID, prevBranch)
-	fmt.Printf("Publish it with:\n  git -C %s push -u origin %s\nthen open a pull request in the warren repository. marmot never pushes for you.\n", entry.Path, branch)
+	fmt.Printf("Publish it with:\n  git -C %s push -u origin %s\nthen open a pull request in the warren repository. marmot never pushes for you.\n", shellQuoteArg(entry.Path), branch)
 	return 0
+}
+
+// proposeJSONRequested reports whether the raw args ask for --json; used only
+// on the flag-parse-failure path, where the parsed flag value is unavailable
+// but the stdout contract still requires an error envelope. It mirrors the
+// flag package's own boolean handling: bare --json/-json means true, and
+// --json=VALUE forms go through strconv.ParseBool (so --json=TRUE and
+// --json=1 count), with unparseable or false values ignored. Args after a
+// bare "--" terminator are positional and never flags.
+func proposeJSONRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
+		name, value, hasValue := strings.Cut(arg, "=")
+		if name != "--json" && name != "-json" {
+			continue
+		}
+		if !hasValue {
+			return true
+		}
+		if v, err := strconv.ParseBool(value); err == nil && v {
+			return true
+		}
+	}
+	return false
 }
 
 // locateWorkspace resolves the marmot dir for read-only (or purely
@@ -1555,6 +2456,12 @@ func warrenPropose(args []string) int {
 // ensureWorkspace it never MkdirAll's .marmot or writes a mock-provider
 // _config.md, so `warren list` in a random directory errors instead of
 // planting a vault there.
+//
+// The returned workspaceRoot is only meaningful for .marmot-named dirs
+// (state at <workspaceRoot>/.marmot/_warren.md == <marmotDir>/_warren.md);
+// for direct-state marmot dirs (see directStateMarmotDir) callers must
+// route state access through marmotDir — use loadWorkspaceStateFor and
+// friends rather than the workspaceRoot-based warren APIs.
 func locateWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error) {
 	if dirFlag == "" {
 		dirFlag = resolveVaultDir("")
@@ -1587,6 +2494,125 @@ func ensureWorkspace(dirFlag string) (marmotDir, workspaceRoot string, err error
 	return marmotDir, workspaceRoot, nil
 }
 
+// directStateMarmotDir reports whether marmotDir keeps its warren workspace
+// state directly inside itself (<marmotDir>/_warren.md) instead of resolving
+// through a parent workspace root's .marmot/. Den identity vaults
+// (~/.marmot/dens/<id>/vault, what resolveDenID returns) are the canonical
+// case: they carry the vault identity marker _config.md but are not named
+// .marmot, so <workspaceRoot>/.marmot-style resolution can never address
+// them — warren.ActiveMounts (what den serves read) looks at
+// <vault>/_warren.md. Detection is deliberately conservative: only a dir
+// that itself contains _config.md qualifies (a workspace root never does,
+// its config lives in .marmot/), and .marmot-named dirs are excluded so
+// classic workspaces keep resolving through their root unchanged.
+func directStateMarmotDir(marmotDir string) bool {
+	if marmotDir == "" || filepath.Base(marmotDir) == warren.MarmotDirName {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(marmotDir, "_config.md"))
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// loadWorkspaceStateFor reads the warren workspace state from wherever it
+// actually lives for this workspace shape: directly in a direct-state marmot
+// dir (den vaults), or under <workspaceRoot>/.marmot for classic workspaces.
+// Both paths are identical for .marmot-named dirs.
+func loadWorkspaceStateFor(marmotDir, workspaceRoot string) (*warren.WorkspaceState, string, error) {
+	if directStateMarmotDir(marmotDir) {
+		return warren.LoadWorkspaceStateFromMarmot(marmotDir)
+	}
+	return warren.LoadWorkspaceState(workspaceRoot)
+}
+
+// registerWorkspaceWarrenFor registers warrenID -> warrenRoot in the
+// workspace state. Classic workspaces delegate to
+// warren.RegisterWorkspaceWarren; direct-state marmot dirs mirror it against
+// <marmotDir>/_warren.md via warren.UpdateWorkspaceStateInMarmot (the same
+// flocked primitive den.EnsureEditableMount uses), so `warren register
+// --dir <den-vault>` lands the state where warren.ActiveMounts reads it
+// instead of planting <den-root>/.marmot/_warren.md.
+func registerWorkspaceWarrenFor(marmotDir, workspaceRoot, warrenID, warrenRoot string) error {
+	if !directStateMarmotDir(marmotDir) {
+		_, err := warren.RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot)
+		return err
+	}
+	absRoot, err := filepath.Abs(warrenRoot)
+	if err != nil {
+		return fmt.Errorf("resolve Warren path: %w", err)
+	}
+	manifest, _, err := warren.LoadManifest(absRoot)
+	if err != nil {
+		return err
+	}
+	if manifest.WarrenID != warrenID {
+		return fmt.Errorf("warren ID mismatch: manifest has %q, command used %q", manifest.WarrenID, warrenID)
+	}
+	return warren.UpdateWorkspaceStateInMarmot(marmotDir, func(state *warren.WorkspaceState) (bool, error) {
+		if state.Warrens == nil {
+			state.Warrens = map[string]warren.WorkspaceWarren{}
+		}
+		entry := state.Warrens[warrenID]
+		entry.Path = absRoot
+		state.Warrens[warrenID] = entry
+		return true, nil
+	})
+}
+
+// touchWorkspaceStateFor rewrites the workspace _warren.md unchanged (the
+// change signal live daemon owners watch), targeting the same location
+// loadWorkspaceStateFor reads.
+func touchWorkspaceStateFor(marmotDir, workspaceRoot string) error {
+	if !directStateMarmotDir(marmotDir) {
+		return warren.TouchWorkspaceState(workspaceRoot)
+	}
+	return warren.UpdateWorkspaceStateInMarmot(marmotDir, func(*warren.WorkspaceState) (bool, error) {
+		return true, nil // unchanged rewrite IS the touch
+	})
+}
+
+// mountWarrenFor routes Mount to wherever this workspace shape keeps its
+// state: <marmotDir>/_warren.md for direct-state marmot dirs (den vaults),
+// <workspaceRoot>/.marmot/_warren.md for classic workspaces. The remaining
+// *For helpers below do the same for their verbs, so every state-consuming
+// warren verb resolves state through one abstraction and `status` can never
+// disagree with `list` about what is registered.
+func mountWarrenFor(marmotDir, workspaceRoot, warrenID string, projects []string, materialize bool) error {
+	if directStateMarmotDir(marmotDir) {
+		_, err := warren.MountFromMarmot(marmotDir, warrenID, projects, materialize)
+		return err
+	}
+	_, err := warren.Mount(workspaceRoot, warrenID, projects, materialize)
+	return err
+}
+
+// unmountWarrenFor routes Unmount like mountWarrenFor.
+func unmountWarrenFor(marmotDir, workspaceRoot, warrenID string, projects []string) error {
+	if directStateMarmotDir(marmotDir) {
+		_, err := warren.UnmountFromMarmot(marmotDir, warrenID, projects)
+		return err
+	}
+	_, err := warren.Unmount(workspaceRoot, warrenID, projects)
+	return err
+}
+
+// setEditableWarrenFor routes SetEditable like mountWarrenFor.
+func setEditableWarrenFor(marmotDir, workspaceRoot, warrenID, projectID string, editable bool) error {
+	if directStateMarmotDir(marmotDir) {
+		_, err := warren.SetEditableFromMarmot(marmotDir, warrenID, projectID, editable)
+		return err
+	}
+	_, err := warren.SetEditable(workspaceRoot, warrenID, projectID, editable)
+	return err
+}
+
+// warrenStatusesFor routes Status like mountWarrenFor.
+func warrenStatusesFor(marmotDir, workspaceRoot, warrenID string) ([]warren.ProjectStatus, error) {
+	if directStateMarmotDir(marmotDir) {
+		return warren.StatusFromMarmot(marmotDir, warrenID)
+	}
+	return warren.Status(workspaceRoot, warrenID)
+}
+
 // nudgeMissingVaultID prints the no-vault_id onboarding nudge: without a
 // vault_id in _config.md, warren bridges can never identify this workspace's
 // own project (identity is derived by vault_id comparison).
@@ -1596,15 +2622,21 @@ func nudgeMissingVaultID() {
 
 // resolveWarrenEntry resolves the requested (or sole registered) Warren ID
 // and returns its workspace state entry alongside, so callers get the
-// checkout path without a second state load.
-func resolveWarrenEntry(workspaceRoot, requested string) (string, warren.WorkspaceWarren, error) {
-	state, _, err := warren.LoadWorkspaceState(workspaceRoot)
+// checkout path without a second state load. An explicitly requested id that
+// is absent from the workspace state falls back to the shared warren cache
+// (§5.2): a cache-backed warren resolves to its shared read checkout without
+// any prior 'warren register', so read verbs (status, refresh) just work.
+func resolveWarrenEntry(marmotDir, workspaceRoot, requested string) (string, warren.WorkspaceWarren, error) {
+	state, _, err := loadWorkspaceStateFor(marmotDir, workspaceRoot)
 	if err != nil {
 		return "", warren.WorkspaceWarren{}, err
 	}
 	if requested != "" {
 		entry, ok := state.Warrens[requested]
 		if !ok {
+			if cacheEntry, cached := warren.CacheWorkspaceWarren(requested); cached {
+				return requested, cacheEntry, nil
+			}
 			return "", warren.WorkspaceWarren{}, fmt.Errorf("warren %q is not registered", requested)
 		}
 		return requested, entry, nil

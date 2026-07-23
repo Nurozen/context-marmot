@@ -329,10 +329,12 @@ func TestWarrenGraphAndEditableWritePolicy(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected read-only 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// U4.2: the refusal names its remediation command.
-	if body := rec.Body.String(); !strings.Contains(body, "'marmot warren edit project-a --warren product-platform'") ||
-		!strings.Contains(body, "unless the warren author marked it read-only") {
-		t.Fatalf("read-only refusal = %q, want the warren edit remediation hint", body)
+	// §9.3: the refusal names the mode and the den-verb remediation. (JSON
+	// escapes "<den>" as <den>, so match around the placeholder.)
+	if body := rec.Body.String(); !strings.Contains(body, "read-only warren mount") ||
+		!strings.Contains(body, "marmot den link") ||
+		!strings.Contains(body, "--edit product-platform/project-a") {
+		t.Fatalf("read-only refusal = %q, want mode-naming copy with the den link remediation", body)
 	}
 
 	if _, err := warrenpkg.SetEditable(workspaceRoot, "product-platform", "project-a", true); err != nil {

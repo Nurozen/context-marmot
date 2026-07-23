@@ -27,15 +27,18 @@ const (
 
 // CurrentManifestVersion is the newest warren manifest schema this binary
 // fully understands. Version 2 added the per-project author-side `readonly`
-// write policy. Read paths stay permissive: LoadManifest warns on a newer
-// version and keeps working best-effort. Write paths refuse (see
-// checkManifestWritable): parsing goes through fixed structs, so a binary
-// that does not know a field would silently strip it on a Load->Save
-// round-trip — the version ceiling turns that silent data loss into a
-// refusal. True unknown-field preservation (a yaml.Node round-trip) was
-// considered and deliberately deferred until a concrete version-3 field
-// exists; the ceiling makes it unnecessary until then.
-const CurrentManifestVersion = 2
+// write policy. Version 3 added the per-project `source_url` /
+// `source_commit` provenance fields captured at import (§15.4): they power
+// reference-repo → warren-project resolution and honest skew reporting.
+// Read paths stay permissive: LoadManifest warns on a newer version and
+// keeps working best-effort. Write paths refuse (see checkManifestWritable):
+// parsing goes through fixed structs, so a binary that does not know a field
+// would silently strip it on a Load->Save round-trip — the version ceiling
+// turns that silent data loss into a refusal. A manifest is only written as
+// version 3 when some project actually carries source fields (see
+// normalizeManifest), so source-free manifests keep round-tripping at their
+// loaded version and stay editable by older binaries.
+const CurrentManifestVersion = 3
 
 // warnWriter receives degradation warnings (unreadable manifests/metadata).
 // Package-level so tests can capture it; production always uses stderr.
@@ -59,6 +62,15 @@ type Project struct {
 	// manifest to version 2 so pre-readonly binaries refuse to rewrite (and
 	// silently strip) it. Manifest schema v2.
 	ReadOnly bool `yaml:"readonly,omitempty" json:"readonly,omitempty"`
+	// SourceURL is the canonical repo URL (see CanonicalRepoURL) of the
+	// source checkout this project's vault was imported from. Captured at
+	// `warren project import`; powers reference-repo → warren-project
+	// resolution (§15.5) and source-skew reporting. Setting it bumps the
+	// manifest to version 3. Manifest schema v3.
+	SourceURL string `yaml:"source_url,omitempty" json:"source_url,omitempty"`
+	// SourceCommit is the source checkout's HEAD commit at import time.
+	// Manifest schema v3.
+	SourceCommit string `yaml:"source_commit,omitempty" json:"source_commit,omitempty"`
 }
 
 // Bridge describes curated cross-project relations in a Warren.
@@ -155,6 +167,12 @@ type ImportOptions struct {
 	IncludeHeat bool
 	NoObsidian  bool
 	VaultID     string
+	// SourceURL/SourceCommit record where the imported vault's source
+	// checkout came from (manifest v3 provenance, §15.4). SourceURL is
+	// canonicalized via CanonicalRepoURL before it is written; empty values
+	// leave the fields unset and the manifest version untouched.
+	SourceURL    string
+	SourceCommit string
 }
 
 // Init creates or normalizes the root Warren manifest.
@@ -293,6 +311,14 @@ func importProjectLocked(root, sourceMarmotDir string, project Project, opts Imp
 	}
 	project.Path = filepath.ToSlash(filepath.Clean(project.Path))
 	project.Aliases = uniqueSorted(project.Aliases)
+	// Manifest v3 provenance: canonicalize at write time so every stored
+	// source_url is directly comparable (resolver matches canonical forms).
+	if url := CanonicalRepoURL(opts.SourceURL); url != "" {
+		project.SourceURL = url
+	}
+	if commit := strings.TrimSpace(opts.SourceCommit); commit != "" {
+		project.SourceCommit = commit
+	}
 	if err := ValidateProjectID(project.ProjectID); err != nil {
 		return nil, err
 	}
@@ -903,7 +929,11 @@ func gitignoreHasEntry(root, entry string) bool {
 // Legacy editable/materialized self-mount state written by older binaries
 // surfaces here with its remediation verb.
 func DoctorWorkspace(workspaceMarmotDir, workspaceRoot string) (DoctorReport, error) {
-	state, _, err := LoadWorkspaceState(workspaceRoot)
+	// State is keyed off the marmot dir, not workspaceRoot: identical for
+	// classic workspaces (<root>/.marmot/_warren.md IS <marmotDir>/_warren.md)
+	// and correct for direct-state vaults (den identity vaults), whose state
+	// lives in the vault itself and never resolves through a parent root.
+	state, _, err := LoadWorkspaceStateFromMarmot(workspaceMarmotDir)
 	if err != nil {
 		return DoctorReport{}, err
 	}
@@ -1249,6 +1279,31 @@ func SaveWorkspaceStateToMarmot(marmotDir string, state *WorkspaceState, body st
 	return saveWorkspaceStatePath(filepath.Join(marmotDir, ManifestFileName), state, body)
 }
 
+// UpdateWorkspaceStateInMarmot mutates workspace state stored directly in an
+// explicit marmot dir (<marmotDir>/_warren.md) under the same cross-process
+// flock convention updateWorkspaceState uses for workspace roots. It is the
+// shared load→mutate→save primitive for den identity vaults (den link's
+// editable mounts, register/touch routing in the CLI). fn returns write=false
+// to skip the save: idempotent no-op paths must not rewrite the file, because
+// a rewrite is the change signal live daemon owners watch.
+func UpdateWorkspaceStateInMarmot(marmotDir string, fn func(*WorkspaceState) (write bool, err error)) error {
+	if err := validateNonEmptyPath("marmot dir", marmotDir); err != nil {
+		return err
+	}
+	statePath := filepath.Join(marmotDir, ManifestFileName)
+	return flock.WithLock(statePath+".lock", func() error {
+		state, body, err := loadWorkspaceStatePath(statePath)
+		if err != nil {
+			return err
+		}
+		write, err := fn(state)
+		if err != nil || !write {
+			return err
+		}
+		return saveWorkspaceStatePath(statePath, state, body)
+	})
+}
+
 func saveWorkspaceStatePath(path string, state *WorkspaceState, body string) error {
 	if state == nil {
 		state = defaultWorkspaceState()
@@ -1284,65 +1339,8 @@ func RegisterWorkspaceWarren(workspaceRoot, warrenID, warrenRoot string) (*Works
 // Mount marks projects active in the local workspace.
 func Mount(workspaceRoot, warrenID string, projects []string, materialized bool) (*WorkspaceState, error) {
 	wsMarmotDir := workspaceMarmotDir(workspaceRoot)
-	local := sourceVaultID(wsMarmotDir)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
-		entry, ok := state.Warrens[warrenID]
-		if !ok {
-			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
-		}
-		manifest, _, err := LoadManifest(entry.Path)
-		if err != nil {
-			return err
-		}
-		registered := make(map[string]Project, len(manifest.Projects))
-		for _, project := range manifest.Projects {
-			registered[project.ProjectID] = project
-		}
-		claimed := claimedVaultIDs(wsMarmotDir, state)
-		for _, projectID := range projects {
-			if err := ValidateProjectID(projectID); err != nil {
-				return err
-			}
-			project, known := registered[projectID]
-			if !known {
-				return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
-			}
-			// A materialized (burrowed) cache never syncs edits back to the
-			// checkout, so materializing an editable project would silently
-			// strand its future edits in the cache.
-			if materialized && containsName(entry.EditableProjects, projectID) {
-				return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or use 'marmot warren mount' instead of burrow", projectID, warrenID, projectID, warrenID)
-			}
-			// Vault IDs form one flat routing namespace per workspace: a
-			// duplicate would be resolved last-mount-wins at runtime, silently
-			// answering queries from the wrong project. Refuse at mount time.
-			vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
-			if local != "" && vaultID == local {
-				// Identified project: this project IS the workspace vault.
-				// Identity is derived from vault_id, always on, and stateless —
-				// mounting records nothing (bridges involving it activate
-				// without a mount). It can never be editable or materialized
-				// (a cache/copy would be a stale or split-brained shadow).
-				if materialized {
-					return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; a self-alias serves from the live vault and cannot be materialized — use 'marmot warren mount' instead of burrow", projectID, warrenID, vaultID)
-				}
-				if containsName(entry.EditableProjects, projectID) {
-					return fmt.Errorf("project %q in warren %q is marked editable but has this workspace's own vault ID %q; edit it directly in this workspace — run 'marmot warren edit %s --warren %s --off' first", projectID, warrenID, vaultID, projectID, warrenID)
-				}
-				fmt.Fprintf(warnWriter, "note: project %s/%s IS this workspace (vault ID %q); identity is automatic — bridges involving it activate without a mount\n", warrenID, projectID, vaultID)
-				continue // no state write, no vault-ID claim: identity is derived, not mounted
-			}
-			if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
-				return err
-			}
-			claimed[vaultID] = vaultClaim{WarrenID: warrenID, ProjectID: projectID}
-			entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
-		}
-		if materialized {
-			entry.Materialized = true
-		}
-		state.Warrens[warrenID] = entry
-		return nil
+		return applyMount(wsMarmotDir, state, warrenID, projects, materialized)
 	})
 }
 
@@ -1350,78 +1348,7 @@ func Mount(workspaceRoot, warrenID string, projects []string, materialized bool)
 func SetEditable(workspaceRoot, warrenID, projectID string, editable bool) (*WorkspaceState, error) {
 	wsMarmotDir := workspaceMarmotDir(workspaceRoot)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
-		entry, ok := state.Warrens[warrenID]
-		if !ok {
-			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
-		}
-		if err := ValidateProjectID(projectID); err != nil {
-			return err
-		}
-		manifest, _, err := LoadManifest(entry.Path)
-		if err != nil {
-			return err
-		}
-		var project Project
-		known := false
-		for _, p := range manifest.Projects {
-			if p.ProjectID == projectID {
-				project, known = p, true
-				break
-			}
-		}
-		if !known {
-			return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
-		}
-		// Author-side write policy (manifest schema v2): the warren owner
-		// marked the project read-only, so no workspace may enable edit.
-		// Disabling (--off) stays allowed regardless.
-		if editable && project.ReadOnly {
-			return fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", projectID)
-		}
-		// Self-alias (vault_id matches the live local vault): the mount is a
-		// read-through view of the live vault, so editable would split-brain
-		// writes into the warren checkout. Disabling (--off) stays allowed —
-		// it is the legacy-state escape hatch.
-		vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
-		local := sourceVaultID(wsMarmotDir)
-		selfAlias := local != "" && vaultID == local
-		if selfAlias && editable {
-			return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; it is served as an alias of the live vault — edit nodes directly in this workspace (no @ prefix) instead of enabling warren edit", projectID, warrenID, vaultID)
-		}
-		// Refuse editable on a burrowed project: edits would land in the
-		// materialized cache and never sync back to the checkout, while
-		// `warren propose` tells the user to commit a checkout that never
-		// received them. Materialized is warren-wide, so the per-project
-		// ground truth is the existence of the burrow cache dir. Disabling
-		// (--off) stays allowed regardless.
-		if editable && entry.Materialized {
-			cached := materializedProjectPath(wsMarmotDir, warrenID, projectID)
-			if dirExists(cached) {
-				return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — drop the burrow first ('marmot warren burrow --drop --warren %s %s') before enabling edit", projectID, warrenID, warrenID, projectID)
-			}
-		}
-		// Edit implies mount: when the project is not yet active this is an
-		// auto-mount, so it gets the same vault-ID collision refusal as Mount.
-		// An identified project skips BOTH the collision check and the mount
-		// record: there is nothing to mount (identity is derived from
-		// vault_id), so --off just clears any legacy EditableProjects entry
-		// without re-recording R1-era self state.
-		if !containsName(entry.ActiveProjects, projectID) && !selfAlias {
-			claimed := claimedVaultIDs(wsMarmotDir, state)
-			if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
-				return err
-			}
-		}
-		if !selfAlias {
-			entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
-		}
-		if editable {
-			entry.EditableProjects = addName(entry.EditableProjects, projectID)
-		} else {
-			entry.EditableProjects = removeName(entry.EditableProjects, projectID)
-		}
-		state.Warrens[warrenID] = entry
-		return nil
+		return applySetEditable(wsMarmotDir, state, warrenID, projectID, editable)
 	})
 }
 
@@ -1445,25 +1372,7 @@ func TouchWorkspaceState(workspaceRoot string) error {
 func Unmount(workspaceRoot, warrenID string, projects []string) (*WorkspaceState, error) {
 	wsMarmotDir := workspaceMarmotDir(workspaceRoot)
 	return updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
-		entry, ok := state.Warrens[warrenID]
-		if !ok {
-			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
-		}
-		for _, project := range projects {
-			if err := ValidateProjectID(project); err != nil {
-				return err
-			}
-			if !containsName(entry.ActiveProjects, project) {
-				if identifiedProject(wsMarmotDir, warrenID, entry, project) {
-					return fmt.Errorf("project %q is not mounted from warren %q in this workspace (identity is derived from vault_id, not a mount — to sever it, re-import the warren copy with a distinct --vault-id)", project, warrenID)
-				}
-				return fmt.Errorf("project %q is not mounted from warren %q in this workspace", project, warrenID)
-			}
-		}
-		entry.ActiveProjects = removeNames(entry.ActiveProjects, projects)
-		entry.EditableProjects = removeNames(entry.EditableProjects, projects)
-		state.Warrens[warrenID] = entry
-		return nil
+		return applyUnmount(wsMarmotDir, state, warrenID, projects)
 	})
 }
 
@@ -1477,7 +1386,9 @@ func Unmount(workspaceRoot, warrenID string, projects []string) (*WorkspaceState
 // fail loudly (once-per-vault warnings) — the same bounded exposure as a
 // re-burrow swap.
 func DropMaterialized(workspaceMarmotDir, workspaceRoot, warrenID string, projects []string) error {
-	state, _, err := LoadWorkspaceState(workspaceRoot)
+	// State access is keyed off workspaceMarmotDir (same file as workspaceRoot
+	// resolution for classic workspaces; the only file for direct-state vaults).
+	state, _, err := LoadWorkspaceStateFromMarmot(workspaceMarmotDir)
 	if err != nil {
 		return err
 	}
@@ -1498,7 +1409,7 @@ func DropMaterialized(workspaceMarmotDir, workspaceRoot, warrenID string, projec
 			return fmt.Errorf("drop burrow cache for %q: %w", project, err)
 		}
 	}
-	_, err = updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+	_, err = updateWorkspaceStateFromMarmot(workspaceMarmotDir, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
 			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
@@ -1522,7 +1433,7 @@ func DropMaterialized(workspaceMarmotDir, workspaceRoot, warrenID string, projec
 // to call any time: it re-checks the cache ground truth under the state
 // flock and is a no-op while caches (or no entry) exist.
 func ClearStaleMaterialized(workspaceMarmotDir, workspaceRoot, warrenID string) error {
-	_, err := updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+	_, err := updateWorkspaceStateFromMarmot(workspaceMarmotDir, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok || !entry.Materialized {
 			return nil
@@ -1567,7 +1478,7 @@ func MaterializedProjects(workspaceMarmotDir, warrenID string) []string {
 // mounts silently dropped). As in DropMaterialized, caches are removed
 // before the state write so live observers reload against the final layout.
 func Unregister(workspaceMarmotDir, workspaceRoot, warrenID string, force bool) error {
-	_, err := updateWorkspaceState(workspaceRoot, func(state *WorkspaceState) error {
+	_, err := updateWorkspaceStateFromMarmot(workspaceMarmotDir, func(state *WorkspaceState) error {
 		entry, ok := state.Warrens[warrenID]
 		if !ok {
 			return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
@@ -1749,9 +1660,54 @@ func EmbedText(n *node.Node) string {
 // point for future manifest write policy. The node save error is fatal; an
 // embedding failure never rolls back the durable node write and is returned
 // as a warning string instead, which callers must surface.
+//
+// When the mount lives inside a cache edit worktree (den edit link into a
+// cache-backed warren, see editworktree.go) the node write is auto-committed
+// on the worktree's edit branch, pathspec-limited to the node file (OQ7). A
+// commit failure is a warning on the same channel, never an error — the node
+// file is durably written either way. Legacy checkout mounts are never
+// auto-committed (unchanged behavior: `warren propose` / `den contribute`
+// package those edits).
 func WriteEditableNode(mount ProjectStatus, n *node.Node, vec []float32, summaryHash, model string) (warning string, err error) {
+	if err := WriteEditableNodeFile(mount, n); err != nil {
+		return "", err
+	}
+	var warnings []string
+	if w := autoCommitEditWrite(mount, n, "write"); w != "" {
+		warnings = append(warnings, w)
+	}
+	if vec != nil {
+		embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
+		if storeErr != nil {
+			warnings = append(warnings, "embedding not updated: "+storeErr.Error())
+			return strings.Join(warnings, "; "), nil
+		}
+		// UpsertChecked, not Upsert: an editable mount writes into a store the
+		// warren owns, and one mixed-model row would poison every future search
+		// of it (F2). A refusal degrades to a warning naming both models — the
+		// node file is already durably written.
+		if upsertErr := embStore.UpsertChecked(n.ID, vec, summaryHash, model); upsertErr != nil {
+			warnings = append(warnings, "embedding not updated: "+upsertErr.Error())
+		}
+		if closeErr := embStore.Close(); closeErr != nil {
+			warnings = append(warnings, "embedding not updated: "+closeErr.Error())
+		}
+	}
+	return strings.Join(warnings, "; "), nil
+}
+
+// WriteEditableNodeFile persists n into an editable warren mount's checkout
+// WITHOUT touching the mount's embeddings.db. It carries the exact same
+// write-policy enforcement as WriteEditableNode (editable-mount check plus
+// the fail-closed manifest re-read below). It exists for flows whose durable
+// artifact is the git-carried markdown alone — den contribute stages node
+// files on an edit branch and the target's embeddings regenerate on consume
+// (reindex/reembed after the PR merges), so upserting into the checked-out
+// tree's live embeddings.db would corrupt the main branch's derived state
+// with edit-branch-only rows.
+func WriteEditableNodeFile(mount ProjectStatus, n *node.Node) error {
 	if !mount.Editable {
-		return "", fmt.Errorf("warren project %q is read-only in this workspace", mount.ProjectID)
+		return fmt.Errorf("warren project %q is read-only in this workspace", mount.ProjectID)
 	}
 	// Author-side write-policy backstop: re-read the manifest at write time
 	// so a stale mount state (editable flag granted before the author marked
@@ -1763,32 +1719,19 @@ func WriteEditableNode(mount ProjectStatus, n *node.Node, vec []float32, summary
 	if mount.WarrenPath != "" {
 		manifest, _, loadErr := LoadManifest(mount.WarrenPath)
 		if loadErr != nil {
-			return "", fmt.Errorf("warren manifest unreadable at %s; refusing write to project %q: %w", mount.WarrenPath, mount.ProjectID, loadErr)
+			return fmt.Errorf("warren manifest unreadable at %s; refusing write to project %q: %w", mount.WarrenPath, mount.ProjectID, loadErr)
 		}
 		for _, project := range manifest.Projects {
 			if project.ProjectID == mount.ProjectID && project.ReadOnly {
-				return "", fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", mount.ProjectID)
+				return fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", mount.ProjectID)
 			}
 		}
 	}
 	store := node.NewStore(mount.Path)
 	if err := store.SaveNode(n); err != nil {
-		return "", fmt.Errorf("save warren node: %w", err)
+		return fmt.Errorf("save warren node: %w", err)
 	}
-	if vec == nil {
-		return "", nil
-	}
-	embStore, storeErr := embedding.NewStore(filepath.Join(mount.Path, ".marmot-data", "embeddings.db"))
-	if storeErr != nil {
-		return "embedding not updated: " + storeErr.Error(), nil
-	}
-	if upsertErr := embStore.Upsert(n.ID, vec, summaryHash, model); upsertErr != nil {
-		warning = "embedding not updated: " + upsertErr.Error()
-	}
-	if closeErr := embStore.Close(); closeErr != nil && warning == "" {
-		warning = "embedding not updated: " + closeErr.Error()
-	}
-	return warning, nil
+	return nil
 }
 
 // Status returns project statuses for one registered Warren.
@@ -1797,77 +1740,7 @@ func Status(workspaceRoot, warrenID string) ([]ProjectStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	entry, ok := state.Warrens[warrenID]
-	if !ok {
-		return nil, fmt.Errorf("warren %q is not registered in this workspace", warrenID)
-	}
-	manifest, _, err := LoadManifest(entry.Path)
-	if err != nil {
-		if entry.Materialized {
-			return materializedStatuses(workspaceMarmotDir(workspaceRoot), warrenID, entry), nil
-		}
-		// The checkout is unreachable (moved, deleted, or unparseable):
-		// degrade to rows built from workspace state instead of erroring
-		// opaquely, so `warren status` can still show what is mounted and
-		// the unmount escape hatch keeps working.
-		fmt.Fprintf(warnWriter, "warning: warren %q manifest unreadable at %s: %v (status degraded to workspace state)\n", warrenID, entry.Path, err)
-		statuses := make([]ProjectStatus, 0, len(entry.ActiveProjects))
-		for _, projectID := range entry.ActiveProjects {
-			statuses = append(statuses, ProjectStatus{
-				WarrenID:   warrenID,
-				WarrenPath: entry.Path,
-				ProjectID:  projectID,
-				Path:       filepath.Join(entry.Path, filepath.FromSlash(defaultProjectPath(projectID))),
-				Registered: false,
-				Active:     true,
-				Editable:   containsName(entry.EditableProjects, projectID),
-				Available:  false,
-			})
-		}
-		return statuses, nil
-	}
-	local := sourceVaultID(workspaceMarmotDir(workspaceRoot))
-	projects := make([]ProjectStatus, 0, len(manifest.Projects))
-	for _, project := range manifest.Projects {
-		sourceDir := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
-		marmotDir := preferredProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, entry, project)
-		meta := loadProjectMetadataWarn(marmotDir, warrenID, project.ProjectID)
-		if meta == nil && marmotDir != sourceDir {
-			meta = loadProjectMetadataWarn(sourceDir, warrenID, project.ProjectID)
-		}
-		vaultID := ""
-		if meta != nil {
-			vaultID = meta.VaultID
-		}
-		selfAlias := local != "" && vaultID == local
-		_, statErr := os.Stat(marmotDir)
-		available := statErr == nil
-		if selfAlias {
-			// Identified project: it is served as the live workspace vault, so
-			// the checkout path would be a lie — report where reads actually go.
-			marmotDir = workspaceMarmotDir(workspaceRoot)
-			available = true
-		}
-		projects = append(projects, ProjectStatus{
-			WarrenID:   warrenID,
-			WarrenPath: entry.Path,
-			ProjectID:  project.ProjectID,
-			Path:       marmotDir,
-			VaultID:    vaultID,
-			Registered: true,
-			Active:     containsName(entry.ActiveProjects, project.ProjectID),
-			// Author-side readonly policy trumps the workspace's editable
-			// flag, so the UI save button and MCP/API rejections follow the
-			// manifest without any client change; a self-alias is never
-			// editable (writes go to the live vault).
-			Editable:     containsName(entry.EditableProjects, project.ProjectID) && !project.ReadOnly && !selfAlias,
-			Materialized: entry.Materialized && dirExists(materializedProjectPath(workspaceMarmotDir(workspaceRoot), warrenID, project.ProjectID)),
-			Available:    available,
-			SelfAlias:    selfAlias,
-		})
-	}
-	sort.Slice(projects, func(i, j int) bool { return projects[i].ProjectID < projects[j].ProjectID })
-	return projects, nil
+	return statusFromState(workspaceMarmotDir(workspaceRoot), warrenID, state)
 }
 
 // ActiveMounts returns active warren project vaults plus identified-local
@@ -2288,6 +2161,17 @@ func normalizeManifest(m *Manifest) {
 		for _, project := range m.Projects {
 			if project.ReadOnly {
 				m.Version = 2
+				break
+			}
+		}
+	}
+	// source_url/source_commit are version-3 fields: bump only when a
+	// project actually carries them, so source-free manifests keep their
+	// loaded version and stay editable by pre-v3 binaries.
+	if m.Version < 3 {
+		for _, project := range m.Projects {
+			if project.SourceURL != "" || project.SourceCommit != "" {
+				m.Version = 3
 				break
 			}
 		}
@@ -3009,4 +2893,306 @@ func preflightProjectMetadata(root, warrenID string, project Project) error {
 	meta.WarrenID = warrenID
 	meta.Aliases = uniqueSorted(append(meta.Aliases, project.Aliases...))
 	return validateProjectMetadata(meta)
+}
+
+// ---------------------------------------------------------------------------
+// Direct-state (marmot-dir-keyed) workspace state API.
+//
+// Classic workspaces keep their warren state at <root>/.marmot/_warren.md and
+// address it by workspace root; direct-state marmot dirs (den identity
+// vaults: they carry _config.md but are not named .marmot) keep it at
+// <marmotDir>/_warren.md — the file warren.ActiveMounts reads. The *FromMarmot
+// entry points below run the exact same flock-held mutation bodies as their
+// workspace-root twins, just keyed by the marmot dir, so the two shapes can
+// never diverge in behavior. For a classic <root>/.marmot dir both address the
+// same file with the same lock.
+// ---------------------------------------------------------------------------
+
+// updateWorkspaceStateFromMarmot mirrors updateWorkspaceState (always-save
+// load→mutate→save under the state flock) for state kept directly at
+// <marmotDir>/_warren.md.
+func updateWorkspaceStateFromMarmot(marmotDir string, fn func(*WorkspaceState) error) (*WorkspaceState, error) {
+	var out *WorkspaceState
+	err := UpdateWorkspaceStateInMarmot(marmotDir, func(state *WorkspaceState) (bool, error) {
+		if err := fn(state); err != nil {
+			return false, err
+		}
+		out = state
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// MountFromMarmot is Mount for direct-state marmot dirs.
+func MountFromMarmot(marmotDir, warrenID string, projects []string, materialized bool) (*WorkspaceState, error) {
+	return updateWorkspaceStateFromMarmot(marmotDir, func(state *WorkspaceState) error {
+		return applyMount(marmotDir, state, warrenID, projects, materialized)
+	})
+}
+
+// SetEditableFromMarmot is SetEditable for direct-state marmot dirs.
+func SetEditableFromMarmot(marmotDir, warrenID, projectID string, editable bool) (*WorkspaceState, error) {
+	return updateWorkspaceStateFromMarmot(marmotDir, func(state *WorkspaceState) error {
+		return applySetEditable(marmotDir, state, warrenID, projectID, editable)
+	})
+}
+
+// UnmountFromMarmot is Unmount for direct-state marmot dirs.
+func UnmountFromMarmot(marmotDir, warrenID string, projects []string) (*WorkspaceState, error) {
+	return updateWorkspaceStateFromMarmot(marmotDir, func(state *WorkspaceState) error {
+		return applyUnmount(marmotDir, state, warrenID, projects)
+	})
+}
+
+// StatusFromMarmot is Status for direct-state marmot dirs.
+func StatusFromMarmot(marmotDir, warrenID string) ([]ProjectStatus, error) {
+	state, _, err := LoadWorkspaceStateFromMarmot(marmotDir)
+	if err != nil {
+		return nil, err
+	}
+	return statusFromState(marmotDir, warrenID, state)
+}
+
+// applyMount is Mount's flock-held mutation body, shared by the
+// workspace-root and direct-state entry points. wsMarmotDir is the vault dir
+// that owns caches, config, and vault-ID claims.
+func applyMount(wsMarmotDir string, state *WorkspaceState, warrenID string, projects []string, materialized bool) error {
+	local := sourceVaultID(wsMarmotDir)
+	entry, ok := state.Warrens[warrenID]
+	if !ok {
+		return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+	}
+	manifest, _, err := LoadManifest(entry.Path)
+	if err != nil {
+		return err
+	}
+	registered := make(map[string]Project, len(manifest.Projects))
+	for _, project := range manifest.Projects {
+		registered[project.ProjectID] = project
+	}
+	claimed := claimedVaultIDs(wsMarmotDir, state)
+	for _, projectID := range projects {
+		if err := ValidateProjectID(projectID); err != nil {
+			return err
+		}
+		project, known := registered[projectID]
+		if !known {
+			return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
+		}
+		// A materialized (burrowed) cache never syncs edits back to the
+		// checkout, so materializing an editable project would silently
+		// strand its future edits in the cache.
+		if materialized && containsName(entry.EditableProjects, projectID) {
+			return fmt.Errorf("project %q in warren %q is editable; a materialized cache never syncs edits back — disable editing first ('marmot warren edit %s --warren %s --off') or use 'marmot warren mount' instead of burrow", projectID, warrenID, projectID, warrenID)
+		}
+		// Vault IDs form one flat routing namespace per workspace: a
+		// duplicate would be resolved last-mount-wins at runtime, silently
+		// answering queries from the wrong project. Refuse at mount time.
+		vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
+		if local != "" && vaultID == local {
+			// Identified project: this project IS the workspace vault.
+			// Identity is derived from vault_id, always on, and stateless —
+			// mounting records nothing (bridges involving it activate
+			// without a mount). It can never be editable or materialized
+			// (a cache/copy would be a stale or split-brained shadow).
+			if materialized {
+				return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; a self-alias serves from the live vault and cannot be materialized — use 'marmot warren mount' instead of burrow", projectID, warrenID, vaultID)
+			}
+			if containsName(entry.EditableProjects, projectID) {
+				return fmt.Errorf("project %q in warren %q is marked editable but has this workspace's own vault ID %q; edit it directly in this workspace — run 'marmot warren edit %s --warren %s --off' first", projectID, warrenID, vaultID, projectID, warrenID)
+			}
+			fmt.Fprintf(warnWriter, "note: project %s/%s IS this workspace (vault ID %q); identity is automatic — bridges involving it activate without a mount\n", warrenID, projectID, vaultID)
+			continue // no state write, no vault-ID claim: identity is derived, not mounted
+		}
+		if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
+			return err
+		}
+		claimed[vaultID] = vaultClaim{WarrenID: warrenID, ProjectID: projectID}
+		entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
+	}
+	if materialized {
+		entry.Materialized = true
+	}
+	state.Warrens[warrenID] = entry
+	return nil
+}
+
+// applySetEditable is SetEditable's flock-held mutation body, shared by the
+// workspace-root and direct-state entry points.
+func applySetEditable(wsMarmotDir string, state *WorkspaceState, warrenID, projectID string, editable bool) error {
+	entry, ok := state.Warrens[warrenID]
+	if !ok {
+		return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+	}
+	if err := ValidateProjectID(projectID); err != nil {
+		return err
+	}
+	manifest, _, err := LoadManifest(entry.Path)
+	if err != nil {
+		return err
+	}
+	var project Project
+	known := false
+	for _, p := range manifest.Projects {
+		if p.ProjectID == projectID {
+			project, known = p, true
+			break
+		}
+	}
+	if !known {
+		return fmt.Errorf("project %q is not registered in Warren %q", projectID, warrenID)
+	}
+	// Author-side write policy (manifest schema v2): the warren owner
+	// marked the project read-only, so no workspace may enable edit.
+	// Disabling (--off) stays allowed regardless.
+	if editable && project.ReadOnly {
+		return fmt.Errorf("warren author marked project %q read-only; edits must go through the warren repository itself", projectID)
+	}
+	// Self-alias (vault_id matches the live local vault): the mount is a
+	// read-through view of the live vault, so editable would split-brain
+	// writes into the warren checkout. Disabling (--off) stays allowed —
+	// it is the legacy-state escape hatch.
+	vaultID := mountVaultID(wsMarmotDir, warrenID, entry, project)
+	local := sourceVaultID(wsMarmotDir)
+	selfAlias := local != "" && vaultID == local
+	if selfAlias && editable {
+		return fmt.Errorf("project %q in warren %q has this workspace's own vault ID %q; it is served as an alias of the live vault — edit nodes directly in this workspace (no @ prefix) instead of enabling warren edit", projectID, warrenID, vaultID)
+	}
+	// Refuse editable on a burrowed project: edits would land in the
+	// materialized cache and never sync back to the checkout, while
+	// `warren propose` tells the user to commit a checkout that never
+	// received them. Materialized is warren-wide, so the per-project
+	// ground truth is the existence of the burrow cache dir. Disabling
+	// (--off) stays allowed regardless.
+	if editable && entry.Materialized {
+		cached := materializedProjectPath(wsMarmotDir, warrenID, projectID)
+		if dirExists(cached) {
+			return fmt.Errorf("project %q in warren %q is materialized (burrowed); a materialized cache never syncs edits back — drop the burrow first ('marmot warren burrow --drop --warren %s %s') before enabling edit", projectID, warrenID, warrenID, projectID)
+		}
+	}
+	// Edit implies mount: when the project is not yet active this is an
+	// auto-mount, so it gets the same vault-ID collision refusal as Mount.
+	// An identified project skips BOTH the collision check and the mount
+	// record: there is nothing to mount (identity is derived from
+	// vault_id), so --off just clears any legacy EditableProjects entry
+	// without re-recording R1-era self state.
+	if !containsName(entry.ActiveProjects, projectID) && !selfAlias {
+		claimed := claimedVaultIDs(wsMarmotDir, state)
+		if err := refuseVaultIDCollision(claimed, vaultID, warrenID, projectID); err != nil {
+			return err
+		}
+	}
+	if !selfAlias {
+		entry.ActiveProjects = addName(entry.ActiveProjects, projectID)
+	}
+	if editable {
+		entry.EditableProjects = addName(entry.EditableProjects, projectID)
+	} else {
+		entry.EditableProjects = removeName(entry.EditableProjects, projectID)
+	}
+	state.Warrens[warrenID] = entry
+	return nil
+}
+
+// applyUnmount is Unmount's flock-held mutation body, shared by the
+// workspace-root and direct-state entry points.
+func applyUnmount(wsMarmotDir string, state *WorkspaceState, warrenID string, projects []string) error {
+	entry, ok := state.Warrens[warrenID]
+	if !ok {
+		return fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+	}
+	for _, project := range projects {
+		if err := ValidateProjectID(project); err != nil {
+			return err
+		}
+		if !containsName(entry.ActiveProjects, project) {
+			if identifiedProject(wsMarmotDir, warrenID, entry, project) {
+				return fmt.Errorf("project %q is not mounted from warren %q in this workspace (identity is derived from vault_id, not a mount — to sever it, re-import the warren copy with a distinct --vault-id)", project, warrenID)
+			}
+			return fmt.Errorf("project %q is not mounted from warren %q in this workspace", project, warrenID)
+		}
+	}
+	entry.ActiveProjects = removeNames(entry.ActiveProjects, projects)
+	entry.EditableProjects = removeNames(entry.EditableProjects, projects)
+	state.Warrens[warrenID] = entry
+	return nil
+}
+
+// statusFromState is Status's row builder, shared by the workspace-root and
+// direct-state entry points.
+func statusFromState(wsMarmotDir, warrenID string, state *WorkspaceState) ([]ProjectStatus, error) {
+	entry, ok := state.Warrens[warrenID]
+	if !ok {
+		return nil, fmt.Errorf("warren %q is not registered in this workspace", warrenID)
+	}
+	manifest, _, err := LoadManifest(entry.Path)
+	if err != nil {
+		if entry.Materialized {
+			return materializedStatuses(wsMarmotDir, warrenID, entry), nil
+		}
+		// The checkout is unreachable (moved, deleted, or unparseable):
+		// degrade to rows built from workspace state instead of erroring
+		// opaquely, so `warren status` can still show what is mounted and
+		// the unmount escape hatch keeps working.
+		fmt.Fprintf(warnWriter, "warning: warren %q manifest unreadable at %s: %v (status degraded to workspace state)\n", warrenID, entry.Path, err)
+		statuses := make([]ProjectStatus, 0, len(entry.ActiveProjects))
+		for _, projectID := range entry.ActiveProjects {
+			statuses = append(statuses, ProjectStatus{
+				WarrenID:   warrenID,
+				WarrenPath: entry.Path,
+				ProjectID:  projectID,
+				Path:       filepath.Join(entry.Path, filepath.FromSlash(defaultProjectPath(projectID))),
+				Registered: false,
+				Active:     true,
+				Editable:   containsName(entry.EditableProjects, projectID),
+				Available:  false,
+			})
+		}
+		return statuses, nil
+	}
+	local := sourceVaultID(wsMarmotDir)
+	projects := make([]ProjectStatus, 0, len(manifest.Projects))
+	for _, project := range manifest.Projects {
+		sourceDir := filepath.Join(entry.Path, filepath.FromSlash(project.Path))
+		marmotDir := preferredProjectPath(wsMarmotDir, warrenID, entry, project)
+		meta := loadProjectMetadataWarn(marmotDir, warrenID, project.ProjectID)
+		if meta == nil && marmotDir != sourceDir {
+			meta = loadProjectMetadataWarn(sourceDir, warrenID, project.ProjectID)
+		}
+		vaultID := ""
+		if meta != nil {
+			vaultID = meta.VaultID
+		}
+		selfAlias := local != "" && vaultID == local
+		_, statErr := os.Stat(marmotDir)
+		available := statErr == nil
+		if selfAlias {
+			// Identified project: it is served as the live workspace vault, so
+			// the checkout path would be a lie — report where reads actually go.
+			marmotDir = wsMarmotDir
+			available = true
+		}
+		projects = append(projects, ProjectStatus{
+			WarrenID:   warrenID,
+			WarrenPath: entry.Path,
+			ProjectID:  project.ProjectID,
+			Path:       marmotDir,
+			VaultID:    vaultID,
+			Registered: true,
+			Active:     containsName(entry.ActiveProjects, project.ProjectID),
+			// Author-side readonly policy trumps the workspace's editable
+			// flag, so the UI save button and MCP/API rejections follow the
+			// manifest without any client change; a self-alias is never
+			// editable (writes go to the live vault).
+			Editable:     containsName(entry.EditableProjects, project.ProjectID) && !project.ReadOnly && !selfAlias,
+			Materialized: entry.Materialized && dirExists(materializedProjectPath(wsMarmotDir, warrenID, project.ProjectID)),
+			Available:    available,
+			SelfAlias:    selfAlias,
+		})
+	}
+	sort.Slice(projects, func(i, j int) bool { return projects[i].ProjectID < projects[j].ProjectID })
+	return projects, nil
 }

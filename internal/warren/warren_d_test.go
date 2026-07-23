@@ -230,7 +230,7 @@ func TestWriteEditableNodeReadOnlyBackstop(t *testing.T) {
 // succeed; every mutating path refuses to save it.
 func TestManifestVersionCeiling(t *testing.T) {
 	warrenRoot := t.TempDir()
-	future := "---\nwarren_id: product-platform\nversion: 3\nprojects:\n  - project_id: project-a\n    path: projects/project-a/.marmot\n---\n"
+	future := "---\nwarren_id: product-platform\nversion: 4\nprojects:\n  - project_id: project-a\n    path: projects/project-a/.marmot\n---\n"
 	if err := os.WriteFile(filepath.Join(warrenRoot, ManifestFileName), []byte(future), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -240,8 +240,8 @@ func TestManifestVersionCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadManifest on newer version must succeed best-effort: %v", err)
 	}
-	if manifest.Version != 3 {
-		t.Fatalf("Version = %d, want 3 preserved", manifest.Version)
+	if manifest.Version != 4 {
+		t.Fatalf("Version = %d, want 4 preserved", manifest.Version)
 	}
 	if !strings.Contains(warnings.String(), "do not edit with this binary") {
 		t.Fatalf("warnings = %q, want newer-version warning", warnings.String())

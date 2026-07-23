@@ -648,3 +648,113 @@ func TestParseNodeMeta(t *testing.T) {
 		t.Errorf("Status = %q, want %q", meta.Status, "active")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Derived-ID tests (id-less frontmatter)
+// ---------------------------------------------------------------------------
+
+// writeIDlessNode writes a hand-authored node file without `id:` frontmatter
+// at the given vault-relative path and returns the absolute file path.
+func writeIDlessNode(t *testing.T, dir, relPath string) string {
+	t.Helper()
+	path := filepath.Join(dir, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\ntype: note\nnamespace: default\nstatus: active\n---\n\nHand-written note without an id.\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestStore_LoadNode_DerivesIDFromPath(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	path := writeIDlessNode(t, dir, "notes/hand written.md")
+
+	n, err := store.LoadNode(path)
+	if err != nil {
+		t.Fatalf("LoadNode: %v", err)
+	}
+	if n.ID != "notes/hand written" {
+		t.Errorf("derived ID = %q, want %q", n.ID, "notes/hand written")
+	}
+
+	// Round trip: LoadNode(NodePath(derivedID)) yields the same ID.
+	again, err := store.LoadNode(store.NodePath(n.ID))
+	if err != nil {
+		t.Fatalf("LoadNode(NodePath(%q)): %v", n.ID, err)
+	}
+	if again.ID != n.ID {
+		t.Errorf("round-trip ID = %q, want %q", again.ID, n.ID)
+	}
+}
+
+func TestStore_LoadNode_ExplicitIDPreserved(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	// File lives at mismatched/location.md but declares id: my/real-id.
+	path := filepath.Join(dir, "mismatched", "location.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nid: my/real-id\ntype: note\nnamespace: default\nstatus: active\n---\n\nBody.\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := store.LoadNode(path)
+	if err != nil {
+		t.Fatalf("LoadNode: %v", err)
+	}
+	if n.ID != "my/real-id" {
+		t.Errorf("ID = %q, want explicit %q kept verbatim", n.ID, "my/real-id")
+	}
+}
+
+func TestStore_ListNodes_DerivesID(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+
+	writeIDlessNode(t, dir, "notes/idless.md")
+	explicit := &Node{ID: "explicit-node", Type: "concept", Namespace: "ns", Status: "active", Summary: "E."}
+	if err := store.SaveNode(explicit); err != nil {
+		t.Fatal(err)
+	}
+
+	metas, err := store.ListNodes()
+	if err != nil {
+		t.Fatalf("ListNodes: %v", err)
+	}
+	ids := make(map[string]bool, len(metas))
+	for _, m := range metas {
+		if m.ID == "" {
+			t.Errorf("ListNodes returned empty ID for %s", m.FilePath)
+		}
+		ids[m.ID] = true
+	}
+	if !ids["notes/idless"] {
+		t.Errorf("ListNodes ids = %v, want derived %q present", ids, "notes/idless")
+	}
+	if !ids["explicit-node"] {
+		t.Errorf("ListNodes ids = %v, want explicit %q present", ids, "explicit-node")
+	}
+
+	// ListActiveNodes sees derived ids too (status: active in frontmatter).
+	active, err := store.ListActiveNodes()
+	if err != nil {
+		t.Fatalf("ListActiveNodes: %v", err)
+	}
+	found := false
+	for _, m := range active {
+		if m.ID == "notes/idless" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("ListActiveNodes missing derived id notes/idless")
+	}
+}

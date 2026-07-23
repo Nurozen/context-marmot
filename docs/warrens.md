@@ -5,10 +5,10 @@ several repositories belong to the same product, platform, or organization and
 agents need cross-project context without cloning every codebase into one
 repository.
 
-> **Dens (shipped P1b/S2):** central dens under `$MARMOT_HOME` coexist with warrens.
+> **Dens:** central dens under `$MARMOT_HOME` coexist with warrens.
 > Use dens for per-project identity vaults and reverse routes; keep warrens for
 > multi-project graph mounts. See [dens.md](./dens.md).
-> (design target; not implemented yet). Everything below is the **shipping** warren model.
+> Everything below is the **shipping** warren model.
 
 Warrens are mounted explicitly. Registered projects stay dormant until activated
 with `marmot warren mount`, so large company graphs do not become queryable by
@@ -52,6 +52,10 @@ marmot warren register product-platform /path/to/product-warren
 # register announces: project "my-project" ... matches this workspace's vault ID
 marmot warren mount --warren product-platform pb
 ```
+
+(For a warren published at a git URL, `marmot warren add <url>` + a
+register-free `mount` replaces the `register` step — see
+[Consume a Warren](#consume-a-warren).)
 
 Identity is automatic: your own project needs **no mount** (mounting it is a
 harmless no-op) — mounting the *other* endpoint is the single deliberate act
@@ -342,6 +346,48 @@ open PRs. Use normal git workflow to review and publish Warren changes.
 
 ## Consume a Warren
 
+### Shared cache (`warren add` / `warren sync`)
+
+The preferred way to consume a warren that lives in a git remote is the
+**shared cache** — one clone per machine instead of one user-managed
+checkout per workspace:
+
+```bash
+marmot warren add https://github.com/acme/product-warren   # or a local path
+marmot warren add <url> --id product-platform              # override the URL-derived id
+marmot warren sync [<id>]                                  # fetch + re-pin (all warrens when no id)
+```
+
+`warren add` clones a bare mirror into `$MARMOT_HOME/warren-cache/<id>.git`,
+records the id → clone-URL mapping in the global registry
+`$MARMOT_HOME/warrens.yml`, and materializes one shared read checkout at
+`$MARMOT_HOME/warren-cache/checkouts/<id>`, pinned to a commit (recorded in
+`checkouts/<id>.pin`). `warren sync` fetches each cached warren and re-pins
+its shared checkout; per-warren failures ride along without aborting the
+loop, and the exit code is non-zero only when *every* warren failed. Both
+verbs speak `--json` (`testdata/contracts/warren_add.v1.json`,
+`warren_sync.v1.json`).
+
+After pinning, both verbs **regenerate project-vault embeddings keyed to the
+pin**: contribute PRs carry markdown only, so a node merged upstream has no
+row in the checkout's `.marmot-data/embeddings.db` until add/sync re-embeds
+it with that vault's own configured embedder (summary-hash checks keep the
+nothing-changed case cheap). The per-warren `reembedded` count is reported in
+the JSON envelopes. The reembed never mixes embedding models: a store that
+already holds rows from a different model is skipped with a warning naming
+both models, and a vault whose configured provider has no API key is skipped
+rather than silently written with mock vectors.
+
+Cache-backed warrens are **register-free**: `warren mount`, `warren status`,
+and `warren list` resolve the id from the cache directly (list marks such
+entries `[cache]`), and `den link --edit` into a cache-backed warren uses a
+dedicated edit worktree instead of any user checkout (see
+[dens.md](./dens.md)). The `warren register` flow below remains fully
+supported for local, user-managed checkouts (register prints a stderr note
+pointing at `warren add`); everything from here down applies to both kinds.
+
+### Registered checkouts
+
 Register a Warren in the current workspace:
 
 ```bash
@@ -507,6 +553,17 @@ is local-only by design: marmot never pulls, merges, rebases, or pushes —
 publishing the branch (`git push -u origin <branch>`) and opening the PR stay
 in your hands, and upstream divergence is resolved through normal git flow at
 that point. A clean project prints `nothing to propose` and exits 0.
+Embeddings DB sidecars under `.marmot-data/` (`embeddings.db` and its
+WAL/SHM files) are derived binary state and are never proposed: they are
+excluded from both the change scan and the commit, so a project whose only
+changes are DB sidecars also reports `nothing to propose`.
+
+For **den** edit links the packaging verb is `marmot den contribute` — it
+commits on `marmot/edit/<den>/…` and reports the checkout plus a ready
+`push_command`, after which `warren propose` sees a clean tree and reports
+`nothing to propose`. Propose remains the path for uncommitted
+editable-mount edits made outside the contribute flow (see
+[dens.md](./dens.md)).
 
 Propose refuses a project *identified* with this workspace (its `vault_id`
 matches yours): your live context never lands in the Warren checkout, so
@@ -617,6 +674,49 @@ Using `readonly` lifts the manifest to schema **version 2**. Marmot binaries
 read manifests newer than they understand best-effort (with a warning) but
 refuse to *edit* them, so an older binary can never silently strip fields it
 does not know.
+
+## Source provenance (manifest v3) and reference resolution
+
+`marmot warren project import` records where a project's vault came from as
+per-project manifest fields — `source_url` (in canonical `host/path` form:
+scheme and user dropped, host lowercased, trailing `.git`/`/` stripped, so
+`git@github.com:x/y.git` ≡ `https://github.com/x/y` → `github.com/x/y`) and
+`source_commit` (the source checkout's HEAD at import time):
+
+```yaml
+projects:
+  - project_id: project-a
+    path: projects/project-a/.marmot
+    source_url: github.com/acme/project-a
+    source_commit: 0123456789abcdef0123456789abcdef01234567
+```
+
+Capture is automatic when the source `.marmot` dir sits inside a git
+checkout (origin remote URL + HEAD commit); `--source-url` /
+`--source-commit` override it explicitly, and a non-git source simply leaves
+the fields off. `marmot warren project add` accepts the same explicit flags
+(no auto-detection — an in-warren path has no external source checkout).
+
+These fields power reference-repo resolution. The diagnostic verb
+
+```bash
+marmot resolve --url <url> [--path <checkout>] [--json]
+```
+
+reports how a reference repo maps onto known knowledge, in resolution order:
+`warren-url` (canonical-URL match against a registered cache-backed warren's
+project `source_url` values), then `checkout-vault` (an in-checkout
+`.marmot` vault at the path), else `none`. It shares the internal resolver
+with den `--ref` handling, so its answer can never disagree with a den
+link's. The `--json` envelope is pinned by
+`testdata/contracts/resolve.v1.json`.
+
+Writing a `source_url`/`source_commit` lifts the manifest to schema
+**version 3**; manifests without source fields keep their loaded version and
+round-trip untouched, so they stay editable by older binaries. The version
+ceiling applies as ever: a pre-v3 marmot binary reads a v3 manifest
+best-effort (with a warning) but refuses to edit it, so it can never
+silently strip the provenance fields.
 
 ## Query behavior
 

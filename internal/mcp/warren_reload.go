@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/nurozen/context-marmot/internal/den"
 	"github.com/nurozen/context-marmot/internal/namespace"
 	"github.com/nurozen/context-marmot/internal/routes"
 	"github.com/nurozen/context-marmot/internal/warren"
@@ -76,6 +78,37 @@ func (e *Engine) ReloadWarrenState() error {
 	return err
 }
 
+// ReloadWarrenAndDenState refreshes warren wiring (routes.yml + _warren.md) AND
+// re-resolves the served den's links and bridges (_den.md, _bridges/), so a
+// live daemon owner or the API refresh endpoints pick up _den.md edits the same
+// way they already pick up _warren.md edits (finding F17). buildEngine wires
+// these same three loaders in this order at startup; every later reload trigger
+// must go through here rather than bare ReloadWarrenState, or _den.md changes
+// would require a serve restart. Each loader runs regardless of the others'
+// outcome (fail-open, matching startup); the joined error is informational.
+//
+// Not called by LoadDenBridges: that already invokes ReloadWarrenState directly
+// to rebuild the registry, so routing this method through it would recurse.
+func (e *Engine) ReloadWarrenAndDenState() error {
+	warrenErr := e.ReloadWarrenState()
+	linksErr := e.LoadDenLinks()
+	bridgesErr := e.LoadDenBridges()
+	return errors.Join(warrenErr, linksErr, bridgesErr)
+}
+
+// DenManifestPath returns the _den.md path governing the served vault — one
+// level up for a den identity vault (…/dens/<id>/vault), or inside the served
+// dir for a links-only den root — or "" when the served dir is not den-shaped.
+// The daemon watcher watches this file so _den.md edits trigger a den-state
+// reload the same way _warren.md edits trigger a warren reload.
+func (e *Engine) DenManifestPath() string {
+	root, ok := denRootFor(e.MarmotDir)
+	if !ok {
+		return ""
+	}
+	return filepath.Join(root, den.ManifestFileName)
+}
+
 // setWarrenBridges replaces the engine's warren runtime bridges and
 // recomposes NSManager.CrossVaultBridges as fileBridges ++ warrenBridges,
 // so repeated reloads never duplicate (buildEngine used to append once at
@@ -94,6 +127,7 @@ func (e *Engine) setWarrenBridges(bridges []*namespace.Bridge, declared bool) {
 	}
 	merged := append([]*namespace.Bridge(nil), e.fileCrossVaultBridges...)
 	merged = append(merged, bridges...)
+	merged = append(merged, e.denBridges...)
 	e.NSManager.CrossVaultBridges = merged
 }
 

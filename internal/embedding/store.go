@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -184,6 +185,68 @@ func (s *Store) storedDimensionLocked() (int, error) {
 	return len(blob) / 4, nil
 }
 
+// ModelMismatchError is returned by UpsertChecked when a write would mix
+// embedding models inside one store. A single mixed-model row poisons every
+// future search of the store (Search/SearchActive reject on checkModel), so
+// writers into vaults they do not own must refuse instead of writing.
+type ModelMismatchError struct {
+	StoredModels []string
+	WriteModel   string
+}
+
+func (e *ModelMismatchError) Error() string {
+	return fmt.Sprintf("embedding model mismatch: store already holds model(s) %s; refusing to write model %q (mixed models break every future search — reembed the store with a single model instead)",
+		strings.Join(e.StoredModels, ", "), e.WriteModel)
+}
+
+// CompatibleModel reports whether writing rows embedded with model into this
+// store is safe: true when the store is empty or every stored row already
+// uses model.
+func (s *Store) CompatibleModel(model string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false, ErrStoreClosed
+	}
+	return s.checkModel(model)
+}
+
+// UpsertChecked is Upsert with the model-poisoning guard: it refuses (with a
+// *ModelMismatchError naming both models) when the store already holds rows
+// embedded with a different model. It is the required upsert for every path
+// that writes into a store it does not exclusively own (warren editable
+// mounts, den promote targets, warren sync reembed).
+func (s *Store) UpsertChecked(nodeID string, embedding []float32, summaryHash string, model string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.readOnly {
+		return errReadOnly("upsert")
+	}
+	if s.closed {
+		return ErrStoreClosed
+	}
+
+	ok, err := s.checkModel(model)
+	if err != nil {
+		return fmt.Errorf("check stored model: %w", err)
+	}
+	if !ok {
+		stored, mErr := s.modelsLocked()
+		if mErr != nil {
+			stored = []string{"<unknown>"}
+		}
+		others := make([]string, 0, len(stored))
+		for _, m := range stored {
+			if m != model {
+				others = append(others, m)
+			}
+		}
+		return &ModelMismatchError{StoredModels: others, WriteModel: model}
+	}
+	return s.upsertLocked(nodeID, embedding, summaryHash, model)
+}
+
 // Upsert inserts or updates the embedding for a node.
 func (s *Store) Upsert(nodeID string, embedding []float32, summaryHash string, model string) error {
 	s.mu.Lock()
@@ -192,7 +255,12 @@ func (s *Store) Upsert(nodeID string, embedding []float32, summaryHash string, m
 	if s.readOnly {
 		return errReadOnly("upsert")
 	}
+	return s.upsertLocked(nodeID, embedding, summaryHash, model)
+}
 
+// upsertLocked is the shared insert/update body (caller must hold mu and have
+// rejected read-only stores).
+func (s *Store) upsertLocked(nodeID string, embedding []float32, summaryHash string, model string) error {
 	if len(embedding) == 0 {
 		return fmt.Errorf("embedding must not be empty")
 	}
@@ -625,6 +693,11 @@ func (s *Store) Models() ([]string, error) {
 	if s.closed {
 		return nil, ErrStoreClosed
 	}
+	return s.modelsLocked()
+}
+
+// modelsLocked returns the distinct stored model names (caller must hold mu).
+func (s *Store) modelsLocked() ([]string, error) {
 	stmt, _, err := s.db.Prepare(`SELECT DISTINCT model FROM embeddings ORDER BY model`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare models: %w", err)

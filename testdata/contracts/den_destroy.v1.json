@@ -10,5 +10,8 @@
     "superseded": 0,
     "noop": 3
   },
-  "contributed": null
+  "contributed": null,
+  "warnings": [
+    "removing edit worktree /warren-cache/edits/acme/task-42 failed: worktree locked (branch marmot/edit/task-42/acme is unaffected)"
+  ]
 }

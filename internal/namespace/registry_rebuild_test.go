@@ -170,27 +170,70 @@ func TestResolveGraphTTL(t *testing.T) {
 		t.Error("graph not reloaded after the TTL expired")
 	}
 
-	// TTL expiry must never close a cached embedding store (carry-over).
+	// F7: TTL expiry drops the cached embedding store so the next resolve
+	// reopens the current DB. After `warren sync` rewrites embeddings.db, a
+	// carried-over handle would read the stale file forever.
 	seedRemoteEmbeddingDB(t, vaultDir)
 	store, err := r.ResolveEmbeddingStore("ttl-vault")
 	if err != nil {
 		t.Fatalf("ResolveEmbeddingStore: %v", err)
 	}
+	emb := embedding.NewMockEmbedder("mock-test")
 	time.Sleep(80 * time.Millisecond)
+	// A TTL reload (via ResolveGraph) drops and closes the cached store.
 	if _, err := r.ResolveGraph("ttl-vault"); err != nil {
 		t.Fatalf("ResolveGraph reload with store cached: %v", err)
 	}
+	// The old handle is closed by the swap-then-close reload; a racing search
+	// on it fails loudly rather than reading a stale DB.
+	vecA, _ := emb.Embed("A concept.")
+	if _, err := store.SearchActive(vecA, 1, emb.Model()); !errors.Is(err, embedding.ErrStoreClosed) {
+		t.Errorf("old store not closed after TTL reload: err = %v", err)
+	}
+
+	// Simulate a re-pinned checkout by adding a row to the on-disk DB, then
+	// re-resolve: the reopened handle must be new and must see the new row.
+	upsertRemoteEmbeddingRow(t, vaultDir, "concept-b", "Another concept.")
 	store2, err := r.ResolveEmbeddingStore("ttl-vault")
 	if err != nil {
 		t.Fatalf("ResolveEmbeddingStore after TTL reload: %v", err)
 	}
-	if store2 != store {
-		t.Error("TTL reload dropped the cached embedding store")
+	if store2 == store {
+		t.Error("TTL reload reused the stale embedding store handle")
+	}
+	vecB, _ := emb.Embed("Another concept.")
+	res, err := store2.SearchActive(vecB, 5, emb.Model())
+	if err != nil {
+		t.Fatalf("reopened store search: %v", err)
+	}
+	foundB := false
+	for _, sr := range res {
+		if sr.NodeID == "concept-b" {
+			foundB = true
+		}
+	}
+	if !foundB {
+		t.Error("reopened store did not see the row added on disk after TTL reload")
+	}
+}
+
+// upsertRemoteEmbeddingRow appends a row to an already-seeded remote
+// embeddings.db (read-write open, then checkpoint-and-close), simulating a
+// `warren sync` that re-pins the checkout with fresh embeddings.
+func upsertRemoteEmbeddingRow(t *testing.T, vaultDir, nodeID, summary string) {
+	t.Helper()
+	dbPath := filepath.Join(vaultDir, ".marmot-data", "embeddings.db")
+	store, err := embedding.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen remote embeddings.db: %v", err)
 	}
 	emb := embedding.NewMockEmbedder("mock-test")
-	vec, _ := emb.Embed("A concept.")
-	if _, err := store2.SearchActive(vec, 1, emb.Model()); err != nil {
-		t.Errorf("cached store unusable after TTL reload: %v", err)
+	vec, _ := emb.Embed(summary)
+	if err := store.Upsert(nodeID, vec, "hash-"+nodeID, emb.Model()); err != nil {
+		t.Fatalf("upsert %s: %v", nodeID, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close after upsert: %v", err)
 	}
 }
 
